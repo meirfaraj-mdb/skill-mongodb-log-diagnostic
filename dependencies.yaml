@@ -1,0 +1,6 @@
+python:
+  executable: python3
+  minimum_version: "3.10"
+  packages: []
+
+executables: {}

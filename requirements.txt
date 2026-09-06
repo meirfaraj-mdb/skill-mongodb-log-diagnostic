@@ -1,0 +1,3 @@
+# Python 3.10+ is required.
+# No third-party Python packages or external executables are required;
+# the extractor and bundled analyzers use the standard library.
