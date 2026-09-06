@@ -240,6 +240,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("inputs", nargs="+", type=Path)
     p.add_argument("--output", required=True, type=Path)
     p.add_argument("--slow-ms", type=float, default=1000.0)
+    p.add_argument("--occurrence-details", dest="include_occurrence_details", action="store_true", default=True, help="Include detailed error and slow-operation occurrence timestamps (default)")
+    p.add_argument("--no-occurrence-details", dest="include_occurrence_details", action="store_false", help="Omit detailed error and slow-operation occurrence timestamps")
     p.add_argument("--bucket-minutes", type=int, default=60)
     p.add_argument("--ftdc", action="append", type=Path, help="Optional FTDC file or diagnostic.data directory; repeat for multiple paths")
     p.add_argument("--ftdc-window-minutes", type=int, default=5, help="Correlation window around find issues")
@@ -566,7 +568,59 @@ def bucket(timestamp: str | None, minutes: int) -> str | None:
         return None
 
 
-def summarize(events: list[dict[str, Any]], slow_ms: float, bucket_minutes: int) -> dict[str, Any]:
+def _compact_timestamp(timestamp: Any) -> tuple[str, str] | None:
+    """Return UTC YYYYMMDD and HH:MM:SS.cc keys for occurrence maps."""
+    if not timestamp:
+        return None
+    try:
+        value = dt.datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone(dt.timezone.utc)
+    centiseconds = value.microsecond // 10000
+    return value.strftime("%Y%m%d"), f"{value:%H:%M:%S}.{centiseconds:02d}"
+
+
+def _occurrence_timestamps(events: list[dict[str, Any]]) -> dict[str, list[dict[str, dict[str, int]]]]:
+    """Bucket error occurrences by UTC date and hour/minute with counts."""
+    grouped: dict[str, collections.Counter[str]] = collections.defaultdict(collections.Counter)
+    for event in events:
+        compact = _compact_timestamp(event.get("timestamp"))
+        if compact:
+            time_value = compact[1]
+            minute = f"{time_value[:2]}H{time_value[3:5]}"
+            grouped[compact[0]][minute] += 1
+    return {
+        date: [{minute: {"occur": count}} for minute, count in sorted(minutes.items())]
+        for date, minutes in sorted(grouped.items())
+    }
+
+
+def _slow_message_after_plan_summary(message: Any) -> str | None:
+    text = redact_message(str(message or ""))
+    index = text.find("planSummary")
+    return text[index:] if index >= 0 else None
+
+
+def _slow_occurrences(events: list[dict[str, Any]]) -> dict[str, list[dict[str, dict[str, Any]]]]:
+    grouped: dict[str, list[dict[str, dict[str, Any]]]] = collections.defaultdict(list)
+    for event in events:
+        compact = _compact_timestamp(event.get("timestamp"))
+        if not compact:
+            continue
+        stats: dict[str, Any] = {}
+        for key in ("duration_ms", "docs_examined", "keys_examined", "n_returned", "has_sort_stage", "namespace"):
+            if event.get(key) is not None:
+                stats[key] = event.get(key)
+        slow_message = _slow_message_after_plan_summary(event.get("message"))
+        if slow_message:
+            stats["slow_message"] = slow_message
+        grouped[compact[0]].append({compact[1]: stats})
+    return {date: values for date, values in sorted(grouped.items())}
+
+
+def summarize(events: list[dict[str, Any]], slow_ms: float, bucket_minutes: int, include_occurrence_details: bool = True) -> dict[str, Any]:
     severity = collections.Counter(e.get("severity") for e in events if e.get("severity"))
     components = collections.Counter(e.get("component") for e in events if e.get("component"))
     messages = collections.Counter(e["fingerprint"] for e in events if e.get("fingerprint"))
@@ -600,7 +654,7 @@ def summarize(events: list[dict[str, Any]], slow_ms: float, bucket_minutes: int)
     for error_fingerprint, group in sorted(error_groups.items(), key=lambda item: (-len(item[1]), str(item[0]))):
         timestamps = [e["timestamp"] for e in group if e.get("timestamp")]
         sample = group[0]
-        error_group_summaries.append({
+        error_summary = {
             "fingerprint": error_fingerprint,
             "count": len(group),
             "severities": sorted({str(e["severity"]) for e in group if e.get("severity")}),
@@ -608,12 +662,14 @@ def summarize(events: list[dict[str, Any]], slow_ms: float, bucket_minutes: int)
             "last_seen": max(timestamps) if timestamps else None,
             "components": sorted({str(e["component"]) for e in group if e.get("component")}),
             "event_ids": sorted({str(e["event_id"]) for e in group if e.get("event_id")})[:20],
-            "occurrence_timestamps": sorted(timestamps)[:50],
             "message_samples": list(dict.fromkeys(redact_message(str(e.get("message") or "")) for e in group))[:5],
             "sample_message": redact_message(str(sample.get("message") or "")),
             "sample_log": sample_log(sample),
             "operation_details": repeated_operation_details(group),
-        })
+        }
+        if include_occurrence_details:
+            error_summary["occurrence_timestamps"] = _occurrence_timestamps(group)
+        error_group_summaries.append(error_summary)
     repeated_errors = [group for group in error_group_summaries if group["count"] >= 2]
     by_category: dict[str, dict[str, Any]] = {}
     for category in categories:
@@ -629,7 +685,7 @@ def summarize(events: list[dict[str, Any]], slow_ms: float, bucket_minutes: int)
         }
     slow_groups: dict[tuple[Any, ...], list[dict[str, Any]]] = collections.defaultdict(list)
     for e in slow:
-        key = (e.get("namespace"), e.get("plan_summary"), e.get("query_hash"), e.get("app_name"))
+        key = (e.get("namespace"), e.get("plan_summary"), e.get("query_hash"))
         slow_groups[key].append(e)
     slow_summary = []
     sorted_slow_groups = sorted(
@@ -638,7 +694,9 @@ def summarize(events: list[dict[str, Any]], slow_ms: float, bucket_minutes: int)
     )
     for key, group in sorted_slow_groups[:50]:
         durations = []
-        examined = []
+        keys_examined = []
+        docs_examined = []
+        examined_for_ratio = []
         returned = []
         timestamps = []
         sample_query_shape = None
@@ -647,8 +705,12 @@ def summarize(events: list[dict[str, Any]], slow_ms: float, bucket_minutes: int)
         for event in group:
             if event.get("duration_ms") is not None:
                 durations.append(float(event["duration_ms"]))
+            if event.get("keys_examined") is not None:
+                keys_examined.append(float(event["keys_examined"]))
             if event.get("docs_examined") is not None:
-                examined.append(float(event["docs_examined"]))
+                docs_examined.append(float(event["docs_examined"]))
+            if event.get("keys_examined") is not None or event.get("docs_examined") is not None:
+                examined_for_ratio.append(max(float(event.get("keys_examined") or 0), float(event.get("docs_examined") or 0)))
             if event.get("n_returned") is not None:
                 returned.append(float(event["n_returned"]))
             if event.get("timestamp"):
@@ -660,21 +722,26 @@ def summarize(events: list[dict[str, Any]], slow_ms: float, bucket_minutes: int)
             if event.get("has_sort_stage"):
                 sort_stage_count += 1
         ratios = []
-        for duration_value, returned_value in zip(examined, returned):
+        for duration_value, returned_value in zip(examined_for_ratio, returned):
             ratios.append(duration_value / max(returned_value, 1))
-        slow_summary.append({
-            "namespace": key[0], "plan_summary": key[1], "query_hash": key[2], "app_name": key[3],
+        slow_summary_item = {
+            "namespace": key[0], "plan_summary": key[1], "query_hash": key[2],
+            "app_names": sorted({str(e["app_name"]) for e in group if e.get("app_name")}),
             "count": len(group), "duration_ms": {"min": min(durations), "median": median(durations), "max": max(durations), "avg": round(mean(durations), 2)},
-            "docs_examined": {"max": max(examined), "avg": round(mean(examined), 2)} if examined else None,
-            "n_returned": {"max": max(returned), "avg": round(mean(returned), 2)} if returned else None,
+            "keys_examined": {"min": min(keys_examined), "median": median(keys_examined), "max": max(keys_examined), "avg": round(mean(keys_examined), 2)} if keys_examined else None,
+            "docs_examined": {"min": min(docs_examined), "median": median(docs_examined), "max": max(docs_examined), "avg": round(mean(docs_examined), 2)} if docs_examined else None,
+            "n_returned": {"min": min(returned), "median": median(returned), "max": max(returned), "avg": round(mean(returned), 2)} if returned else None,
             "examined_returned_ratio_max": round(max(ratios, default=0), 2),
             "collscan_count": collscan_count,
             "sort_stage_count": sort_stage_count,
             "first_seen": min(timestamps) if timestamps else None,
             "last_seen": max(timestamps) if timestamps else None,
             "sample_query_shape": sample_query_shape,
-            "sample_message": redact_message(str(group[0].get("message") or "")),
-        })
+            "sample_message": _slow_message_after_plan_summary(group[0].get("message")),
+        }
+        if include_occurrence_details:
+            slow_summary_item["occurrence_timestamps"] = _slow_occurrences(group)
+        slow_summary.append(slow_summary_item)
     candidates = []
     for category, info in by_category.items():
         candidates.append({"category": category, **info})
@@ -693,6 +760,34 @@ def summarize(events: list[dict[str, Any]], slow_ms: float, bucket_minutes: int)
         "issue_candidates": candidates,
         "trends": [{"bucket_start": b, **dict(sorted(counts.items()))} for b, counts in sorted(buckets.items())],
     }
+
+
+def _formatted_extraction_json(payload: dict[str, Any]) -> str:
+    """Pretty-print extraction while keeping occurrence sections on one line."""
+    markers: dict[str, str] = {}
+    counter = 0
+
+    def replace(value: Any) -> Any:
+        nonlocal counter
+        if isinstance(value, dict):
+            result = {}
+            for key, child in value.items():
+                if key == "occurrence_timestamps":
+                    token = f"__COMPACT_OCCURRENCE_{counter}__"
+                    counter += 1
+                    markers[token] = json.dumps(child, separators=(",", ":"), sort_keys=True)
+                    result[key] = token
+                else:
+                    result[key] = replace(child)
+            return result
+        if isinstance(value, list):
+            return [replace(child) for child in value]
+        return value
+
+    rendered = json.dumps(replace(payload), indent=2, sort_keys=True)
+    for token, compact in markers.items():
+        rendered = rendered.replace(json.dumps(token), compact)
+    return rendered
 
 
 def main() -> int:
@@ -734,18 +829,18 @@ def main() -> int:
     ftdc = analyze_ftdc(args.ftdc, events, args.ftdc_window_minutes, args.debug_ftdc_json)
     print(f"Loading FTDC: {time.perf_counter() - step_started:.3f}s", file=sys.stderr)
     step_started = time.perf_counter()
-    extracted = summarize(events, args.slow_ms, args.bucket_minutes)
+    extracted = summarize(events, args.slow_ms, args.bucket_minutes, args.include_occurrence_details)
     print(f"Summarizing records: {time.perf_counter() - step_started:.3f}s", file=sys.stderr)
     extracted["ftdc"] = ftdc
     payload = {
         "schema_version": VERSION,
-        "metadata": {"parser_version": VERSION, "slow_threshold_ms": args.slow_ms, "bucket_minutes": args.bucket_minutes, "time_range": {"first": min(times) if times else None, "last": max(times) if times else None}, "input_files": [p.name for p in args.inputs]},
+        "metadata":{"parser_version": VERSION, "slow_threshold_ms": args.slow_ms, "include_occurrence_details": args.include_occurrence_details, "bucket_minutes": args.bucket_minutes, "time_range": {"first": min(times) if times else None, "last": max(times) if times else None}, "input_files": [p.name for p in args.inputs]},
         "driverCompatibility": driver_compatibility,
         "quality": parsed_quality,
         **extracted,
     }
     step_started = time.perf_counter()
-    (args.output / "extraction.json").write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    (args.output / "extraction.json").write_text(_formatted_extraction_json(payload), encoding="utf-8")
     handoff = ["# MongoDB Log Extraction Handoff", "", f"Records parsed: {quality['parsed_records']}", f"Records skipped: {quality['skipped_records']}", f"Incompatible drivers: {driver_compatibility['count']}", f"Time range: {payload['metadata']['time_range']['first']} to {payload['metadata']['time_range']['last']}", "", "Use extraction.json for the diagnostic report. Do not inspect the raw log directly."]
     (args.output / "handoff.md").write_text("\n".join(handoff) + "\n", encoding="utf-8")
     print(f"Writing output: {time.perf_counter() - step_started:.3f}s", file=sys.stderr)

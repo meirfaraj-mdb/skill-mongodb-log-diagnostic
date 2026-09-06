@@ -145,6 +145,7 @@ def extract_driver_compatibility(events: Iterable[dict[str, Any]]) -> dict[str, 
     grouped: OrderedDict[tuple[str, str | None, str], dict[str, Any]] = OrderedDict()
     excluded_internal = 0
     observed_application = 0
+    compatible_versions: dict[str, set[str]] = {}
     for event in events:
         raw = event.get("raw_line")
         if not isinstance(raw, str):
@@ -164,14 +165,17 @@ def extract_driver_compatibility(events: Iterable[dict[str, Any]]) -> dict[str, 
                 continue
             observed_application += 1
             driver_version = _major_minor(raw_version)
+            normalized_version = _version_part(raw_version)
             minimum_version = (DRIVER_MATRIX.get(mongodb_version or "", {}).get(driver_name) or [None])[0]
             actual_key = _version_key(raw_version)
             minimum_key = _version_key(minimum_version)
             # Hatchet compares against the first manifest entry as a minimum;
             # unknown driver families are not asserted incompatible.
-            if not mongodb_version or not driver_version or minimum_key is None or actual_key is None or actual_key >= minimum_key:
+            if not mongodb_version or not driver_version or not normalized_version or minimum_key is None or actual_key is None:
                 continue
-            normalized_version = _version_part(raw_version)
+            if actual_key >= minimum_key:
+                compatible_versions.setdefault(driver_name, set()).add(normalized_version)
+                continue
             key = (driver_name, normalized_version, mongodb_version)
             item = grouped.setdefault(key, {"driver_name": driver_name, "driver_version": normalized_version, "mongodb_version": mongodb_version, "ips": [], "ip_count": 0, "occurrences": 0, "first_seen": event.get("timestamp"), "last_seen": event.get("timestamp"), "source_files": [], "reason": f"MongoDB {mongodb_version} requires driver {driver_name} major.minor >= {minimum_version}; observed {driver_version}"})
             item["occurrences"] += 1
@@ -190,4 +194,4 @@ def extract_driver_compatibility(events: Iterable[dict[str, Any]]) -> dict[str, 
     ips_by_version: dict[str, dict[str, list[str]]] = {}
     for item in grouped.values():
         ips_by_version.setdefault(item["driver_name"], {})[item["driver_version"] or "unknown"] = item["ips"]
-    return {"status": "found" if grouped else ("unknown_server_version" if not mongodb_version else "none_detected"), "mongodb_version": mongodb_version, "incompatible_drivers": list(grouped.values()), "count": len(grouped), "distinct_incompatible_ips": ips_by_version, "distinct_incompatible_ip_count": len({ip for item in grouped.values() for ip in item["ips"]}), "observed_application_connections": observed_application, "excluded_internal_connections": excluded_internal, "compatibility_manifest_versions": sorted(DRIVER_MATRIX)}
+    return {"status": "found" if grouped else ("unknown_server_version" if not mongodb_version else "none_detected"), "mongodb_version": mongodb_version, "incompatible_drivers": list(grouped.values()), "count": len(grouped), "distinct_incompatible_ips": ips_by_version, "distinct_incompatible_ip_count": len({ip for item in grouped.values() for ip in item["ips"]}), "distinct_compatible_drivers": {name: sorted(versions) for name, versions in sorted(compatible_versions.items())}, "observed_application_connections": observed_application, "excluded_internal_connections": excluded_internal, "compatibility_manifest_versions": sorted(DRIVER_MATRIX)}
