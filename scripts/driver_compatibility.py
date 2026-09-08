@@ -103,18 +103,15 @@ def _driver_records(obj: dict[str, Any]) -> list[tuple[str, str | None]]:
             parts = raw_name.split("|") if raw_name else []
             name = _canonical_driver(parts[0] if parts else raw_name)
             version = _version_part(value.get("version") or value.get("driverVersion")) or (_version_part(parts[1]) if len(parts) > 1 else None)
-            if name:
-                found.append((name, version))
+            if name: found.append((name, version))
         elif value is not None:
             parts = _text(value).split("|")
             name = _canonical_driver(parts[0])
             version = _version_part(mapping.get("version") or mapping.get("driverVersion")) or (_version_part(parts[1]) if len(parts) > 1 else None)
-            if name:
-                found.append((name, version))
+            if name: found.append((name, version))
         else:
             name = _canonical_driver(mapping.get("driverName") or mapping.get("clientDriverName"))
-            if name:
-                found.append((name, _version_part(mapping.get("driverVersion") or mapping.get("clientDriverVersion") or mapping.get("version"))))
+            if name: found.append((name, _version_part(mapping.get("driverVersion") or mapping.get("clientDriverVersion") or mapping.get("version"))))
     unique: OrderedDict[tuple[str, str | None], None] = OrderedDict()
     for item in found:
         unique[item] = None

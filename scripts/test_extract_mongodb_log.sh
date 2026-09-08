@@ -43,11 +43,8 @@ if (( ${#LOG_FILES[@]} == 0 )); then
 fi
 
 mkdir -p "$OUTPUTS_DIR"
-for path in "$OUTPUTS_DIR"/* "$OUTPUTS_DIR"/.[!.]* "$OUTPUTS_DIR"/..?*; do
-  if [ -e "$path" ] || [ -L "$path" ]; then
-    rm -rf "$path"
-  fi
-done
+rm -f "$OUTPUTS_DIR"/extraction*.json 2>/dev/null || true
+rm -f "$OUTPUTS_DIR"/hand*.md 2>/dev/null || true
 
 DIAGNOSTIC_DUMP="${DIAGNOSTIC_DUMP:-0}"
 RUN_TEMP_DIR=""
@@ -104,8 +101,12 @@ else
   echo "FTDC source selected: none"
 fi
 
-[ -s "$OUTPUTS_DIR/extraction.json" ] || {
-  echo "Missing or empty extraction.json" >&2
+[ -s "$OUTPUTS_DIR/extractionOccurence.json" ] || {
+  echo "Missing or empty extractionOccurence.json" >&2
+  exit 1
+}
+[ -s "$OUTPUTS_DIR/extractionshort.json" ] || {
+  echo "Missing or empty extractionshort.json" >&2
   exit 1
 }
 [ -s "$OUTPUTS_DIR/handoff.md" ] || {
@@ -113,7 +114,8 @@ fi
   exit 1
 }
 if [ "$DIAGNOSTIC_DUMP" = "1" ]; then
-  cp "$OUTPUTS_DIR/extraction.json" "$RUN_TEMP_DIR/extraction.json"
+  cp "$OUTPUTS_DIR/extractionOccurence.json" "$RUN_TEMP_DIR/extractionOccurence.json"
+  cp "$OUTPUTS_DIR/extractionshort.json" "$RUN_TEMP_DIR/extractionshort.json"
   cp "$OUTPUTS_DIR/handoff.md" "$RUN_TEMP_DIR/handoff.md"
 fi
 
@@ -122,15 +124,27 @@ if [ "$DIAGNOSTIC_DUMP" = "1" ]; then
 else
   VALIDATION_SINK=(cat)
 fi
-python3 - "$OUTPUTS_DIR/extraction.json" "${#LOG_FILES[@]}" <<'PYVALIDATE' | "${VALIDATION_SINK[@]}"
+python3 - "$OUTPUTS_DIR/extractionOccurence.json" "$OUTPUTS_DIR/extractionshort.json" "${#LOG_FILES[@]}" <<'PYVALIDATE' | "${VALIDATION_SINK[@]}"
 import json
 import sys
 import time
 
 validation_started = time.perf_counter()
-path, expected_count = sys.argv[1], int(sys.argv[2])
+path, short_path, expected_count = sys.argv[1], sys.argv[2], int(sys.argv[3])
 with open(path, encoding="utf-8") as handle:
     payload = json.load(handle)
+with open(short_path, encoding="utf-8") as handle:
+    short_payload = json.load(handle)
+
+def contains_occurrences(value):
+    if isinstance(value, dict):
+        return "occurrence_timestamps" in value or any(contains_occurrences(child) for child in value.values())
+    if isinstance(value, list):
+        return any(contains_occurrences(child) for child in value)
+    return False
+
+if contains_occurrences(short_payload):
+    raise SystemExit("Short extraction unexpectedly contains occurrence_timestamps")
 
 ftdc = payload.get("ftdc", {})
 print(f"FTDC status: {ftdc.get('status', 'not_provided')}")
@@ -162,6 +176,6 @@ for group in payload.get("repeated_errors", []):
             raise SystemExit(f"Repeated-error group is missing {field}")
     if not group["sample_log"].get("raw_line"):
         raise SystemExit("Repeated-error group sample_log.raw_line is missing")
-print(f"Validated {actual_count} input files -> {path}")
+print(f"Validated {actual_count} input files -> {path} and {short_path}")
 print(f"Validation: {time.perf_counter() - validation_started:.3f}s")
 PYVALIDATE
