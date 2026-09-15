@@ -86,12 +86,33 @@ def _walk(value: Any) -> Iterable[dict[str, Any]]:
 
 def _remote(obj: dict[str, Any]) -> str | None:
     for mapping in _walk(obj):
-        for key in ("remote", "ip", "clientIp", "clientIP", "address"):
+        for key in ("remote", "client", "ip", "clientIp", "clientIP", "address"):
             if key in mapping:
                 found = _ip(mapping[key])
                 if found:
                     return found
     return None
+
+
+def _connection_details(obj: dict[str, Any]) -> tuple[str | None, set[str], set[str]]:
+    """Return remote IP, application names, and platform names from client metadata."""
+    remote = _remote(obj)
+    application_names: set[str] = set()
+    platforms: set[str] = set()
+    for mapping in _walk(obj):
+        application = mapping.get("application")
+        if isinstance(application, dict):
+            name = _text(application.get("name"))
+            if name:
+                application_names.add(name)
+        for key in ("appName", "applicationName"):
+            name = _text(mapping.get(key))
+            if name:
+                application_names.add(name)
+        platform = _text(mapping.get("platform"))
+        if platform:
+            platforms.add(platform)
+    return remote, application_names, platforms
 
 
 def _driver_records(obj: dict[str, Any]) -> list[tuple[str, str | None]]:
@@ -136,59 +157,125 @@ def _server_version(events: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def extract_driver_compatibility(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    events = list(events)
-    mongodb_version = _server_version(events)
-    grouped: OrderedDict[tuple[str, str | None, str], dict[str, Any]] = OrderedDict()
-    excluded_internal = 0
-    observed_application = 0
-    compatible_versions: dict[str, set[str]] = {}
-    for event in events:
-        raw = event.get("raw_line")
-        if not isinstance(raw, str):
-            continue
-        try:
-            obj = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        remote = _remote(obj)
-        for driver_name, raw_version in _driver_records(obj):
-            # ODM/framework labels such as Mongoose are suffix metadata after
-            # the base Node.js driver, not separate application drivers.
+class DriverCompatibilityAccumulator:
+    """Stream driver observations without retaining raw log events."""
+
+    def __init__(self) -> None:
+        self.mongodb_version: str | None = None
+        self.observations: dict[tuple[str, str | None], dict[str, Any]] = {}
+        self.excluded_internal = 0
+        self.observed_application = 0
+        self.driver_log_count = 0
+
+    def add(self, event: dict[str, Any]) -> None:
+        obj = event.get("_driver_obj")
+        if not isinstance(obj, dict):
+            raw = event.get("raw_line")
+            if not isinstance(raw, str):
+                return
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                return
+        if not self.mongodb_version:
+            for mapping in _walk(obj):
+                build = mapping.get("buildInfo")
+                if isinstance(build, dict):
+                    self.mongodb_version = _major_minor(build.get("version"))
+                    if self.mongodb_version:
+                        break
+        remote, application_names, platforms = _connection_details(obj)
+        driver_records = _driver_records(obj)
+        if driver_records:
+            # Count source log records, not incompatible version groups.
+            self.driver_log_count += 1
+        for driver_name, raw_version in driver_records:
             if _is_wrapper(driver_name):
                 continue
             if _is_internal(driver_name, raw_version):
-                excluded_internal += 1
+                self.excluded_internal += 1
                 continue
-            observed_application += 1
-            driver_version = _major_minor(raw_version)
-            normalized_version = _version_part(raw_version)
-            minimum_version = (DRIVER_MATRIX.get(mongodb_version or "", {}).get(driver_name) or [None])[0]
-            actual_key = _version_key(raw_version)
-            minimum_key = _version_key(minimum_version)
-            # Hatchet compares against the first manifest entry as a minimum;
-            # unknown driver families are not asserted incompatible.
-            if not mongodb_version or not driver_version or not normalized_version or minimum_key is None or actual_key is None:
-                continue
-            if actual_key >= minimum_key:
-                compatible_versions.setdefault(driver_name, set()).add(normalized_version)
-                continue
-            key = (driver_name, normalized_version, mongodb_version)
-            item = grouped.setdefault(key, {"driver_name": driver_name, "driver_version": normalized_version, "mongodb_version": mongodb_version, "ips": [], "ip_count": 0, "occurrences": 0, "first_seen": event.get("timestamp"), "last_seen": event.get("timestamp"), "source_files": [], "reason": f"MongoDB {mongodb_version} requires driver {driver_name} major.minor >= {minimum_version}; observed {driver_version}"})
+            self.observed_application += 1
+            key = (driver_name, _version_part(raw_version))
+            item = self.observations.setdefault(key, {
+                "occurrences": 0,
+                "ips": set(),
+                "application_names": set(),
+                "platforms": set(),
+                "first_seen": event.get("timestamp"),
+                "last_seen": event.get("timestamp"),
+                "source_files": set(),
+            })
             item["occurrences"] += 1
-            if remote and remote not in item["ips"]:
-                item["ips"].append(remote)
-                item["ips"].sort()
-                item["ip_count"] = len(item["ips"])
+            if remote:
+                item["ips"].add(remote)
+            item["application_names"].update(application_names)
+            item["platforms"].update(platforms)
             timestamp = event.get("timestamp")
             if timestamp and (not item["first_seen"] or timestamp < item["first_seen"]):
                 item["first_seen"] = timestamp
             if timestamp and (not item["last_seen"] or timestamp > item["last_seen"]):
                 item["last_seen"] = timestamp
             source = _text(event.get("source_file"))
-            if source and source not in item["source_files"]:
-                item["source_files"].append(source)
-    ips_by_version: dict[str, dict[str, list[str]]] = {}
-    for item in grouped.values():
-        ips_by_version.setdefault(item["driver_name"], {})[item["driver_version"] or "unknown"] = item["ips"]
-    return {"status": "found" if grouped else ("unknown_server_version" if not mongodb_version else "none_detected"), "mongodb_version": mongodb_version, "incompatible_drivers": list(grouped.values()), "count": len(grouped), "distinct_incompatible_ips": ips_by_version, "distinct_incompatible_ip_count": len({ip for item in grouped.values() for ip in item["ips"]}), "distinct_compatible_drivers": {name: sorted(versions) for name, versions in sorted(compatible_versions.items())}, "observed_application_connections": observed_application, "excluded_internal_connections": excluded_internal, "compatibility_manifest_versions": sorted(DRIVER_MATRIX)}
+            if source:
+                item["source_files"].add(source)
+
+    def finish(self) -> dict[str, Any]:
+        grouped: OrderedDict[tuple[str, str | None, str], dict[str, Any]] = OrderedDict()
+        compatible_versions: dict[str, dict[str, dict[str, set[str]]]] = {}
+        for (driver_name, normalized_version), observation in sorted(self.observations.items(), key=lambda item: (item[0][0], str(item[0][1]))):
+            driver_version = _major_minor(normalized_version)
+            minimum_version = (DRIVER_MATRIX.get(self.mongodb_version or "", {}).get(driver_name) or [None])[0]
+            actual_key = _version_key(normalized_version)
+            minimum_key = _version_key(minimum_version)
+            if not self.mongodb_version or not driver_version or not normalized_version or minimum_key is None or actual_key is None:
+                continue
+            metadata = {
+                "distinctIps": sorted(observation["ips"]),
+                "distinctAppNames": sorted(observation["application_names"]),
+                "distinctPlatforms": sorted(observation["platforms"]),
+            }
+            if actual_key >= minimum_key:
+                compatible_versions.setdefault(driver_name, {})[normalized_version] = metadata
+                continue
+            key = (driver_name, normalized_version, self.mongodb_version)
+            grouped[key] = {
+                "driver_name": driver_name,
+                "driver_version": normalized_version,
+                "mongodb_version": self.mongodb_version,
+                "ips": metadata["distinctIps"],
+                "ip_count": len(metadata["distinctIps"]),
+                **metadata,
+                "occurrences": observation["occurrences"],
+                "first_seen": observation["first_seen"],
+                "last_seen": observation["last_seen"],
+                "source_files": sorted(observation["source_files"]),
+                "reason": f"MongoDB {self.mongodb_version} requires driver {driver_name} major.minor >= {minimum_version}; observed {driver_version}",
+            }
+        ips_by_version: dict[str, dict[str, list[str]]] = {}
+        for item in grouped.values():
+            ips_by_version.setdefault(item["driver_name"], {})[item["driver_version"] or "unknown"] = item["ips"]
+        return {
+            "status": "found" if grouped else ("unknown_server_version" if not self.mongodb_version else "none_detected"),
+            "mongodb_version": self.mongodb_version,
+            "incompatible_drivers": list(grouped.values()),
+            "count": self.driver_log_count,
+            "driver_log_count": self.driver_log_count,
+            "incompatible_count": len(grouped),
+            "distinct_incompatible_ips": ips_by_version,
+            "distinct_incompatible_ip_count": len({ip for item in grouped.values() for ip in item["ips"]}),
+            "distinct_compatible_drivers": {
+                name: {version: details for version, details in sorted(versions.items())}
+                for name, versions in sorted(compatible_versions.items())
+            },
+            "observed_application_connections": self.observed_application,
+            "excluded_internal_connections": self.excluded_internal,
+            "compatibility_manifest_versions": sorted(DRIVER_MATRIX),
+        }
+
+
+def extract_driver_compatibility(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    accumulator = DriverCompatibilityAccumulator()
+    for event in events:
+        accumulator.add(event)
+    return accumulator.finish()

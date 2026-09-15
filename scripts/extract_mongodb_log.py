@@ -17,11 +17,11 @@ from typing import Any, Iterable
 
 try:
     from ftdc_decoder import decode_ftdc_bytes, emit_source_debug
-    from driver_compatibility import extract_driver_compatibility
+    from driver_compatibility import DriverCompatibilityAccumulator, extract_driver_compatibility
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from ftdc_decoder import decode_ftdc_bytes, emit_source_debug
-    from driver_compatibility import extract_driver_compatibility
+    from driver_compatibility import DriverCompatibilityAccumulator, extract_driver_compatibility
 
 VERSION = "1.3"
 LEGACY_RE = re.compile(
@@ -109,8 +109,8 @@ def _epoch(timestamp: str | None) -> float | None:
         return None
 
 
-def analyze_ftdc(paths: list[Path] | None, events: list[dict[str, Any]], window_minutes: int, debug_source_json: bool = False) -> dict[str, Any]:
-    log_timestamps = sorted(str(event["timestamp"]) for event in events if event.get("timestamp"))
+def analyze_ftdc(paths: list[Path] | None, event_window: Iterable[dict[str, Any]], window_minutes: int, debug_source_json: bool = False) -> dict[str, Any]:
+    log_timestamps = sorted(str(event["timestamp"]) for event in event_window if event.get("timestamp"))
     log_epochs = [_epoch(timestamp) for timestamp in log_timestamps]
     log_epochs = [value for value in log_epochs if value is not None]
     log_time_range = {
@@ -188,7 +188,7 @@ def analyze_ftdc(paths: list[Path] | None, events: list[dict[str, Any]], window_
             contention_windows.append({"timestamp": sample["timestamp"], "signal_count": len(active), "signals": dict(list(sorted(active.items()))[:30])})
 
     find_events = [
-        event for event in events
+        event for event in event_window
         if str(event.get("operation_name") or "").lower() == "find"
         and (event.get("duration_ms") is not None or category_for(event) == "inefficient_query")
     ]
@@ -499,12 +499,18 @@ def parse_line(line: str) -> tuple[dict[str, Any] | None, str | None]:
             "keys_examined": scalar(attr.get("keysExamined")),
             "docs_examined": scalar(attr.get("docsExamined")),
             "n_returned": scalar(attr.get("nreturned")),
+            "n_batches": scalar(attr.get("nBatches")),
+            "cursor_id": scalar(attr.get("cursorid")),
+            "plan_cache_shape_hash": scalar(attr.get("planCacheShapeHash")),
+            "plan_cache_key": scalar(attr.get("planCacheKey")),
+            "query_framework": scalar(attr.get("queryFramework")),
             "plan_summary": scalar(attr.get("planSummary")),
             "query_hash": scalar(attr.get("queryHash") or attr.get("queryShapeHash")),
             "has_sort_stage": bool(attr.get("hasSortStage", False)),
             "queue_time_us": scalar(attr.get("queues", {}).get("execution", {}).get("totalTimeQueuedMicros")) if isinstance(attr.get("queues"), dict) else None,
             "app_name": scalar(attr.get("appName")),
-            "query_shape": query_shape(attr.get("command")) if isinstance(attr.get("command"), dict) else None,
+            "query_shape": query_shape(attr.get("originatingCommand") if isinstance(attr.get("originatingCommand"), dict) else attr.get("command")) if isinstance(attr.get("originatingCommand") if isinstance(attr.get("originatingCommand"), dict) else attr.get("command"), dict) else None,
+            "is_change_stream": _contains_change_stream(attr.get("command")) or _contains_change_stream(attr.get("originatingCommand")),
             "operation_name": scalar(attr.get("commandName") or attr.get("operation") or attr.get("op")) or (command_names[0] if command_names else inferred.get("operation_name")),
             "error_code": scalar(attr.get("code")) or inferred.get("error_code"),
             "error_code_name": scalar(attr.get("codeName")) or inferred.get("error_code_name"),
@@ -512,6 +518,7 @@ def parse_line(line: str) -> tuple[dict[str, Any] | None, str | None]:
             "index_names": [str(item.get("name")) for item in index_entries if isinstance(item, dict) and item.get("name")][:20],
             "duplicate_key_fields": inferred.get("duplicate_key_fields", []),
             "raw_line": text,
+            "_driver_obj": obj,
         }
         return event, None
     except json.JSONDecodeError:
@@ -548,6 +555,12 @@ def parse_line(line: str) -> tuple[dict[str, Any] | None, str | None]:
             "keys_examined": None,
             "docs_examined": None,
             "n_returned": None,
+            "n_batches": None,
+            "cursor_id": None,
+            "plan_cache_shape_hash": None,
+            "plan_cache_key": None,
+            "query_framework": None,
+            "is_change_stream": False,
             "plan_summary": None,
             "query_hash": None,
             "has_sort_stage": False,
@@ -564,6 +577,24 @@ def parse_line(line: str) -> tuple[dict[str, Any] | None, str | None]:
         }
         return event, None
 
+
+
+def _contains_change_stream(value: Any) -> bool:
+    if isinstance(value, dict):
+        if "$changeStream" in value:
+            return True
+        return any(_contains_change_stream(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_change_stream(child) for child in value)
+    return False
+
+
+def is_slow_operation(event: dict[str, Any], slow_ms: float) -> bool:
+    message = str(event.get("message") or "").strip().lower()
+    # MongoDB explicitly labels these records even when duration is below the configured threshold.
+    explicitly_slow = message == "slow query" or message.startswith("slow query ")
+    duration = event.get("duration_ms")
+    return explicitly_slow or (duration is not None and float(duration) >= slow_ms)
 
 
 def category_for(event: dict[str, Any]) -> str | None:
@@ -610,236 +641,258 @@ def _compact_timestamp(timestamp: Any) -> tuple[str, str] | None:
     return value.strftime("%Y%m%d"), f"{value:%H:%M:%S}.{centiseconds:02d}"
 
 
-def _occurrence_timestamps(events: list[dict[str, Any]]) -> dict[str, list[dict[str, dict[str, int]]]]:
-    """Bucket error occurrences by UTC date and hour/minute with counts."""
-    grouped: dict[str, collections.Counter[str]] = collections.defaultdict(collections.Counter)
-    for event in events:
-        compact = _compact_timestamp(event.get("timestamp"))
-        if compact:
-            time_value = compact[1]
-            minute = f"{time_value[:2]}H{time_value[3:5]}"
-            grouped[compact[0]][minute] += 1
-    return {
-        date: [{minute: {"occur": count}} for minute, count in sorted(minutes.items())]
-        for date, minutes in sorted(grouped.items())
-    }
-
-
 def _slow_message_after_plan_summary(message: Any) -> str | None:
     text = redact_message(str(message or ""))
     index = text.find("planSummary")
     return text[index:] if index >= 0 else None
 
 
-def _slow_occurrences(events: list[dict[str, Any]]) -> dict[str, list[dict[str, dict[str, Any]]]]:
-    grouped: dict[str, list[dict[str, dict[str, Any]]]] = collections.defaultdict(list)
-    for event in events:
-        compact = _compact_timestamp(event.get("timestamp"))
-        if not compact:
-            continue
-        stats: dict[str, Any] = {}
-        slow_detail_fields = (
-            ("duration_ms", "duration_ms"), ("working_millis", "workingMillis"),
-            ("duration_millis", "durationMillis"), ("cpu_nanos", "cpuNanos"),
-            ("storage", "storage"),
-            ("wait_for_write_concern_duration_millis", "waitForWriteConcernDurationMillis"),
-            ("reslen", "reslen"), ("num_yields", "numYields"),
-            ("total_oplog_slot_duration_micros", "totalOplogSlotDurationMicros"),
-            ("ninserted", "ninserted"), ("keys_inserted", "keysInserted"),
-            ("n_matched", "nMatched"), ("n_modified", "nModified"),
-            ("n_upserted", "nUpserted"), ("keys_deleted", "keysDeleted"),
-            ("ordered", "ordered"), ("docs_examined", "docs_examined"),
-            ("keys_examined", "keys_examined"), ("n_returned", "n_returned"),
-            ("has_sort_stage", "has_sort_stage"), ("namespace", "namespace"),
-        )
-        for source_key, output_key in slow_detail_fields:
-            if event.get(source_key) is not None:
-                stats[output_key] = event.get(source_key)
-        slow_message = _slow_message_after_plan_summary(event.get("message"))
-        if slow_message:
-            stats["slow_message"] = slow_message
-        grouped[compact[0]].append({compact[1]: stats})
-    return {date: values for date, values in sorted(grouped.items())}
+def _bounded_add(values: list[Any], value: Any, limit: int = 2048) -> None:
+    if value is not None and len(values) < limit:
+        values.append(value)
 
 
-def summarize(events: list[dict[str, Any]], slow_ms: float, bucket_minutes: int) -> dict[str, Any]:
-    severity = collections.Counter(e.get("severity") for e in events if e.get("severity"))
-    components = collections.Counter(e.get("component") for e in events if e.get("component"))
-    messages = collections.Counter(e["fingerprint"] for e in events if e.get("fingerprint"))
-    categories = collections.Counter()
-    buckets: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
-    slow = []
-    for event in events:
-        duration = event.get("duration_ms")
-        is_slow = duration is not None and float(duration) >= slow_ms
+def _add_stat(state: dict[str, Any], name: str, value: Any) -> None:
+    if value is None or isinstance(value, bool):
+        return
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return
+    item = state.setdefault(name, {"values": [], "count": 0, "total": 0.0, "min": number, "max": number})
+    item["count"] += 1
+    item["total"] += number
+    item["min"] = min(item["min"], number)
+    item["max"] = max(item["max"], number)
+    _bounded_add(item["values"], number)
+
+
+def _render_stat(item: dict[str, Any] | None) -> dict[str, float] | None:
+    if not item or not item.get("count"):
+        return None
+    values = item["values"]
+    return {"min": item["min"], "median": median(values) if values else item["total"] / item["count"], "max": item["max"], "avg": round(item["total"] / item["count"], 2)}
+
+
+def _slow_occurrence(event: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
+    compact = _compact_timestamp(event.get("timestamp"))
+    if not compact:
+        return None
+    fields = (
+        ("duration_ms", "duration_ms"), ("working_millis", "workingMillis"), ("duration_millis", "durationMillis"),
+        ("cpu_nanos", "cpuNanos"), ("storage", "storage"), ("wait_for_write_concern_duration_millis", "waitForWriteConcernDurationMillis"),
+        ("reslen", "reslen"), ("num_yields", "numYields"), ("total_oplog_slot_duration_micros", "totalOplogSlotDurationMicros"),
+        ("ninserted", "ninserted"), ("keys_inserted", "keysInserted"), ("n_matched", "nMatched"), ("n_modified", "nModified"),
+        ("n_upserted", "nUpserted"), ("keys_deleted", "keysDeleted"), ("ordered", "ordered"), ("docs_examined", "docs_examined"),
+        ("keys_examined", "keys_examined"), ("n_returned", "n_returned"), ("n_batches", "nBatches"), ("cursor_id", "cursorid"), ("plan_cache_shape_hash", "planCacheShapeHash"), ("plan_cache_key", "planCacheKey"), ("query_framework", "queryFramework"), ("has_sort_stage", "has_sort_stage"), ("namespace", "namespace"),
+    )
+    detail = {dest: event[src] for src, dest in fields if event.get(src) is not None}
+    slow_message = _slow_message_after_plan_summary(event.get("message"))
+    if slow_message:
+        detail["slow_message"] = slow_message
+    return compact[0], compact[1], detail
+
+
+class StreamingSummary:
+    """Bounded, one-pass summary state; raw events are never retained."""
+    MAX_GROUPS = 10000
+    MAX_OCCURRENCES_PER_GROUP = 2000
+
+    def __init__(self, slow_ms: float, bucket_minutes: int) -> None:
+        self.slow_ms = slow_ms
+        self.bucket_minutes = bucket_minutes
+        self.severity = collections.Counter()
+        self.components = collections.Counter()
+        self.messages = collections.Counter()
+        self.categories = collections.Counter()
+        self.category_details: dict[str, dict[str, Any]] = {}
+        self.buckets: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+        self.error_groups: dict[str, dict[str, Any]] = {}
+        self.slow_groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self.slow_global = {"count": 0, "collscan_count": 0, "change_stream_count": 0, "stats": {}}
+        self.first_timestamp = None
+        self.last_timestamp = None
+        self.parsed_records = 0
+        self.error_events = 0
+        self.find_events: list[dict[str, Any]] = []
+
+    @staticmethod
+    def _limited_set(state: set[str], value: Any, limit: int = 100) -> None:
+        if value is not None and len(state) < limit:
+            state.add(str(value))
+
+    def _error_state(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        key = str(event.get("fingerprint") or "unknown")
+        state = self.error_groups.get(key)
+        if state is None:
+            if len(self.error_groups) >= self.MAX_GROUPS:
+                return None
+            state = self.error_groups[key] = {
+                "fingerprint": key, "count": 0, "severities": set(), "components": set(), "event_ids": set(),
+                "message_samples": [], "sample_message": redact_message(str(event.get("message") or "")),
+                "sample_log": sample_log(event), "first_seen": None, "last_seen": None,
+                "occurrences": collections.defaultdict(collections.Counter), "operation": {},
+            }
+        state["count"] += 1
+        self._limited_set(state["severities"], event.get("severity"))
+        self._limited_set(state["components"], event.get("component"))
+        self._limited_set(state["event_ids"], event.get("event_id"), 20)
+        message = redact_message(str(event.get("message") or ""))
+        if message not in state["message_samples"] and len(state["message_samples"]) < 5:
+            state["message_samples"].append(message)
+        timestamp = event.get("timestamp")
+        if timestamp and (state["first_seen"] is None or timestamp < state["first_seen"]): state["first_seen"] = timestamp
+        if timestamp and (state["last_seen"] is None or timestamp > state["last_seen"]): state["last_seen"] = timestamp
+        compact = _compact_timestamp(timestamp)
+        if compact: state["occurrences"][compact[0]][compact[1][:2] + "H" + compact[1][3:5]] += 1
+        operation = state["operation"]
+        for key, value in (("namespaces", event.get("namespace")), ("operations", event.get("operation_name")), ("query_hashes", event.get("query_hash")), ("error_codes", event.get("error_code")), ("error_code_names", event.get("error_code_name")), ("index_names", event.get("index_name")), ("plan_summaries", event.get("plan_summary")), ("app_names", event.get("app_name"))):
+            if value is not None:
+                operation.setdefault(key, set())
+                self._limited_set(operation[key], value)
+        for key, value in (("query_shapes", event.get("query_shape")), ("duplicate_key_fields", event.get("duplicate_key_fields"))):
+            if value is not None:
+                operation.setdefault(key, [])
+                if isinstance(value, list):
+                    for item in value[:5]:
+                        if item not in operation[key] and len(operation[key]) < 5: operation[key].append(item)
+                elif value not in operation[key] and len(operation[key]) < 5: operation[key].append(value)
+        for key, value in (("duration_ms", event.get("duration_ms")), ("workingMillis", event.get("working_millis")), ("durationMillis", event.get("duration_millis")), ("cpuNanos", event.get("cpu_nanos")), ("keys_examined", event.get("keys_examined")), ("docs_examined", event.get("docs_examined")), ("n_returned", event.get("n_returned"))):
+            _add_stat(operation, key, value)
+        return state
+
+    def add(self, event: dict[str, Any]) -> None:
+        self.parsed_records += 1
+        timestamp = event.get("timestamp")
+        if timestamp and (self.first_timestamp is None or timestamp < self.first_timestamp): self.first_timestamp = timestamp
+        if timestamp and (self.last_timestamp is None or timestamp > self.last_timestamp): self.last_timestamp = timestamp
+        severity = event.get("severity")
+        component = event.get("component")
+        if severity: self.severity[str(severity)] += 1
+        if component: self.components[str(component)] += 1
+        fp = event.get("fingerprint")
+        if fp:
+            self.messages[str(fp)] += 1
+            if len(self.messages) > 5000: self.messages = collections.Counter(dict(self.messages.most_common(2500)))
+        error = is_error_event(event)
+        if error:
+            self.error_events += 1
+            self._error_state(event)
         category = category_for(event)
         if category:
-            categories[category] += 1
-        b = bucket(event.get("timestamp"), bucket_minutes)
+            self.categories[category] += 1
+            detail = self.category_details.setdefault(category, {"count": 0, "first_seen": None, "last_seen": None, "components": set(), "namespaces": set(), "fingerprints": collections.Counter()})
+            detail["count"] += 1
+            if timestamp and (detail["first_seen"] is None or timestamp < detail["first_seen"]): detail["first_seen"] = timestamp
+            if timestamp and (detail["last_seen"] is None or timestamp > detail["last_seen"]): detail["last_seen"] = timestamp
+            self._limited_set(detail["components"], component)
+            self._limited_set(detail["namespaces"], event.get("namespace"), 20)
+            if fp: detail["fingerprints"][str(fp)] += 1
+        duration = event.get("duration_ms")
+        slow = is_slow_operation(event, self.slow_ms)
+        b = bucket(timestamp, self.bucket_minutes)
         if b:
-            if is_error_event(event):
-                buckets[b]["errors"] += 1
-            if event.get("severity") == "W":
-                buckets[b]["warnings"] += 1
-            if is_slow:
-                buckets[b]["slow_operations"] += 1
-            if category:
-                buckets[b][category] += 1
-        if is_slow:
-            slow.append(event)
-    top_messages = [{"fingerprint": k, "count": v} for k, v in messages.most_common(20)]
-    error_groups: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
-    for event in events:
-        if is_error_event(event):
-            error_groups[event["fingerprint"]].append(event)
-    error_group_summaries = []
-    for error_fingerprint, group in sorted(error_groups.items(), key=lambda item: (-len(item[1]), str(item[0]))):
-        timestamps = [e["timestamp"] for e in group if e.get("timestamp")]
-        sample = group[0]
-        error_summary = {
-            "fingerprint": error_fingerprint,
-            "count": len(group),
-            "severities": sorted({str(e["severity"]) for e in group if e.get("severity")}),
-            "first_seen": min(timestamps, default=None),
-            "last_seen": max(timestamps, default=None),
-            "components": sorted({str(e["component"]) for e in group if e.get("component")}),
-            "event_ids": sorted({str(e["event_id"]) for e in group if e.get("event_id")})[:20],
-            "message_samples": list(dict.fromkeys(redact_message(str(e.get("message") or "")) for e in group))[:5],
-            "sample_message": redact_message(str(sample.get("message") or "")),
-            "sample_log": sample_log(sample),
-            "operation_details": repeated_operation_details(group),
-        }
-        error_summary["occurrence_timestamps"] = _occurrence_timestamps(group)
-        error_group_summaries.append(error_summary)
-    repeated_errors = [group for group in error_group_summaries if group["count"] >= 2]
-    by_category: dict[str, dict[str, Any]] = {}
-    for category in categories:
-        matching = [e for e in events if category_for(e) == category]
-        timestamps = [e["timestamp"] for e in matching if e.get("timestamp")]
-        by_category[category] = {
-            "count": len(matching),
-            "first_seen": min(timestamps, default=None),
-            "last_seen": max(timestamps, default=None),
-            "components": sorted({str(e["component"]) for e in matching if e.get("component")}),
-            "namespaces": sorted({str(e["namespace"]) for e in matching if e.get("namespace")})[:20],
-            "fingerprints": collections.Counter(e["fingerprint"] for e in matching).most_common(10),
-        }
-    slow_groups: dict[tuple[Any, ...], list[dict[str, Any]]] = collections.defaultdict(list)
-    for e in slow:
-        key = (e.get("namespace"), e.get("plan_summary"), e.get("query_hash"))
-        slow_groups[key].append(e)
-    slow_summary = []
-    sorted_slow_groups = sorted(
-        slow_groups.items(),
-        key=lambda item: (-len(item[1]), tuple("" if value is None else str(value) for value in item[0])),
-    )
-    for key, group in sorted_slow_groups[:50]:
-        durations = []
-        cpu_nanos = []
-        keys_examined = []
-        docs_examined = []
-        examined_for_ratio = []
-        returned = []
-        timestamps = []
-        sample_query_shape = None
-        collscan_count = 0
-        sort_stage_count = 0
-        for event in group:
-            if event.get("duration_ms") is not None:
-                durations.append(float(event["duration_ms"]))
-            if event.get("cpu_nanos") is not None:
-                cpu_nanos.append(float(event["cpu_nanos"]))
-            if event.get("keys_examined") is not None:
-                keys_examined.append(float(event["keys_examined"]))
-            if event.get("docs_examined") is not None:
-                docs_examined.append(float(event["docs_examined"]))
-            if event.get("keys_examined") is not None or event.get("docs_examined") is not None:
-                examined_for_ratio.append(max(float(event.get("keys_examined") or 0), float(event.get("docs_examined") or 0)))
-            if event.get("n_returned") is not None:
-                returned.append(float(event["n_returned"]))
-            if event.get("timestamp"):
-                timestamps.append(event["timestamp"])
-            if sample_query_shape is None and event.get("query_shape") is not None:
-                sample_query_shape = event.get("query_shape")
-            if "COLLSCAN" in str(event.get("plan_summary") or "").upper():
-                collscan_count += 1
-            if event.get("has_sort_stage"):
-                sort_stage_count += 1
-        ratios = []
-        for duration_value, returned_value in zip(examined_for_ratio, returned):
-            ratios.append(duration_value / max(returned_value, 1))
-        slow_summary_item = {
-            "namespace": key[0], "plan_summary": key[1], "query_hash": key[2],
-            "app_names": sorted({str(e["app_name"]) for e in group if e.get("app_name")}),
-            "count": len(group), "duration_ms": {"min": min(durations), "median": median(durations), "max": max(durations), "avg": round(mean(durations), 2)},
-            "cpuNanos": {"min": min(cpu_nanos), "median": median(cpu_nanos), "max": max(cpu_nanos), "avg": round(mean(cpu_nanos), 2), "total": sum(cpu_nanos)} if cpu_nanos else None,
-            "keys_examined": {"min": min(keys_examined), "median": median(keys_examined), "max": max(keys_examined), "avg": round(mean(keys_examined), 2)} if keys_examined else None,
-            "docs_examined": {"min": min(docs_examined), "median": median(docs_examined), "max": max(docs_examined), "avg": round(mean(docs_examined), 2)} if docs_examined else None,
-            "n_returned": {"min": min(returned), "median": median(returned), "max": max(returned), "avg": round(mean(returned), 2)} if returned else None,
-            "examined_returned_ratio_max": round(max(ratios, default=0), 2),
-            "collscan_count": collscan_count,
-            "sort_stage_count": sort_stage_count,
-            "first_seen": min(timestamps, default=None),
-            "last_seen": max(timestamps, default=None),
-            "sample_query_shape": sample_query_shape,
-            "sample_message": _slow_message_after_plan_summary(group[0].get("message")),
-        }
-        slow_summary_item["occurrence_timestamps"] = _slow_occurrences(group)
-        slow_summary.append(slow_summary_item)
-    candidates = []
-    for category, info in by_category.items():
-        candidates.append({"category": category, **info})
-    for repeated_error in repeated_errors:
-        candidates.append({"category": "repeated_error", **repeated_error})
-    return {
-        "summary": {"severity_counts": dict(severity), "component_counts": dict(components), "category_counts": dict(categories), "top_message_fingerprints": top_messages, "repeated_error_groups": len(repeated_errors), "repeated_error_events": sum(item["count"] for item in repeated_errors)},
-        "error_scan": {
-            "total_error_events": sum(group["count"] for group in error_group_summaries),
-            "unique_error_groups": len(error_group_summaries),
-            "repeated_error_groups": len(repeated_errors),
-            "groups": error_group_summaries,
-        },
-        "repeated_errors": repeated_errors,
-        "slow_operations": slow_summary,
-        "issue_candidates": candidates,
-        "trends": [{"bucket_start": b, **dict(sorted(counts.items()))} for b, counts in sorted(buckets.items())],
-    }
+            if error: self.buckets[b]["errors"] += 1
+            if severity == "W": self.buckets[b]["warnings"] += 1
+            if slow: self.buckets[b]["slow_operations"] += 1
+            if category: self.buckets[b][category] += 1
+        if "find" in str(event.get("operation_name") or "").lower() and len(self.find_events) < 200:
+            self.find_events.append({"timestamp": timestamp, "message": event.get("message"), "severity": severity, "component": component})
+        if not slow: return
+        self.slow_global["count"] += 1
+        if "COLLSCAN" in str(event.get("plan_summary") or "").upper(): self.slow_global["collscan_count"] += 1
+        if event.get("is_change_stream"): self.slow_global["change_stream_count"] += 1
+        _add_stat(self.slow_global["stats"], "duration_ms", event.get("duration_ms"))
+        _add_stat(self.slow_global["stats"], "cpuNanos", event.get("cpu_nanos"))
+        key = (event.get("namespace"), event.get("plan_summary"), event.get("query_hash"))
+        state = self.slow_groups.get(key)
+        if state is None:
+            if len(self.slow_groups) >= self.MAX_GROUPS: return
+            state = self.slow_groups[key] = {"namespace": key[0], "plan_summary": key[1], "query_hash": key[2], "count": 0, "app_names": set(), "stats": {}, "first_seen": None, "last_seen": None, "sample_query_shape": event.get("query_shape"), "sample_message": _slow_message_after_plan_summary(event.get("message")), "collscan_count": 0, "sort_stage_count": 0, "ratio_max": 0.0, "occurrences": collections.defaultdict(list)}
+        state["count"] += 1
+        self._limited_set(state["app_names"], event.get("app_name"))
+        for name, value in (("duration_ms", event.get("duration_ms")), ("cpuNanos", event.get("cpu_nanos")), ("keys_examined", event.get("keys_examined")), ("docs_examined", event.get("docs_examined")), ("n_returned", event.get("n_returned"))): _add_stat(state["stats"], name, value)
+        if "COLLSCAN" in str(event.get("plan_summary") or "").upper(): state["collscan_count"] += 1
+        if event.get("has_sort_stage"): state["sort_stage_count"] += 1
+        examined = max(float(event.get("keys_examined") or 0), float(event.get("docs_examined") or 0))
+        returned = float(event.get("n_returned") or 0)
+        if returned or examined: state["ratio_max"] = max(state["ratio_max"], examined / max(returned, 1))
+        if timestamp and (state["first_seen"] is None or timestamp < state["first_seen"]): state["first_seen"] = timestamp
+        if timestamp and (state["last_seen"] is None or timestamp > state["last_seen"]): state["last_seen"] = timestamp
+        occurrence = _slow_occurrence(event)
+        if occurrence and sum(len(items) for items in state["occurrences"].values()) < self.MAX_OCCURRENCES_PER_GROUP:
+            state["occurrences"][occurrence[0]].append({occurrence[1]: occurrence[2]})
+
+    def _operation_details(self, operation: dict[str, Any]) -> dict[str, Any] | None:
+        if not operation: return None
+        result = {}
+        for key, value in operation.items():
+            if key in {"namespaces", "operations", "query_hashes", "error_codes", "error_code_names", "index_names", "app_names"}:
+                result[key] = sorted(value)
+            elif isinstance(value, dict) and "count" in value:
+                result[key] = _render_stat(value)
+            else:
+                result[key] = value
+        return result or None
+
+    def _error_output(self, state: dict[str, Any]) -> dict[str, Any]:
+        occurrences = {date: [{minute: {"occur": count}} for minute, count in sorted(values.items())] for date, values in sorted(state["occurrences"].items())}
+        return {"fingerprint": state["fingerprint"], "count": state["count"], "severities": sorted(state["severities"]), "first_seen": state["first_seen"], "last_seen": state["last_seen"], "components": sorted(state["components"]), "event_ids": sorted(state["event_ids"])[:20], "message_samples": state["message_samples"], "sample_message": state["sample_message"], "sample_log": state["sample_log"], "operation_details": self._operation_details(state["operation"]), "occurrence_timestamps": occurrences}
+
+    def finish(self) -> dict[str, Any]:
+        errors = [self._error_output(state) for state in self.error_groups.values()]
+        errors.sort(key=lambda item: (-item["count"], item["fingerprint"]))
+        repeated = [item for item in errors if item["count"] >= 2]
+        slow_output = []
+        for state in sorted(self.slow_groups.values(), key=lambda item: (-item["count"], str(item["namespace"]), str(item["plan_summary"])))[:50]:
+            stats = {name: _render_stat(value) for name, value in state["stats"].items()}
+            item = {"namespace": state["namespace"], "plan_summary": state["plan_summary"], "query_hash": state["query_hash"], "app_names": sorted(state["app_names"]), "count": state["count"], "duration_ms": stats.get("duration_ms"), "cpuNanos": ({**stats["cpuNanos"], "total": state["stats"]["cpuNanos"]["total"]} if stats.get("cpuNanos") else None), "keys_examined": stats.get("keys_examined"), "docs_examined": stats.get("docs_examined"), "n_returned": stats.get("n_returned"), "collscan_count": state["collscan_count"], "sort_stage_count": state["sort_stage_count"], "examined_returned_ratio_max": round(state["ratio_max"], 2), "first_seen": state["first_seen"], "last_seen": state["last_seen"], "sample_query_shape": state["sample_query_shape"], "sample_message": state["sample_message"], "occurrence_timestamps": {date: values for date, values in sorted(state["occurrences"].items())}}
+            slow_output.append(item)
+        by_category = {}
+        for category, detail in self.category_details.items():
+            by_category[category] = {"count": detail["count"], "first_seen": detail["first_seen"], "last_seen": detail["last_seen"], "components": sorted(detail["components"]), "namespaces": sorted(detail["namespaces"])[:20], "fingerprints": detail["fingerprints"].most_common(10)}
+        candidates = [{"category": category, **data} for category, data in by_category.items()] + [{"category": "repeated_error", **item} for item in repeated]
+        global_stats = {"count": self.slow_global["count"], "collscan_count": self.slow_global["collscan_count"], "change_stream_count": self.slow_global["change_stream_count"]}
+        for name, value in self.slow_global["stats"].items():
+            rendered = _render_stat(value)
+            if rendered:
+                rendered["total"] = value["total"]
+            global_stats[name] = rendered
+        return {"summary": {"severity_counts": dict(self.severity), "component_counts": dict(self.components), "category_counts": dict(self.categories), "top_message_fingerprints": [{"fingerprint": key, "count": count} for key, count in self.messages.most_common(20)], "repeated_error_groups": len(repeated), "repeated_error_events": sum(item["count"] for item in repeated)}, "error_scan": {"total_error_events": self.error_events, "unique_error_groups": len(errors), "repeated_error_groups": len(repeated), "groups": errors}, "repeated_errors": repeated, "slow": {"operations": slow_output, "global_stats": global_stats}, "slow_operations": slow_output, "issue_candidates": candidates, "trends": [{"bucket_start": key, **dict(sorted(value.items()))} for key, value in sorted(self.buckets.items())]}
+
+
+def summarize(stream: Iterable[dict[str, Any]], slow_ms: float, bucket_minutes: int) -> dict[str, Any]:
+    """Compatibility wrapper for callers that already provide an iterable."""
+    analyzer = StreamingSummary(slow_ms, bucket_minutes)
+    for event in stream: analyzer.add(event)
+    return analyzer.finish()
 
 
 def _without_occurrence_details(value: Any) -> Any:
-    """Return a JSON-safe copy with occurrence timestamp sections removed."""
-    if isinstance(value, dict):
-        return {key: _without_occurrence_details(child) for key, child in value.items() if key != "occurrence_timestamps"}
-    if isinstance(value, list):
-        return [_without_occurrence_details(child) for child in value]
+    if isinstance(value, dict): return {key: _without_occurrence_details(child) for key, child in value.items() if key != "occurrence_timestamps"}
+    if isinstance(value, list): return [_without_occurrence_details(child) for child in value]
     return value
 
 
 def _formatted_extraction_json(payload: dict[str, Any]) -> str:
-    """Pretty-print extraction while keeping occurrence sections on one line."""
+    def _json_default(value: Any) -> Any:
+        if isinstance(value, set): return sorted(value)
+        raise TypeError(f"unsupported JSON value: {type(value).__name__}")
     markers: dict[str, str] = {}
     counter = 0
-
     def replace(value: Any) -> Any:
         nonlocal counter
         if isinstance(value, dict):
             result = {}
             for key, child in value.items():
                 if key in {"occurrence_timestamps", "sample_query_shape"}:
-                    token = f"__COMPACT_JSON_{counter}__"
-                    counter += 1
-                    markers[token] = json.dumps(child, separators=(",", ":"), sort_keys=True)
-                    result[key] = token
-                else:
-                    result[key] = replace(child)
+                    token = f"__COMPACT_JSON_{counter}__"; counter += 1; markers[token] = json.dumps(child, separators=(",", ":"), sort_keys=True, default=_json_default); result[key] = token
+                else: result[key] = replace(child)
             return result
-        if isinstance(value, list):
-            return [replace(child) for child in value]
+        if isinstance(value, list): return [replace(child) for child in value]
         return value
-
-    rendered = json.dumps(replace(payload), indent=2, sort_keys=True)
-    for token, compact in markers.items():
-        rendered = rendered.replace(json.dumps(token), compact)
+    rendered = json.dumps(replace(payload), indent=2, sort_keys=True, default=_json_default)
+    for token, compact in markers.items(): rendered = rendered.replace(json.dumps(token), compact)
     return rendered
 
 
@@ -849,10 +902,11 @@ def main() -> int:
     args.output.mkdir(parents=True, exist_ok=True)
     missing = [str(p) for p in args.inputs if not p.exists()]
     if missing:
-        print("Missing input: " + ", ".join(missing), file=sys.stderr)
-        return 2
-    events: list[dict[str, Any]] = []
-    quality = {"input_files": len(args.inputs), "lines_seen": 0, "parsed_records": 0, "skipped_records": 0, "skip_reasons": collections.Counter()}
+        print("Missing input: " + ", ".join(missing), file=sys.stderr); return 2
+    analyzer = StreamingSummary(args.slow_ms, args.bucket_minutes)
+    from driver_compatibility import DriverCompatibilityAccumulator
+    driver = DriverCompatibilityAccumulator()
+    quality = {"input_files": len(args.inputs), "lines_seen": 0, "parsed_records": 0, "skipped_records": 0, "skip_reasons": collections.Counter(), "notes": []}
     for path in args.inputs:
         step_started = time.perf_counter()
         for line in read_lines(path):
@@ -860,51 +914,33 @@ def main() -> int:
             event, reason = parse_line(line)
             if event:
                 event["source_file"] = path.name
-                events.append(event)
                 quality["parsed_records"] += 1
+                # Consume this record immediately; never append it to a whole-log events list.
+                analyzer.add(event)
+                driver.add(event)
+                del event
             else:
-                quality["skipped_records"] += 1
-                quality["skip_reasons"][reason or "unknown"] += 1
+                quality["skipped_records"] += 1; quality["skip_reasons"][reason or "unknown"] += 1
         print(f"Loading log {path.name}: {time.perf_counter() - step_started:.3f}s", file=sys.stderr)
-    times = [e["timestamp"] for e in events if e.get("timestamp")]
-    parsed_quality = dict(quality)
-    parsed_quality["skip_reasons"] = dict(quality["skip_reasons"])
-    parsed_quality["skipped_ratio"] = round(quality["skipped_records"] / max(quality["lines_seen"], 1), 4)
-    parsed_quality["notes"] = []
+    parsed_quality = dict(quality); parsed_quality["skip_reasons"] = dict(quality["skip_reasons"]); parsed_quality["skipped_ratio"] = round(quality["skipped_records"] / max(quality["lines_seen"], 1), 4)
+    if not quality["parsed_records"]: parsed_quality["notes"].append("No supported records were parsed")
+    if parsed_quality["skipped_ratio"] > 0.2: parsed_quality["notes"].append("More than 20% of lines were skipped; conclusions have limited confidence")
+    step_started = time.perf_counter(); driver_compatibility = driver.finish(); print(f"Analyzing driver compatibility: {time.perf_counter() - step_started:.3f}s", file=sys.stderr)
     step_started = time.perf_counter()
-    driver_compatibility = extract_driver_compatibility(events)
-    print(f"Analyzing driver compatibility: {time.perf_counter() - step_started:.3f}s", file=sys.stderr)
-    if not events:
-        parsed_quality["notes"].append("No supported records were parsed")
-    if parsed_quality["skipped_ratio"] > 0.2:
-        parsed_quality["notes"].append("More than 20% of lines were skipped; conclusions have limited confidence")
-    step_started = time.perf_counter()
-    ftdc = analyze_ftdc(args.ftdc, events, args.ftdc_window_minutes, args.debug_ftdc_json)
+    ftdc_events = [{"timestamp": analyzer.first_timestamp}] if analyzer.first_timestamp else []
+    if analyzer.last_timestamp and analyzer.last_timestamp != analyzer.first_timestamp: ftdc_events.append({"timestamp": analyzer.last_timestamp})
+    ftdc_events.extend(analyzer.find_events)
+    ftdc = analyze_ftdc(args.ftdc, ftdc_events, args.ftdc_window_minutes, args.debug_ftdc_json)
     print(f"Loading FTDC: {time.perf_counter() - step_started:.3f}s", file=sys.stderr)
-    step_started = time.perf_counter()
-    extracted = summarize(events, args.slow_ms, args.bucket_minutes)
-    print(f"Summarizing records: {time.perf_counter() - step_started:.3f}s", file=sys.stderr)
+    step_started = time.perf_counter(); extracted = analyzer.finish(); print(f"Summarizing records: {time.perf_counter() - step_started:.3f}s", file=sys.stderr)
     extracted["ftdc"] = ftdc
-    payload = {
-        "schema_version": VERSION,
-        "metadata": {"parser_version": VERSION, "slow_threshold_ms": args.slow_ms, "bucket_minutes": args.bucket_minutes, "time_range": {"first": min(times, default=None), "last": max(times, default=None)}, "input_files": [p.name for p in args.inputs]},
-        "driverCompatibility": driver_compatibility,
-        "quality": parsed_quality,
-        **extracted,
-    }
-    step_started = time.perf_counter()
-    occurrence_path = args.output / "extractionOccurence.json"
-    short_path = args.output / "extractionshort.json"
-    occurrence_path.write_text(_formatted_extraction_json(payload), encoding="utf-8")
-    short_path.write_text(_formatted_extraction_json(_without_occurrence_details(payload)), encoding="utf-8")
-    handoff = ["# MongoDB Log Extraction Handoff", "", f"Records parsed: {quality['parsed_records']}", f"Records skipped: {quality['skipped_records']}", f"Incompatible drivers: {driver_compatibility['count']}", f"Time range: {payload['metadata']['time_range']['first']} to {payload['metadata']['time_range']['last']}", "", "Use extractionOccurence.json for full diagnostics with occurrence details. Use extractionshort.json for the compact handoff without occurrence arrays. Do not inspect the raw log directly."]
+    payload = {"schema_version": VERSION, "metadata": {"parser_version": VERSION, "slow_threshold_ms": args.slow_ms, "bucket_minutes": args.bucket_minutes, "time_range": {"first": analyzer.first_timestamp, "last": analyzer.last_timestamp}, "input_files": [p.name for p in args.inputs]}, "driverCompatibility": driver_compatibility, "quality": parsed_quality, **extracted}
+    occurrence_path = args.output / "extractionOccurence.json"; short_path = args.output / "extractionshort.json"
+    occurrence_path.write_text(_formatted_extraction_json(payload), encoding="utf-8"); short_path.write_text(_formatted_extraction_json(_without_occurrence_details(payload)), encoding="utf-8")
+    handoff = ["# MongoDB Log Extraction Handoff", "", f"Records parsed: {quality['parsed_records']}", f"Records skipped: {quality['skipped_records']}", f"Driver log records: {driver_compatibility['count']}", f"Incompatible driver groups: {driver_compatibility['incompatible_count']}", f"Time range: {analyzer.first_timestamp} to {analyzer.last_timestamp}", "", "Use extractionOccurence.json for full diagnostics with occurrence details. Use extractionshort.json for the compact handoff without occurrence arrays. Do not inspect the raw log directly."]
     (args.output / "handoff.md").write_text("\n".join(handoff) + "\n", encoding="utf-8")
-    print(f"Writing output: {time.perf_counter() - step_started:.3f}s", file=sys.stderr)
-    print(f"Total extraction: {time.perf_counter() - total_started:.3f}s", file=sys.stderr)
-    print(str(occurrence_path))
-    print(str(short_path))
-    return 0
+    print(f"Writing output: {time.perf_counter() - step_started:.3f}s", file=sys.stderr); print(f"Total extraction: {time.perf_counter() - total_started:.3f}s", file=sys.stderr)
+    print(str(occurrence_path)); print(str(short_path)); return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+if __name__ == "__main__": raise SystemExit(main())

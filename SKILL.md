@@ -1,15 +1,13 @@
 ---
-name: mongodb-log-diagnostic
 description: Extracts actionable signals from MongoDB JSON or legacy plaintext logs and optional FTDC diagnostic data through bundled parsers, then guides an agent to present prioritized findings, resource-contention correlations, likely causes, possible fixes, validation steps, trends, and next actions. Use for MongoDB log troubleshooting, performance investigations, incident reviews, and customer health checks when the agent must not analyze raw logs directly.
 ---
-
 # MongoDB Log Diagnostic
 
 Use this skill whenever a MongoDB log is the source of a troubleshooting or diagnostic request.
 
 ## Operating contract
 
-Do not inspect, search, or reason over the raw log or FTDC bytes directly. First run the bundled extractor and use its structured output as the sole source for analysis. Treat source files as opaque inputs owned by the extractor. The skill directory must keep these files separate: `SKILL.md`, `scripts/extract_mongodb_log.py`, `scripts/ftdc_decoder.py`, and `scripts/test_extract_mongodb_log.sh`; never execute `SKILL.md` with Bash.
+Do not inspect, search, or reason over the raw log or FTDC bytes directly. First run the bundled extractor and use its structured output as the sole source for analysis. Treat source files as opaque inputs owned by the extractor. The skill directory must keep these files separate: `SKILL.md`, `scripts/extract_mongodb_log.py`, `scripts/ftdc_decoder.py`, `scripts/driver_compatibility.py`, `scripts/test_extract_mongodb_log.sh`, `scripts/test_driver_compatibility.sh`, and `scripts/test_slow_query.sh`; never execute `SKILL.md` with Bash.
 
 ## File boundaries
 
@@ -27,7 +25,7 @@ The extractor supports:
 - Multiple log files in one run.
 - Optional FTDC files or a `diagnostic.data` directory via repeatable `--ftdc /path` flags; the extractor accepts JSON/JSONL exports and delegates framed BSON FTDC block, zlib, BSON attribute, and delta decoding to `scripts/ftdc_decoder.py` without requiring a third-party BSON package.
 
-The extractor uses bundled analyzers only. The `driverCompatibility` module reads structured connection metadata, applies Hatchet-derived application-driver filtering and major/minor compatibility checks, excludes internal connection drivers, and adds `driverCompatibility.incompatible_drivers` to `extraction.json` with per-driver-version IP lists. Driver names stop at the first `|`; wrapper labels such as Mongoose are excluded as separate drivers.
+The extractor uses bundled analyzers only. The `driverCompatibility` module reads structured connection metadata, applies Hatchet-derived application-driver filtering and major/minor compatibility checks, excludes internal connection drivers, and adds `driverCompatibility.incompatible_drivers` to `extractionOccurence.json` with per-driver-version IP lists. Driver names stop at the first `|`; wrapper labels such as Mongoose are excluded as separate drivers.
 
 ## Workflow
 
@@ -42,9 +40,11 @@ The extractor uses bundled analyzers only. The `driverCompatibility` module read
      /path/to/mongod.log /path/to/other.log.gz
    ```
 
-   Repeat `--ftdc /path/to/another.ftdc` for multiple FTDC paths. The validator accepts optional `FTDC_DIR=/path/to/diagnostic.data` or `DIAG_DIR=/path/to/diagnostic.data` environment variables. Source FTDC debug output is disabled by default; set `DEBUG_FTDC_JSON=1` to print source JSON or decoded source records to stderr. The generated `extraction.json` is never used as source debug output. When neither FTDC variable is set, the validator automatically uses the first existing `diagnostic.data` or `diag` directory under the skill root or inputs directory, if available. If the validator begins with `---`, stop: the wrong file was copied into `scripts/test_extract_mongodb_log.sh`. From any working directory, invoke the validator by its absolute path or use the script-directory-resolved bundled validator: `/usr/bin/env bash /path/to/mongodb-log-diagnostic/scripts/test_extract_mongodb_log.sh`. Set `DIAGNOSTIC_DUMP=1` in the Bash invocation to create `./tmp/run-<timestamp>-<pid>/` (or `TEMP_DIR=/path`) for validator/extractor timing and validation logs; without that switch, no temporary diagnostic files are created.
+   Repeat `--ftdc /path/to/another.ftdc` for multiple FTDC paths. The extractor always writes `extractionOccurence.json` with error and slow-operation occurrence details and `extractionshort.json` without occurrence arrays. The validator accepts optional `FTDC_DIR=/path/to/diagnostic.data` or `DIAG_DIR=/path/to/diagnostic.data` environment variables. Source FTDC debug output is disabled by default; set `DEBUG_FTDC_JSON=1` to print source JSON or decoded source records to stderr. Neither generated extraction file is used as source debug output. When neither FTDC variable is set, the validator automatically uses the first existing `diagnostic.data` or `diag` directory under the skill root or inputs directory, if available. If the validator begins with `---`, stop: the wrong file was copied into `scripts/test_extract_mongodb_log.sh`. From any working directory, invoke the validator by its absolute path or use the script-directory-resolved bundled validator: `/usr/bin/env bash /path/to/mongodb-log-diagnostic/scripts/test_extract_mongodb_log.sh`. Set `DIAGNOSTIC_DUMP=1` in the Bash invocation to create `./tmp/run-<timestamp>-<pid>/` (or `TEMP_DIR=/path`) for validator/extractor timing and validation logs; without that switch, no temporary diagnostic files are created.
 
-3. Read `/tmp/mongodb-log-extract/extraction.json`. If the extractor reports `ftdc.status` as `no_records` or `error`, report that FTDC could not be interpreted instead of treating missing metrics as zero. Read `handoff.md` only for a quick orientation; `extraction.json` is authoritative. When FTDC is provided, use the `ftdc` section for resource metrics, contention windows, and temporal correlations with `find` issues.
+   Run `python3 scripts/test_driver_compatibility.py` to verify compatible and incompatible driver-version metadata, including distinct IPs, application names, and platform names. Run `scripts/test_driver_compatibility.sh` to generate a streamed plain or gzip log, exercise the extractor, validate driver counts and metadata, and assert a configurable maximum RSS (`LINES`, `MODE`, and `MAX_RSS_MB`). Run `scripts/test_slow_query.sh` to validate slow-query grouping, plan/query metadata, statistics, occurrence details, and compact output.
+
+3. Read `references/extracted-signal-reference.md` for the exact JSON contract and `references/analysis-prompt.md` for the required report prompt. Then read `/tmp/mongodb-log-extract/extractionOccurence.json` for the authoritative full handoff, and use `/tmp/mongodb-log-extract/extractionshort.json` when occurrence arrays are not needed. If the extractor reports `ftdc.status` as `no_records` or `error`, report that FTDC could not be interpreted instead of treating missing metrics as zero. Read `handoff.md` only for a quick orientation. When FTDC is provided, use the `ftdc` section for resource metrics, contention windows, and temporal correlations with `find` issues.
 4. Validate extraction quality before diagnosing:
    - Confirm input count, parsed line count, skipped-line count, and time range.
    - Check `driverCompatibility.status` and list every `incompatible_drivers` finding, including the driver name before any `|`, version, distinct IPs, reason, time range, and evidence.
@@ -52,7 +52,7 @@ The extractor uses bundled analyzers only. The `driverCompatibility` module read
    - Use `ftdc.resource_metrics` for summarized CPU, memory, WiredTiger/cache, disk/I/O, connections, tickets, queues, flow-control, lock, eviction, and latency signals.
    - Use `ftdc.find_correlations` to identify FTDC samples near slow or inefficient `find` events. Treat these as temporal overlap only; do not claim resource contention caused the query issue without workload and host-metric validation.
    - If parsing is empty or the skipped-line ratio is high, report limited confidence and do not invent conclusions.
-5. Produce the diagnostic report from extracted evidence only.
+5. Produce the diagnostic report from extracted evidence only, following `references/analysis-prompt.md`. FTDC, driver CVE/update tables, and n-1/n-8 comparisons are conditional on supplied and validated inputs.
 6. Distinguish observations from hypotheses. Tie every issue to counts, timestamps, component, namespace, plan summary, duration, or another field in the handoff.
 7. Prioritize issues by impact, recurrence, confidence, and operational risk. Avoid treating every warning as an incident.
 
@@ -147,3 +147,19 @@ List the most relevant extracted event fingerprints, slow-operation summaries, a
 - Do not infer an outage from warnings alone; corroborate with errors, topology changes, duration, or recurrence.
 - Do not state that an issue is fixed. Recommend validation steps instead.
 - Prefer UTC timestamps when presenting extracted time windows.
+
+
+## Compatibility and occurrence details
+`driverCompatibility.distinct_compatible_drivers` lists every distinct compatible application-driver version found, grouped by driver; each version includes sorted `distinctIps`, `distinctAppNames`, and `distinctPlatforms` arrays. Each `incompatible_drivers` record includes the same per-version arrays. Error-group `occurrence_timestamps` are grouped by UTC date and hour/minute with occurrence counts; slow-operation timestamps retain centisecond detail. Both error and slow-operation occurrence sections are always included. When included, each `occurrence_timestamps` value and each `sample_query_shape` value is serialized compactly on one line while remaining valid structured JSON. Slow-operation occurrences include present timing, CPU, storage, write-concern, response, yield, oplog-slot, insert/update/delete, and ordering metrics; `plan_summary` and `query_hash` remain at the slow-operation group level. Group-level `cpuNanos` includes min, median, max, average, and total when available, alongside distinct top-level `app_names`.
+
+## Large-input processing
+
+The extractor reads plain and gzip logs incrementally. The main loop must parse one line, pass that record immediately to the driver-compatibility accumulator and the error/slow-query streaming analyzer, then release the record; it must never create or append to a whole-log `events` list. `parsed_quality` is only small counters and metadata created after reading, not parsed log records. Each parsed record is immediately folded into bounded severity, category, trend, error-group, slow-operation, FTDC-correlation, and driver-compatibility state; completed raw lines and events are not retained. Slow and error occurrence evidence is capped per analysis group so a pathological repeated workload cannot grow without bound. Use `scripts/test_driver_compatibility.sh` for a synthetic memory regression test; set `LINES` to scale it toward production-sized inputs and use `MODE=plain` or `MODE=gzip` to cover both input forms.
+
+`driverCompatibility.count` is the number of parsed log records containing driver metadata; `driverCompatibility.driver_log_count` is the same explicit counter, while `driverCompatibility.incompatible_count` counts incompatible driver/version groups.
+
+
+The slow-query regression uses a structured `Slow query` command record with `durationMillis`, `workingMillis`, `cpuNanos`, `docsExamined`, `nreturned`, `planSummary`, `queryHash`, `appName`, and `numYields`; these fields must remain represented in the streaming output.
+
+
+Explicit MongoDB records whose message is `Slow query` are included in slow analysis even when `durationMillis` is below `--slow-ms`. The output includes `slow.operations` and `slow.global_stats` (total count, COLLSCAN count, change-stream count, duration statistics, and CPU statistics); `slow_operations` remains as a compatibility alias.
