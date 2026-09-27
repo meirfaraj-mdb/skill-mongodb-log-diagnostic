@@ -1,0 +1,74 @@
+"""Entry points (same pipeline on both clouds).
+
+AWS  : Lambda handler `agent.handler.lambda_handler` (event JSON)
+GCP  : Cloud Run Job  `python -m agent.handler --stage ...` (args / env)
+Local: `CLOUD_PROVIDER=local ATLAS_CONFIG_FILE=cfg.json python -m agent.handler`
+
+Options: stage = all | download | extract | report
+         log_date = YYYY-MM-DD (default D-1 in the secret's timezone; env LOG_DATE also honoured)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+
+from . import download_stage, extract_stage, report_stage, skills
+from .common import logger
+from .providers import load_config
+
+_CONFIG = None
+
+
+def _config() -> dict:
+    global _CONFIG
+    if _CONFIG is None:
+        _CONFIG = load_config()
+    return _CONFIG
+
+
+def run_pipeline(event: dict, config: dict | None = None) -> dict:
+    config = config or _config()
+    stage = event.get("stage") or "all"
+    log_date = event.get("log_date") or os.environ.get("LOG_DATE")
+    if not log_date or log_date == "auto":
+        log_date = skills.atlas_logs().previous_day(config["timezone"])
+    out: dict = {"log_date": log_date, "stage": stage, "cloud": config.get("cloud")}
+    logs = event.get("logs")
+    if stage in ("all", "download"):
+        if config.get("input_mode") == "existing_bucket":
+            # Raw .gz logs must already be at <prefix>/<date>/<host>/<log>.gz.
+            # Extraction/report stages discover them directly from storage.
+            out["download"] = {"status": "skipped_existing_bucket", "log_date": log_date, "logs": logs or []}
+        else:
+            out["download"] = download_stage.run(config, log_date, skip_existing=event.get("skip_existing", True))
+            logs = out["download"]["logs"]
+    if stage in ("all", "extract"):
+        out["extract"] = extract_stage.run(config, log_date, logs=logs,
+                                           skip_existing=event.get("skip_existing_extract", False))
+    if stage in ("all", "report"):
+        out["report"] = report_stage.run(config, log_date)
+    return out
+
+
+def lambda_handler(event, context):  # AWS Lambda
+    event = event if isinstance(event, dict) else {}
+    logger.info("Lambda invocation stage=%s log_date=%s", event.get("stage", "all"), event.get("log_date"))
+    return run_pipeline(event)
+
+
+def main(argv=None) -> None:  # Cloud Run Job / local
+    p = argparse.ArgumentParser(description="MongoDB log diagnostic agent")
+    p.add_argument("--stage", default=os.environ.get("STAGE", "all"), choices=["all", "download", "extract", "report"])
+    p.add_argument("--log-date", default=None)
+    p.add_argument("--no-skip-existing", action="store_true", help="re-download logs even if already stored")
+    p.add_argument("--skip-existing-extract", action="store_true", help="do not re-extract when outputs exist")
+    args = p.parse_args(argv)
+    result = run_pipeline({"stage": args.stage, "log_date": args.log_date,
+                           "skip_existing": not args.no_skip_existing,
+                           "skip_existing_extract": args.skip_existing_extract})
+    print(json.dumps(result, indent=2, default=str))
+
+
+if __name__ == "__main__":
+    main()

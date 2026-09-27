@@ -1,0 +1,47 @@
+{
+  "Comment": "MongoDB log diagnostic agent (AWS): download D-1 -> extract per node -> report with n-1/n-8 diff",
+  "StartAt": "Download",
+  "States": {
+    "Download": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": { "FunctionName": "${AgentFunctionArn}", "Payload": { "stage": "download", "log_date.$": "$.log_date" } },
+      "ResultSelector": { "log_date.$": "$.Payload.log_date", "logs.$": "$.Payload.download.logs" },
+      "Retry": [{ "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"], "MaxAttempts": 3, "BackoffRate": 2 }],
+      "Next": "ExtractPerNode"
+    },
+    "ExtractPerNode": {
+      "Type": "Map",
+      "ItemsPath": "$.logs",
+      "MaxConcurrency": 3,
+      "ItemSelector": { "log_date.$": "$.log_date", "log.$": "$$.Map.Item.Value" },
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "Extract",
+        "States": {
+          "Extract": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": { "FunctionName": "${AgentFunctionArn}",
+                            "Payload": { "stage": "extract", "log_date.$": "$.log_date", "logs.$": "States.Array($.log)" } },
+            "ResultSelector": { "result.$": "$.Payload.extract" },
+            "Retry": [{ "ErrorEquals": ["States.ALL"], "MaxAttempts": 1, "IntervalSeconds": 30 }],
+            "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "ExtractFailed" }],
+            "End": true
+          },
+          "ExtractFailed": { "Type": "Pass", "End": true }
+        }
+      },
+      "ResultPath": "$.extracts",
+      "Next": "Report"
+    },
+    "Report": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": { "FunctionName": "${AgentFunctionArn}", "Payload": { "stage": "report", "log_date.$": "$.log_date" } },
+      "ResultSelector": { "manifest.$": "$.Payload.report" },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "MaxAttempts": 2, "IntervalSeconds": 60, "BackoffRate": 2 }],
+      "End": true
+    }
+  }
+}

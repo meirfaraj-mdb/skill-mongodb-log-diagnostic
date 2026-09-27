@@ -1,0 +1,8 @@
+# Agent Engine packages this file with the ADK wrapper.
+# Shared code is included by deploy/gcp/package_adk_agent.sh.
+google-adk>=1.0.0
+google-cloud-aiplatform[agent_engines]>=1.93.0
+google-cloud-storage>=2.14
+google-cloud-secret-manager>=2.18
+google-auth>=2.27
+requests>=2.31

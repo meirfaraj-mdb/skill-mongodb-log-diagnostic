@@ -1,0 +1,12 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "ReadAtlasSecret", "Effect": "Allow", "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:<region>:<account>:secret:<name>*" },
+    { "Sid": "ListBucket", "Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::<bucket>" },
+    { "Sid": "ReadWriteObjects", "Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::<bucket>/<prefix>/*" },
+    { "Sid": "InvokeBedrock", "Effect": "Allow", "Action": "bedrock:InvokeModel", "Resource": "*" },
+    { "Sid": "Logs", "Effect": "Allow", "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], "Resource": "*" }
+  ]
+}

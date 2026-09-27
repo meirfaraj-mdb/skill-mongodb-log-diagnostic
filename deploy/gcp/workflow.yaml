@@ -1,0 +1,61 @@
+# Google Cloud Workflows -- equivalent of the AWS Step Functions state machine.
+# download (1 task) -> extract (N tasks, one node per task, sharded by CLOUD_RUN_TASK_INDEX) -> report (1 task)
+# Input (all optional): {"log_date": "YYYY-MM-DD", "timezone": "Asia/Jerusalem", "node_tasks": 3}
+# D-1 is resolved ONCE here so every stage works on the same day.
+main:
+  params: [input]
+  steps:
+    - init:
+        assign:
+          - project: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: ${sys.get_env("GOOGLE_CLOUD_LOCATION")}
+          - job: ${"projects/" + project + "/locations/" + region + "/jobs/mongodb-log-diagnostic-agent"}
+          - tz: ${default(map.get(input, "timezone"), "Asia/Jerusalem")}
+          - node_tasks: ${default(map.get(input, "node_tasks"), 3)}
+          - log_date: ${default(map.get(input, "log_date"), "")}
+    - resolve_date:
+        switch:
+          - condition: ${log_date == ""}
+            assign:
+              - log_date: ${text.substring(time.format(sys.now() - 86400, tz), 0, 10)}
+    - download:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${job}
+          body:
+            overrides:
+              taskCount: 1
+              containerOverrides:
+                - args: ["--stage", "download", "--log-date", "${log_date}"]
+    - extract:
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: ${job}
+            body:
+              overrides:
+                taskCount: ${node_tasks}
+                containerOverrides:
+                  - args: ["--stage", "extract", "--log-date", "${log_date}"]
+        except:
+          as: e
+          steps:
+            - log_extract_failure:
+                call: sys.log
+                args:
+                  severity: WARNING
+                  data: ${"extract had failed tasks for " + log_date + "; continuing to report"}
+    - report:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${job}
+          body:
+            overrides:
+              taskCount: 1
+              containerOverrides:
+                - args: ["--stage", "report", "--log-date", "${log_date}"]
+        result: report_execution
+    - done:
+        return:
+          log_date: ${log_date}
+          report_execution: ${report_execution.name}
