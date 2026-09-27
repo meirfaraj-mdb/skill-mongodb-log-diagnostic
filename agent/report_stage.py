@@ -6,10 +6,10 @@ Inputs per node (host + log_name):
   n-8      = D-8 extraction   (extractionshort.json)   -- only if it exists
 Prompt   = references/analysis-prompt.md + references/extracted-signal-reference.md
            (+ SKILL.md report rules), exactly as the skill requires.
-Output   = <prefix>/<D-1>/reports/<host>__<log_name>.md
-           <prefix>/<D-1>/reports/<host>__<log_name>.diff.json
-           <prefix>/<D-1>/reports/cluster-summary.md   (optional)
-           <prefix>/<D-1>/reports/manifest.json
+Output   = <prefix>/<D-1>/<host>/reports/<log_name>/report.md
+           <prefix>/<D-1>/<host>/reports/<log_name>/diff.json
+           <prefix>/<D-1>/cluster/reports/cluster-summary.md   (optional)
+           <prefix>/<D-1>/cluster/reports/manifest.json
 """
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def discover_nodes(store, layout: Layout, log_date: str) -> list[tuple[str, str]
     nodes = set()
     for key in store.list_keys(day):
         parts = key[len(day):].split("/")
-        if len(parts) == 4 and parts[1] == "extract" and parts[3] == "extractionOccurence.json":
+        if len(parts) == 4 and parts[1] == "extracts" and parts[3] == "extractionOccurence.json":
             nodes.add((parts[0], parts[2]))
     return sorted(nodes)
 
@@ -130,10 +130,9 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
                 host_dir, len(user), current_file, [b[0] for b in baselines])
 
     report_md = llm.generate(system_prompt, user)
-    stem = f"{host_dir}__{log_name}"
-    uploads = {"report": store.put_text(layout.report(log_date, f"{stem}.md"), report_md, "text/markdown; charset=utf-8")}
+    uploads = {"report": store.put_text(layout.report(log_date, host_dir, log_name, "report.md"), report_md, "text/markdown; charset=utf-8")}
     if diffs:
-        uploads["diff"] = store.put_text(layout.report(log_date, f"{stem}.diff.json"),
+        uploads["diff"] = store.put_text(layout.report(log_date, host_dir, log_name, "diff.json"),
                                          json.dumps(diff_doc, indent=2), "application/json")
     return {"node": host_dir, "log_name": log_name, "current_file": current_file,
             "baselines": [b[0] for b in baselines], "offline_driver_cves": offline_cves,
@@ -176,19 +175,19 @@ def run(config: dict, log_date: str, store=None, llm=None) -> dict:
     if results and config.get("cluster_summary", True) and len(results) > 1:
         body = "\n\n".join(_doc("node_report", {"node": r["node"], "log": r["log_name"]}, r["report_md"]) for r in results)
         summary = llm.generate(CLUSTER_PROMPT, f"Cluster `{config['cluster_name']}`, day {log_date}.\n\n{body}")
-        cluster_uri = store.put_text(layout.report(log_date, "cluster-summary.md"), summary, "text/markdown; charset=utf-8")
+        cluster_uri = store.put_text(layout.cluster_report(log_date, "cluster-summary.md"), summary, "text/markdown; charset=utf-8")
 
     catalog = offline_cve.load_catalog()
     manifest = {
         "cluster": config["cluster_name"], "log_date": log_date, "cloud": config.get("cloud"),
-        "storage": store.uri(layout.day(log_date)), "llm_provider": config.get("llm_provider"),
+        "storage": store.uri(layout.day(log_date)), "cluster_reports": store.uri(layout.cluster_report(log_date, "")), "llm_provider": config.get("llm_provider"),
         "offline_driver_cve_catalog": {k: catalog.get(k) for k in ("catalog_name", "catalog_version", "refreshed_at", "coverage_note")},
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "node_count": len(nodes), "expected_node_count": expected,
         "reports": [{k: v for k, v in r.items() if k != "report_md"} for r in results],
         "cluster_summary": cluster_uri, "failed": failed,
     }
-    store.put_text(layout.report(log_date, "manifest.json"), json.dumps(manifest, indent=2), "application/json")
+    store.put_text(layout.cluster_report(log_date, "manifest.json"), json.dumps(manifest, indent=2), "application/json")
     if not results:
         raise RuntimeError(json.dumps(manifest))
     return manifest

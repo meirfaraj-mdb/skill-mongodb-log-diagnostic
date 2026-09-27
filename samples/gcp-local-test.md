@@ -39,15 +39,15 @@ The runtime service account needs:
 The agent expects raw compressed logs at this exact shape:
 
 ```text
-<prefix>/<YYYY-MM-DD>/<host>/<log-name>.gz
+<prefix>/<YYYY-MM-DD>/<host>/mongodb/<log-name>.gz
 ```
 
 Example:
 
 ```text
-atlas-logs/2026-09-26/node-0/mongodb.gz
-atlas-logs/2026-09-26/node-1/mongodb.gz
-atlas-logs/2026-09-26/node-2/mongodb.gz
+atlas-logs/2026-09-26/node-0/mongodb/mongodb.gz
+atlas-logs/2026-09-26/node-1/mongodb/mongodb.gz
+atlas-logs/2026-09-26/node-2/mongodb/mongodb.gz
 ```
 
 For a basic GCS check:
@@ -59,11 +59,11 @@ gcloud storage ls gs://my-existing-mongodb-log-bucket/atlas-logs/2026-09-26/
 A successful run creates extracts under each node and reports under the date directory:
 
 ```text
-atlas-logs/2026-09-26/node-0/extract/mongodb/extractionOccurence.json
-atlas-logs/2026-09-26/node-0/extract/mongodb/extractionshort.json
-atlas-logs/2026-09-26/node-0/extract/mongodb/handoff.md
-atlas-logs/2026-09-26/reports/<node>__mongodb.md
-atlas-logs/2026-09-26/reports/manifest.json
+atlas-logs/2026-09-26/node-0/extracts/mongodb/extractionOccurence.json
+atlas-logs/2026-09-26/node-0/extracts/mongodb/extractionshort.json
+atlas-logs/2026-09-26/node-0/extracts/mongodb/handoff.md
+atlas-logs/2026-09-26/node-0/reports/mongodb/report.md
+atlas-logs/2026-09-26/cluster/reports/manifest.json
 ```
 
 ## Local test: copied bucket data, no cloud access
@@ -74,7 +74,7 @@ This test uses a local directory as the object store. It does not use GCS, Secre
 
 ```bash
 mkdir -p /tmp/mongodb-log-bucket/atlas-logs/2026-09-26/node-0
-cp /path/to/mongodb.gz /tmp/mongodb-log-bucket/atlas-logs/2026-09-26/node-0/mongodb.gz
+cp /path/to/mongodb.gz /tmp/mongodb-log-bucket/atlas-logs/2026-09-26/node-0/mongodb/mongodb.gz
 ```
 
 2. Copy the local secret template and set its absolute `bucket` path if needed:

@@ -137,13 +137,13 @@ def run_all_days(cfg, store):
 
 def check_outputs(keys, prefix, get_text, fake_llm, out):
     D1 = "2026-09-22"
-    raw = [k for k in keys if k.startswith(f"{prefix}/{D1}/") and k.endswith("/mongodb.gz")]
+    raw = [k for k in keys if k.startswith(f"{prefix}/{D1}/") and k.endswith("/mongodb/mongodb.gz")]
     assert len(raw) == 3 and all("my-cluster-shard-00-0" in k for k in raw), raw
     for f in ("manifest.json", "cluster-summary.md"):
-        assert f"{prefix}/{D1}/reports/{f}" in keys
+        assert f"{prefix}/{D1}/cluster/reports/{f}" in keys
     node = "my-cluster-shard-00-00.abcd.mongodb.net"
-    assert f"{prefix}/{D1}/{node}/extract/mongodb/extractionOccurence.json" in keys
-    diff = json.loads(get_text(f"{prefix}/{D1}/reports/{node}__mongodb.diff.json"))
+    assert f"{prefix}/{D1}/{node}/extracts/mongodb/extractionOccurence.json" in keys
+    diff = json.loads(get_text(f"{prefix}/{D1}/{node}/reports/mongodb/diff.json"))
     c = {x["label"]: x for x in diff["comparisons"]}
     assert c["n-1"]["baseline_date"] == "2026-09-21" and c["n-8"]["baseline_date"] == "2026-09-15"
     assert c["n-1"]["signals"]["slow.global_stats.count"] == {"current": 6, "baseline": 4, "delta": 2, "pct": 50.0, "label": "increased"}
@@ -152,7 +152,7 @@ def check_outputs(keys, prefix, get_text, fake_llm, out):
     assert "ANALYSIS_PROMPT_MARKER" in system and "SIGNAL_REF_MARKER" in system
     assert 'label="n-1" date="2026-09-21"' in user and 'label="n-8" date="2026-09-15"' in user and "precomputed_diff" in user
     assert "SECRET" not in user and "SECRET" not in system
-    manifest = json.loads(get_text(f"{prefix}/{D1}/reports/manifest.json"))
+    manifest = json.loads(get_text(f"{prefix}/{D1}/cluster/reports/manifest.json"))
     assert manifest["node_count"] == 3 and not manifest["failed"]
     assert out["report"]["node_count"] == 3
     return manifest
@@ -163,7 +163,7 @@ assert (cfg_aws["bucket"], cfg_aws["prefix"], cfg_aws["storage_provider"], cfg_a
 s3 = FakeS3(); out, fl = run_all_days(cfg_aws, aws.S3Store("legacy-bkt", client=s3))
 m = check_outputs(s3.keys(), "atlas-logs", lambda k: s3.objects[("legacy-bkt", k)].decode(), fl, out)
 assert m["storage"] == "s3://legacy-bkt/atlas-logs/2026-09-22" and m["cloud"] == "aws"
-assert s3.meta[("legacy-bkt", "atlas-logs/2026-09-22/my-cluster-shard-00-00.abcd.mongodb.net/mongodb.gz")]["Metadata"]["cluster"] == "my-cluster"
+assert s3.meta[("legacy-bkt", "atlas-logs/2026-09-22/my-cluster-shard-00-00.abcd.mongodb.net/mongodb/mongodb.gz")]["Metadata"]["cluster"] == "my-cluster"
 n_calls = len(FakeAtlas.calls)
 providers.get_store = lambda c: aws.S3Store("legacy-bkt", client=s3)
 handler.run_pipeline({"stage": "download", "log_date": "2026-09-22"}, config=cfg_aws)   # skip_existing
@@ -176,7 +176,7 @@ assert (cfg_gcp["bucket"], cfg_gcp["prefix"], cfg_gcp["storage_provider"], cfg_g
 gcs = FakeGCSClient(); out, fl = run_all_days(cfg_gcp, gcp.GCSStore("my-gcs-bkt", client=gcs))
 m = check_outputs(gcs.keys(), "atlas-logs", lambda k: gcs.objects[("my-gcs-bkt", k)].decode(), fl, out)
 assert m["storage"] == "gs://my-gcs-bkt/atlas-logs/2026-09-22" and m["cloud"] == "gcp"
-ctype, meta = gcs.meta[("my-gcs-bkt", "atlas-logs/2026-09-22/my-cluster-shard-00-01.abcd.mongodb.net/mongodb.gz")]
+ctype, meta = gcs.meta[("my-gcs-bkt", "atlas-logs/2026-09-22/my-cluster-shard-00-01.abcd.mongodb.net/mongodb/mongodb.gz")]
 assert ctype == "application/gzip" and meta["log-name"] == "mongodb"
 print("GCP pipeline OK")
 
@@ -242,7 +242,7 @@ print("LLM clients OK")
 # ---- 6. Atlas skill standalone (local dir sink + CLI) + sharding ---------------------------------
 out_dir = Path(tempfile.mkdtemp())
 res = atlas.archive_logs(BASE, "2026-09-22", sink=atlas.local_dir_sink(out_dir))
-assert len(res["logs"]) == 3 and (out_dir / "2026-09-22/my-cluster-shard-00-02.abcd.mongodb.net/mongodb.gz").is_file()
+assert len(res["logs"]) == 3 and (out_dir / "2026-09-22/my-cluster-shard-00-02.abcd.mongodb.net/mongodb/mongodb.gz").is_file()
 cfg_file = out_dir / "cfg.json"; cfg_file.write_text(json.dumps(BASE))
 before = len(FakeAtlas.calls)
 assert atlas.main(["--config", str(cfg_file), "download", "--output-dir", str(out_dir), "--log-date", "2026-09-22"]) == 0

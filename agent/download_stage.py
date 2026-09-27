@@ -1,7 +1,7 @@
 """Stage 1 -- Atlas logs -> bucket, composed from skills:
     mongodb-atlas-logs  (Atlas API download, cloud-agnostic)
   + aws-storage | gcp-storage  (streamed upload to S3 / GCS)
-Keys: <prefix>/<date>/<host>/<log_name>.gz -- identical to the original lambda.
+Keys: <prefix>/<date>/<host>/mongodb/<log_name>.gz. Multiple raw log names can coexist per node.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def run(config: dict, log_date: str | None = None, skip_existing: bool = True, s
         store = get_store(config)
 
     def key_for(entry):
-        return f"{layout.prefix}/{entry['relative_path']}"
+        return layout.raw_log(entry["log_date"], entry["host_dir"], entry["log_name"])
 
     def sink(entry, fileobj, metadata):
         return store.upload_stream(fileobj, key_for(entry), "application/gzip", metadata)

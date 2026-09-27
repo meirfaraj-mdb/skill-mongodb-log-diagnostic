@@ -94,16 +94,16 @@ chmod 600 "$CONFIG_FILE"
 
 DAY_DIR="$LOCAL_BUCKET/atlas-logs/$LOG_DATE"
 say_note "Checking local log layout"
-printf 'Expected input layout: %s/<host>/<log-name>.gz\n' "$DAY_DIR"
-if ! find "$DAY_DIR" -mindepth 2 -maxdepth 2 -type f -name '*.gz' -print -quit 2>/dev/null | grep -q .; then
+printf 'Expected input layout: %s/<host>/mongodb/<log-name>.gz\n' "$DAY_DIR"
+if ! find "$DAY_DIR" -mindepth 3 -maxdepth 3 -type f -path '*/mongodb/*.gz' -print -quit 2>/dev/null | grep -q .; then
   cat >&2 <<MSG
 No .gz log was found. Copy raw logs into, for example:
-  $DAY_DIR/node-0/mongodb.gz
+  $DAY_DIR/node-0/mongodb/mongodb.gz
 Then rerun this script.
 MSG
   exit 1
 fi
-find "$DAY_DIR" -mindepth 2 -maxdepth 2 -type f -name '*.gz' -print
+find "$DAY_DIR" -mindepth 3 -maxdepth 3 -type f -path '*/mongodb/*.gz' -print
 
 export CLOUD_PROVIDER=local
 export ATLAS_CONFIG_FILE="$CONFIG_FILE"
@@ -123,7 +123,7 @@ else
 fi
 
 say_note "Results"
-find "$DAY_DIR" -path '*/extract/mongodb/*' -type f -print
+find "$DAY_DIR" -path '*/extracts/*/*' -type f -print
 if [[ "$MODE" == "r" ]]; then
   find "$DAY_DIR/reports" -type f -print 2>/dev/null || true
 fi

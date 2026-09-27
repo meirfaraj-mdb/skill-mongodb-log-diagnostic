@@ -17,9 +17,9 @@ google_adk_agent/             ADK root agent; tools call the shared deterministi
 ## Flow (identical on both clouds)
 | Step | Skills used | Output in the bucket |
 |---|---|---|
-| 1. Download D-1 logs for every node | `mongodb-atlas-logs` + `aws-storage`/`gcp-storage` (streamed upload) | `<prefix>/<D-1>/<host>/mongodb.gz` (same keys as the old lambda) |
-| 2. Extract per node | `mongodb-log-diagnostic/scripts/extract_mongodb_log.py` | `<prefix>/<D-1>/<host>/extract/mongodb/{extractionOccurence.json, extractionshort.json, handoff.md}` |
-| 3. Report per node + diff vs D-2 (n-1) and D-8 (n-8) if they exist | `references/analysis-prompt.md` + `references/extracted-signal-reference.md` → LLM | `<prefix>/<D-1>/reports/<host>__mongodb.md`, `…diff.json`, `cluster-summary.md`, `manifest.json` |
+| 1. Download D-1 logs for every node | `mongodb-atlas-logs` + `aws-storage`/`gcp-storage` (streamed upload) | `<prefix>/<D-1>/<host>/mongodb/<log-name>.gz` (same keys as the old lambda) |
+| 2. Extract per node | `mongodb-log-diagnostic/scripts/extract_mongodb_log.py` | `<prefix>/<D-1>/<host>/extracts/<log-name>/{extractionOccurence.json, extractionshort.json, handoff.md}` |
+| 3. Report per node + diff vs D-2 (n-1) and D-8 (n-8) if they exist | `references/analysis-prompt.md` + `references/extracted-signal-reference.md` → LLM | `<prefix>/<D-1>/<host>/reports/<log-name>/{report.md,diff.json}; cluster/reports/{cluster-summary.md,manifest.json}` |
 
 ## Cloud equivalence
 | Concern | AWS | Google Cloud |
@@ -46,6 +46,9 @@ The lambda's keys are unchanged. **Existing AWS secrets keep working as-is**: `s
 | `vertex_model`, `vertex_location`, `vertex_project` | GCP LLM (a `claude-*` model id uses the Anthropic publisher; anything else uses Gemini) |
 | `slow_ms`, `expected_node_count` (3), `report_max_tokens`, `report_max_input_chars`, `cluster_summary` | Pipeline tuning |
 
+## Extraction behavior
+Extraction is sequential per node/log: the agent downloads one raw log, runs the extractor, uploads `extractionOccurence.json`, `extractionshort.json`, and `handoff.md`, then begins the next node. By default it skips a node when its canonical `<node>/extracts/<log-name>/extractionOccurence.json` already exists in the bucket. Use `--force-reextract` for a local/CLI rerun, or set the ADK stage tool’s `skip_existing` to `false` to regenerate that node’s outputs.
+
 ## Offline driver CVE checks
 Reports do not access the internet. `skills/mongodb-log-diagnostic/references/offline-driver-cves.json` is a manually maintained snapshot. The pipeline matches extracted driver name/version pairs against it, includes the catalog refresh date in every report context and manifest, and labels a no-match as *no match in this snapshot*—not proof that no CVE exists. Update the file through a reviewed change; update `catalog_version` and `refreshed_at` every time. MongoDB’s Security Bulletins and Alerts are the intended refresh sources.
 
@@ -53,6 +56,7 @@ Reports do not access the internet. `skills/mongodb-log-diagnostic/references/of
 * [GCP and local test guide](samples/gcp-local-test.md)
 * [GCP existing-bucket secret](samples/secret.gcp-existing-bucket.example.json)
 * [Local existing-bucket secret](samples/secret.local-existing-bucket.example.json)
+* [macOS local GCP bootstrap script](samples/macos-local-gcp-test.sh)
 
 ## Existing bucket mode (GCP, no Atlas API)
 Use this mode when `.gz` MongoDB logs are already in Cloud Storage. The pipeline makes **no Atlas API request**: it discovers the raw logs, downloads each one temporarily, runs the local extractor, then uploads the extracts and reports back to the same bucket.
@@ -77,16 +81,16 @@ Create a Secret Manager secret from [`secret.gcp-existing-bucket.example.json`](
 
 ```text
 # Input: already present in GCS
-atlas-logs/2026-09-26/node-0/mongodb.gz
-atlas-logs/2026-09-26/node-1/mongodb.gz
-atlas-logs/2026-09-26/node-2/mongodb.gz
+atlas-logs/2026-09-26/node-0/mongodb/mongodb.gz
+atlas-logs/2026-09-26/node-1/mongodb/mongodb.gz
+atlas-logs/2026-09-26/node-2/mongodb/mongodb.gz
 
 # Created by this agent
-atlas-logs/2026-09-26/node-0/extract/mongodb/extractionOccurence.json
-atlas-logs/2026-09-26/node-0/extract/mongodb/extractionshort.json
-atlas-logs/2026-09-26/node-0/extract/mongodb/handoff.md
-atlas-logs/2026-09-26/reports/<node>__mongodb.md
-atlas-logs/2026-09-26/reports/manifest.json
+atlas-logs/2026-09-26/node-0/extracts/mongodb/extractionOccurence.json
+atlas-logs/2026-09-26/node-0/extracts/mongodb/extractionshort.json
+atlas-logs/2026-09-26/node-0/extracts/mongodb/handoff.md
+atlas-logs/2026-09-26/node-0/reports/mongodb/report.md
+atlas-logs/2026-09-26/cluster/reports/manifest.json
 ```
 
 The Agent Engine runtime service account needs `roles/secretmanager.secretAccessor` on this secret, `roles/storage.objectUser` on this bucket, and `roles/aiplatform.user` in the project. Invoke `run_existing_bucket_diagnostics(log_date)` with an explicit date, for example `2026-09-26`. It skips download, discovers raw `.gz` objects, extracts them, uses D-2/D-8 extracts if available, and uploads reports. If extracts already exist and only reports are needed, invoke `report` for that date.

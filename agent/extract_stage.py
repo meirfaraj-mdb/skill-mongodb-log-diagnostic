@@ -38,9 +38,11 @@ def validate_skill_bundle(skill_dir: Path | None = None) -> Path:
 
 
 def extract_one(store, layout: Layout, log_date: str, entry: dict, slow_ms: float, skill_dir: Path,
-                skip_existing: bool = False, timeout_s: int = 3 * 3600) -> dict:
+                skip_existing: bool = True, timeout_s: int = 3 * 3600) -> dict:
     host_dir, log_name = entry["host_dir"], entry["log_name"]
     targets = {n: layout.extract(log_date, host_dir, log_name, n) for n in EXTRACT_FILES}
+    # A completed canonical extraction means this node/log was already uploaded.
+    # Process entries sequentially: download -> extract -> upload all outputs -> next node.
     if skip_existing and store.exists(targets["extractionOccurence.json"]):
         return {**entry, "status": "skipped_existing", "extract": targets}
     WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -73,8 +75,8 @@ def discover_logs(store, layout: Layout, log_date: str) -> list[dict]:
     found = []
     for key in store.list_keys(day):
         parts = key[len(day):].split("/")
-        if len(parts) == 2 and parts[1].endswith(".gz") and "audit" not in parts[1]:
-            found.append({"host": parts[0], "host_dir": parts[0], "log_name": parts[1][:-3], "key": key})
+        if len(parts) == 3 and parts[1] == "mongodb" and parts[2].endswith(".gz") and "audit" not in parts[2]:
+            found.append({"host": parts[0], "host_dir": parts[0], "log_name": parts[2][:-3], "key": key})
     return sorted(found, key=lambda e: (e["host_dir"], e["log_name"]))
 
 
@@ -84,7 +86,7 @@ def _shard(items: list, index: int | None, count: int | None) -> list:
     return items[index::count] if count > 1 else items
 
 
-def run(config: dict, log_date: str, logs: list[dict] | None = None, skip_existing: bool = False,
+def run(config: dict, log_date: str, logs: list[dict] | None = None, skip_existing: bool = True,
         store=None, shard_index: int | None = None, shard_count: int | None = None) -> dict:
     skill_dir = validate_skill_bundle()
     layout = Layout.from_config(config)

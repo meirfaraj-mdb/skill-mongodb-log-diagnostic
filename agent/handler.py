@@ -45,7 +45,7 @@ def run_pipeline(event: dict, config: dict | None = None) -> dict:
             logs = out["download"]["logs"]
     if stage in ("all", "extract"):
         out["extract"] = extract_stage.run(config, log_date, logs=logs,
-                                           skip_existing=event.get("skip_existing_extract", False))
+                                           skip_existing=not event.get("force_reextract", False))
     if stage in ("all", "report"):
         out["report"] = report_stage.run(config, log_date)
     return out
@@ -62,11 +62,11 @@ def main(argv=None) -> None:  # Cloud Run Job / local
     p.add_argument("--stage", default=os.environ.get("STAGE", "all"), choices=["all", "download", "extract", "report"])
     p.add_argument("--log-date", default=None)
     p.add_argument("--no-skip-existing", action="store_true", help="re-download logs even if already stored")
-    p.add_argument("--skip-existing-extract", action="store_true", help="do not re-extract when outputs exist")
+    p.add_argument("--force-reextract", action="store_true", help="re-run a node extraction even when it already exists in storage")
     args = p.parse_args(argv)
     result = run_pipeline({"stage": args.stage, "log_date": args.log_date,
                            "skip_existing": not args.no_skip_existing,
-                           "skip_existing_extract": args.skip_existing_extract})
+                           "force_reextract": args.force_reextract})
     print(json.dumps(result, indent=2, default=str))
 
 

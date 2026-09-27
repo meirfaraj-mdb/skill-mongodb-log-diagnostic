@@ -18,7 +18,14 @@ EXTRACT_FILES = ("extractionOccurence.json", "extractionshort.json", "handoff.md
 
 @dataclass(frozen=True)
 class Layout:
-    """Object key layout -- identical on S3 and GCS, and identical to the original lambda for raw logs."""
+    """Object key layout, identical on S3/GCS.
+
+    Every node owns its raw logs, extracts and per-log reports:
+    <prefix>/<day>/<node>/mongodb/<log>.gz
+    <prefix>/<day>/<node>/extracts/<log>/...
+    <prefix>/<day>/<node>/reports/<log>/...
+    Cluster-level artifacts are separate under <prefix>/<day>/cluster/reports/.
+    """
     prefix: str
 
     @classmethod
@@ -29,13 +36,16 @@ class Layout:
         return f"{self.prefix}/{log_date}"
 
     def raw_log(self, log_date: str, host_dir: str, log_name: str) -> str:          # stage 1
-        return f"{self.day(log_date)}/{host_dir}/{log_name}.gz"
+        return f"{self.day(log_date)}/{host_dir}/mongodb/{log_name}.gz"
 
     def extract(self, log_date: str, host_dir: str, log_name: str, filename: str) -> str:  # stage 2
-        return f"{self.day(log_date)}/{host_dir}/extract/{log_name}/{filename}"
+        return f"{self.day(log_date)}/{host_dir}/extracts/{log_name}/{filename}"
 
-    def report(self, log_date: str, filename: str) -> str:                          # stage 3
-        return f"{self.day(log_date)}/reports/{filename}"
+    def report(self, log_date: str, host_dir: str, log_name: str, filename: str) -> str:  # stage 3 per node/log
+        return f"{self.day(log_date)}/{host_dir}/reports/{log_name}/{filename}"
+
+    def cluster_report(self, log_date: str, filename: str) -> str:
+        return f"{self.day(log_date)}/cluster/reports/{filename}"
 
 
 def shift(log_date: str, days: int) -> str:
