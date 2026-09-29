@@ -37,9 +37,7 @@ ENABLE_OBSERVABILITY=$(printf '%s' "$ENABLE_OBSERVABILITY" | tr '[:upper:]' '[:l
 [[ "$ENABLE_OBSERVABILITY" == yes || "$ENABLE_OBSERVABILITY" == no ]] || die "Enter yes or no."
 OBS_HOSTS=""; QUERY_SHAPE_SOURCE="disabled"; INDEX_STATS_ENABLED="no"; MONGODB_URI_TEMPLATE=""
 if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
-  note "Observability configuration"
-  prompt OBS_HOSTS "Atlas node hostnames (comma-separated)" ""
-  [[ -n "$OBS_HOSTS" ]] || die "At least one node hostname is required for observability."
+  note "Observability configuration (nodes are discovered directly from Atlas)"
   prompt QUERY_SHAPE_SOURCE "Query-shape source (atlas_api/mongodb/bucket)" "atlas_api"
   [[ "$QUERY_SHAPE_SOURCE" == atlas_api || "$QUERY_SHAPE_SOURCE" == mongodb || "$QUERY_SHAPE_SOURCE" == bucket ]] || die "Use atlas_api, mongodb, or bucket."
   prompt INDEX_STATS_ENABLED "Also collect direct MongoDB indexStats? (yes/no)" "no"
@@ -85,10 +83,10 @@ PY
 fi
 
 CONFIG_FILE="$PROJECT_ROOT/.local-atlas-folder-test.json"
-python - "$CONFIG_FILE" "$LOCAL_BUCKET" "$PREFIX" "$TIMEZONE" "$CLUSTER_NAME" "$GROUP_ID" "$ATLAS_PUBLIC_KEY" "$ATLAS_PRIVATE_KEY" "$LOG_NAMES" "$ENABLE_OBSERVABILITY" "$OBS_HOSTS" "$QUERY_SHAPE_SOURCE" "$INDEX_STATS_ENABLED" "$MONGODB_URI_TEMPLATE" "$GENERATE_REPORTS" "$BEDROCK_REGION" "$BEDROCK_MODEL_ID" <<'PY'
+python - "$CONFIG_FILE" "$LOCAL_BUCKET" "$PREFIX" "$TIMEZONE" "$CLUSTER_NAME" "$GROUP_ID" "$ATLAS_PUBLIC_KEY" "$ATLAS_PRIVATE_KEY" "$LOG_NAMES" "$ENABLE_OBSERVABILITY" "$QUERY_SHAPE_SOURCE" "$INDEX_STATS_ENABLED" "$MONGODB_URI_TEMPLATE" "$GENERATE_REPORTS" "$BEDROCK_REGION" "$BEDROCK_MODEL_ID" <<'PY'
 import json, sys
-(path,bucket,prefix,tz,cluster,group,public,private,names,observability,hosts,query_source,index_stats,mongodb_uri,reports,region,model)=sys.argv[1:]
-cfg={"input_mode":"atlas_api","storage_provider":"local","llm_provider":None,"bucket":bucket,"prefix":prefix,"timezone":tz,"cluster_name":cluster,"group_id":group,"atlas_public_key":public,"atlas_private_key":private,"api_version":"2025-03-12","log_names":[x.strip() for x in names.split(',') if x.strip()],"slow_ms":1000,"observability_enabled":observability == "yes", "deployment_type":"atlas", "index_stats_hosts":[x.strip() for x in hosts.split(',') if x.strip()], "query_shape_source":query_source, "query_shape_window_hours":24, "index_stats_enabled":index_stats == "yes"}
+(path,bucket,prefix,tz,cluster,group,public,private,names,observability,query_source,index_stats,mongodb_uri,reports,region,model)=sys.argv[1:]
+cfg={"input_mode":"atlas_api","storage_provider":"local","llm_provider":None,"bucket":bucket,"prefix":prefix,"timezone":tz,"cluster_name":cluster,"group_id":group,"atlas_public_key":public,"atlas_private_key":private,"api_version":"2025-03-12","log_names":[x.strip() for x in names.split(',') if x.strip()],"slow_ms":1000,"observability_enabled":observability == "yes", "deployment_type":"atlas", "query_shape_source":query_source, "query_shape_window_hours":24, "index_stats_enabled":index_stats == "yes"}
 if mongodb_uri: cfg["mongodb_uri_template"] = mongodb_uri
 if reports == "yes": cfg.update({"llm_provider":"bedrock","bedrock_region":region,"bedrock_model_id":model})
 open(path,"w",encoding="utf-8").write(json.dumps(cfg,indent=2))
