@@ -90,8 +90,12 @@ class VertexLLM:
         if self.is_claude:
             messages = [{"role": "user", "content": user_content}]
             for turn in range(self.max_continuations + 1):
-                data = self._post({"anthropic_version": "vertex-2023-10-16", "system": system_prompt,
-                                   "messages": messages, "max_tokens": self.max_tokens, "temperature": 0.1})
+                # Claude Sonnet 5 rejects the legacy temperature parameter.
+                payload = {"anthropic_version": "vertex-2023-10-16", "system": system_prompt,
+                           "messages": messages, "max_tokens": self.max_tokens}
+                if "claude-sonnet-5" not in self.model.lower():
+                    payload["temperature"] = 0.1
+                data = self._post(payload)
                 text = "".join(c.get("text", "") for c in data.get("content", []) if c.get("type") == "text")
                 parts.append(text)
                 logger.info("Vertex/Claude turn=%d stop=%s usage=%s", turn, data.get("stop_reason"), data.get("usage"))

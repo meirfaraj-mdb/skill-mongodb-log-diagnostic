@@ -122,7 +122,7 @@ PROJECT=… REGION=us-central1 STAGING_BUCKET=gs://… \
 RUNTIME_SA=mongodb-log-agent@${PROJECT}.iam.gserviceaccount.com \
 SECRET_NAME=atlas-log-agent ./deploy/gcp/deploy-adk-agent-engine.sh
 ```
-This packages the shared pipeline and vendored diagnostic skill with `google_adk_agent`, then deploys `root_agent` to Agent Engine; it does not clone any GitHub content. The wrapper has two tools: `run_daily_diagnostics` (download → extract → report) and `run_diagnostic_stage` for a named recovery/backfill stage. The secret value never enters the ADK package; the runtime uses its service account to read it.
+This packages the shared pipeline and vendored diagnostic skill with `google_adk_agent`, then deploys `root_agent` to Agent Engine; it does not clone any GitHub content. The wrapper has three tools: `run_daily_diagnostics` (download → extract → report), `run_existing_bucket_diagnostics` (GCS/local bucket data without Atlas API), and `run_diagnostic_stage` for a named recovery/backfill stage. The secret value never enters the ADK package; the runtime uses its service account to read it.
 
 ## Running stages / backfill
 * **AWS Lambda event:** `{"stage": "all|download|extract|report", "log_date": "YYYY-MM-DD"}`
@@ -146,7 +146,7 @@ This packages the shared pipeline and vendored diagnostic skill with `google_adk
 Place the complete external skill under `skills/mongodb-log-diagnostic/`, preserving its `scripts/` and `references/` paths. AWS and Google builds deliberately fail early if the extractor or either report reference is missing.
 
 ## Known limitations
-* **Driver CVEs:** the LLM runs without web access, so reports state *"CVE lookup could not be completed from the available sources"*, as the analysis prompt requires.
+* **Driver CVEs:** reports use the checked-in offline driver-CVE snapshot only. A no-match means no match in that dated snapshot, not that a driver is safe.
 * **Baselines:** only extracts that already exist are compared. To backfill D-2/D-8, run `--stage extract --log-date <day>`.
 * **Agent Engine runtime sizing:** validate the largest daily `.gz` against Agent Engine runtime limits before production; the prior Cloud Run deployment remains only as a legacy alternative.
 * **Not collected:** audit logs are skipped by the extract step. FTDC is not collected because the Atlas logs API does not provide it.
@@ -168,3 +168,7 @@ See `samples/secret.atlas-observability.example.json` and `skills/mongodb-observ
 ## Offline CVE catalog
 
 The report pipeline uses `skills/mongodb-log-diagnostic/references/offline-driver-cves.json` when it has no Internet access. It reports only matching entries and the catalog refresh date. A no-match is explicitly not a clean bill of health. Refresh this checked-in snapshot manually from MongoDB Security Bulletins and Alerts.
+
+## Local Atlas + Vertex report test
+
+Use `samples/macos-local-atlas-vertex-test.sh` for Atlas download and local simulated-bucket extraction, with optional Vertex AI reports. See `samples/local-atlas-vertex-report.md`.
