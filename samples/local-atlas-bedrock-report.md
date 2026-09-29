@@ -61,3 +61,14 @@ python -m agent.handler --stage report --log-date YYYY-MM-DD
 ```
 
 **Defaults:** Bedrock uses `eu-west-1` (Ireland) and `eu.anthropic.claude-sonnet-5`. You may override either value when prompted if your organization provides a different approved inference-profile ID.
+
+## Optional observability test
+
+The local runner now asks whether to collect observability after extraction and before reports.
+Choose `yes` to collect **Atlas Query Shape Insights for the previous 24 hours**. Enter the Atlas node hostnames as a comma-separated list. This creates, per node:
+
+```text
+<prefix>/<date>/<node>/queryStats/query-stats.json
+```
+
+The default source is `atlas_api`, so no direct MongoDB connection is needed. You may additionally choose direct `indexStats`; that requires a read-only MongoDB URI template containing `{host}`.

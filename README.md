@@ -172,3 +172,19 @@ The report pipeline uses `skills/mongodb-log-diagnostic/references/offline-drive
 ## Local Atlas + Vertex report test
 
 Use `samples/macos-local-atlas-vertex-test.sh` for Atlas download and local simulated-bucket extraction, with optional Vertex AI reports. See `samples/local-atlas-vertex-report.md`.
+
+## Query-shape observability sources
+
+When the optional `observability` stage is enabled, query shapes are written per node to
+`<prefix>/<date>/<node>/queryStats/query-stats.json`.
+
+- **Atlas:** set `query_shape_source: "atlas_api"` (or `"auto"`) and configure the approved
+  `atlas_query_stats_url`. The stage requests the previous 24 hours by default.
+- **Ops Manager/self-managed:** set `query_shape_source: "mongodb"`; the node reader runs
+  `$queryStats` and writes its snapshot to the same path.
+- **Existing bucket:** set `query_shape_source: "bucket"` and upload those JSON files first.
+  `input_mode: "existing_bucket"` makes no Atlas API or MongoDB connection; reports simply
+  include the existing query-shape JSON when present.
+
+See `skills/mongodb-observability/SKILL.md` and
+`samples/secret.existing-bucket-query-shapes.example.json`.

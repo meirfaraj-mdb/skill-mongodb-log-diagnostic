@@ -64,6 +64,19 @@ prompt PREFIX "Isolated test prefix" "local-atlas-test"
 prompt LOG_DATE "Log date (YYYY-MM-DD; blank means yesterday in selected timezone)" ""
 [[ -z "$LOG_DATE" || "$LOG_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "Log date must be YYYY-MM-DD."
 prompt TIMEZONE "Timezone used for D-1" "Asia/Jerusalem"
+prompt ENABLE_OBSERVABILITY "Collect Atlas Query Shape Insights for the last 24 hours? (y/n)" "n"
+OBS_HOSTS=""; QUERY_SHAPE_SOURCE="disabled"; INDEX_STATS_ENABLED="n"; MONGODB_URI_TEMPLATE=""
+if [[ "$ENABLE_OBSERVABILITY" =~ ^[Yy]$ ]]; then
+  prompt OBS_HOSTS "Atlas node hostnames (comma-separated)" ""
+  [[ -n "$OBS_HOSTS" ]] || die "At least one node hostname is required for observability."
+  prompt QUERY_SHAPE_SOURCE "Query-shape source (atlas_api/mongodb/bucket)" "atlas_api"
+  [[ "$QUERY_SHAPE_SOURCE" == atlas_api || "$QUERY_SHAPE_SOURCE" == mongodb || "$QUERY_SHAPE_SOURCE" == bucket ]] || die "Use atlas_api, mongodb, or bucket."
+  prompt INDEX_STATS_ENABLED "Also collect direct MongoDB indexStats? (y/n)" "n"
+  if [[ "$INDEX_STATS_ENABLED" =~ ^[Yy]$ || "$QUERY_SHAPE_SOURCE" == mongodb ]]; then
+    prompt MONGODB_URI_TEMPLATE "MongoDB URI template ({host} is replaced)" ""
+    [[ -n "$MONGODB_URI_TEMPLATE" ]] || die "A MongoDB URI template is required for direct MongoDB collection."
+  fi
+fi
 prompt SECRET_MODE "Use existing Secrets Manager secret (e) or create a dedicated test secret (c)?" "e"
 
 CONFIG_FILE="$PROJECT_ROOT/.local-aws-atlas-test-secret.json"
@@ -80,14 +93,14 @@ else
   prompt CLUSTER_NAME "Atlas cluster name" ""
   [[ -n "$ATLAS_PUBLIC_KEY" && -n "$ATLAS_PRIVATE_KEY" && -n "$GROUP_ID" && -n "$CLUSTER_NAME" ]] || die "All Atlas fields are required."
   TEMP_SECRET_NAME="mongodb-log-diag-local-${USER//[^a-zA-Z0-9-]/-}-$(date +%s)"
-  python3 - "$CONFIG_FILE" "$BUCKET" "$PREFIX" "$TIMEZONE" "$ATLAS_PUBLIC_KEY" "$ATLAS_PRIVATE_KEY" "$GROUP_ID" "$CLUSTER_NAME" "$AWS_REGION" <<'PY'
+  python3 - "$CONFIG_FILE" "$BUCKET" "$PREFIX" "$TIMEZONE" "$ATLAS_PUBLIC_KEY" "$ATLAS_PRIVATE_KEY" "$GROUP_ID" "$CLUSTER_NAME" "$AWS_REGION" "$ENABLE_OBSERVABILITY" "$OBS_HOSTS" "$QUERY_SHAPE_SOURCE" "$INDEX_STATS_ENABLED" "$MONGODB_URI_TEMPLATE" <<'PY'
 import json, sys
-p, bucket, prefix, tz, public, private, group, cluster, region = sys.argv[1:]
+p, bucket, prefix, tz, public, private, group, cluster, region, observability, hosts, query_source, index_stats, mongodb_uri = sys.argv[1:]
 json.dump({"input_mode":"atlas_api", "bucket":bucket, "prefix":prefix, "timezone":tz,
            "cluster_name":cluster, "atlas_public_key":public, "atlas_private_key":private,
            "group_id":group, "api_version":"2025-03-12", "log_names":["auto"],
            "storage_provider":"s3", "llm_provider":"bedrock", "bedrock_region":region,
-           "observability_enabled":False}, open(p, "w"), indent=2)
+           "observability_enabled":observability.lower() == "y", "deployment_type":"atlas", "index_stats_hosts":[x.strip() for x in hosts.split(',') if x.strip()], "query_shape_source":query_source, "query_shape_window_hours":24, "index_stats_enabled":index_stats.lower() == "y", **({"mongodb_uri_template":mongodb_uri} if mongodb_uri else {})}, open(p, "w"), indent=2)
 PY
   chmod 600 "$CONFIG_FILE"
   ATLAS_SECRET_ID="$(aws "${AWS_ARGS[@]}" secretsmanager create-secret --name "$TEMP_SECRET_NAME" --secret-string "file://$CONFIG_FILE" --query ARN --output text)"
@@ -108,6 +121,13 @@ python3 -m venv .venv-local-aws
 source .venv-local-aws/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements-aws.txt
+if [[ "$ENABLE_OBSERVABILITY" =~ ^[Yy]$ ]]; then
+  python -m pip install 'pymongo>=4.6' 'requests>=2.31'
+  if [[ "$SECRET_MODE" == "e" ]]; then
+    note "Existing-secret note"
+    printf '%s\n' "The existing secret must already set observability_enabled, index_stats_hosts, and query_shape_source."
+  fi
+fi
 
 export CLOUD_PROVIDER=aws
 export ATLAS_SECRET_ID
@@ -130,6 +150,12 @@ else
 fi
 [[ -n "$LOG_DATE" ]] && CMD+=(--log-date "$LOG_DATE")
 "${CMD[@]}"
+if [[ "$ENABLE_OBSERVABILITY" =~ ^[Yy]$ ]]; then
+  note "Collecting observability one node at a time"
+  CMD=(python -m agent.handler --stage observability)
+  [[ -n "$LOG_DATE" ]] && CMD+=(--log-date "$LOG_DATE")
+  "${CMD[@]}"
+fi
 
 note "Objects written under s3://$BUCKET/$PREFIX/"
 aws "${AWS_ARGS[@]}" s3 ls "s3://$BUCKET/$PREFIX/" --recursive

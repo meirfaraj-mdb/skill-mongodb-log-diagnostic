@@ -35,3 +35,13 @@ Defaults:
 ```
 
 The report uses the bundled offline driver-CVE catalog. A local config file named `.local-atlas-vertex-test.json` contains Atlas credentials; do not commit it.
+
+## Optional observability test
+
+The runner can collect Atlas Query Shape Insights after extraction and before optional Vertex reports. Choose `yes`, enter the Atlas node hostnames, and keep the default `atlas_api` source to retrieve the previous 24 hours through the existing Atlas API key. Outputs are local:
+
+```text
+<prefix>/<date>/<node>/queryStats/query-stats.json
+```
+
+Direct `indexStats` is optional and requires a read-only MongoDB URI template with `{host}`.
