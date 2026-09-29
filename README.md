@@ -57,6 +57,14 @@ Reports do not access the internet. `skills/mongodb-log-diagnostic/references/of
 * [GCP existing-bucket secret](samples/secret.gcp-existing-bucket.example.json)
 * [Local existing-bucket secret](samples/secret.local-existing-bucket.example.json)
 * [macOS local GCP bootstrap script](samples/macos-local-gcp-test.sh)
+* [AWS + Atlas local test guide](samples/aws-local-atlas-test.md)
+* [macOS AWS + Atlas bootstrap script](samples/macos-local-aws-atlas-test.sh)
+* [AWS + Atlas test secret template](samples/secret.aws-atlas-local-test.example.json)
+* [Local Atlas-to-folder test guide](samples/local-atlas-folder-test.md) — optional Bedrock reports, with all files stored locally
+* [macOS local Atlas-to-folder script](samples/macos-local-atlas-folder-test.sh)
+* [Local Atlas-to-folder config template](samples/secret.local-atlas-folder.example.json)
+* [Vertex existing-bucket deployment guide](samples/vertex-existing-bucket-deploy.md)
+* [Interactive macOS/Cloud Shell Vertex deployer](samples/macos-deploy-vertex-existing-bucket.sh)
 
 ## Existing bucket mode (GCP, no Atlas API)
 Use this mode when `.gz` MongoDB logs are already in Cloud Storage. The pipeline makes **no Atlas API request**: it discovers the raw logs, downloads each one temporarily, runs the local extractor, then uploads the extracts and reports back to the same bucket.
@@ -142,3 +150,21 @@ Place the complete external skill under `skills/mongodb-log-diagnostic/`, preser
 * **Baselines:** only extracts that already exist are compared. To backfill D-2/D-8, run `--stage extract --log-date <day>`.
 * **Agent Engine runtime sizing:** validate the largest daily `.gz` against Agent Engine runtime limits before production; the prior Cloud Run deployment remains only as a legacy alternative.
 * **Not collected:** audit logs are skipped by the extract step. FTDC is not collected because the Atlas logs API does not provide it.
+
+
+## Optional observability collection
+
+Set `observability_enabled: true` only for an Atlas or Ops Manager deployment where the runtime can reach MongoDB. The stage runs **sequentially** per node: it completes the node’s `$indexStats` collection and upload before starting the next node. It writes:
+
+```text
+<prefix>/<date>/<node>/indexStats/index-stats.json
+<prefix>/<date>/<node>/queryStats/query-stats.json
+```
+
+`$indexStats` is collected directly from every configured node because its counters are node-local. The Atlas `queryStats` equivalent is collected using the Atlas Query Shape Insights API and written under each node’s `queryStats/` directory, filtered with that node’s Atlas process ID when configured. Ops Manager does not call this Atlas API. `input_mode: existing_bucket` always skips this entire stage and makes no MongoDB or Atlas connection.
+
+See `samples/secret.atlas-observability.example.json` and `skills/mongodb-observability/SKILL.md`.
+
+## Offline CVE catalog
+
+The report pipeline uses `skills/mongodb-log-diagnostic/references/offline-driver-cves.json` when it has no Internet access. It reports only matching entries and the catalog refresh date. A no-match is explicitly not a clean bill of health. Refresh this checked-in snapshot manually from MongoDB Security Bulletins and Alerts.

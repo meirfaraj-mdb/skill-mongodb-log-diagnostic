@@ -35,7 +35,7 @@ aws --version
 prompt AWS_PROFILE "AWS CLI profile (leave blank for default)" ""
 AWS_ARGS=()
 [[ -n "$AWS_PROFILE" ]] && AWS_ARGS+=(--profile "$AWS_PROFILE")
-prompt AWS_REGION "AWS region" "$(aws "${AWS_ARGS[@]}" configure get region 2>/dev/null || true)"
+prompt AWS_REGION "AWS region" "$(aws "${AWS_ARGS[@]}" configure get region 2>/dev/null || printf "eu-west-1")"
 [[ -n "$AWS_REGION" ]] || die "AWS region is required."
 AWS_ARGS+=(--region "$AWS_REGION")
 
@@ -98,7 +98,7 @@ fi
 prompt RUN_REPORTS "Also generate Bedrock reports? (y/n)" "n"
 BEDROCK_MODEL_ID=""
 if [[ "$RUN_REPORTS" =~ ^[Yy]$ ]]; then
-  prompt BEDROCK_MODEL_ID "Bedrock inference profile/model ID" ""
+  prompt BEDROCK_MODEL_ID "Bedrock inference profile/model ID" "eu.anthropic.claude-sonnet-5"
   [[ -n "$BEDROCK_MODEL_ID" ]] || die "A Bedrock model/inference-profile ID is required for reports."
 fi
 

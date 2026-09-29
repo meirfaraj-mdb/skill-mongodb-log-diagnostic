@@ -17,7 +17,7 @@ CONTINUE = "Continue the report exactly where you stopped. Do not repeat content
 
 class BedrockLLM:
     def __init__(self, config: dict, client=None):
-        self.model_id = config.get("bedrock_model_id") or os.environ.get("BEDROCK_MODEL_ID")
+        self.model_id = config.get("bedrock_model_id") or os.environ.get("BEDROCK_MODEL_ID") or "eu.anthropic.claude-sonnet-5"
         if not self.model_id:
             raise ValueError("Set bedrock_model_id in the secret or BEDROCK_MODEL_ID")
         self.max_tokens = int(config.get("report_max_tokens", 16000))
@@ -25,7 +25,7 @@ class BedrockLLM:
         if client is None:
             import boto3
             from botocore.config import Config
-            client = boto3.client("bedrock-runtime", region_name=config.get("bedrock_region") or os.environ.get("BEDROCK_REGION"),
+            client = boto3.client("bedrock-runtime", region_name=config.get("bedrock_region") or os.environ.get("BEDROCK_REGION") or "eu-west-1",
                                   config=Config(read_timeout=900, connect_timeout=30, retries={"max_attempts": 4, "mode": "adaptive"}))
         self.client = client
 

@@ -1,6 +1,6 @@
 # Local Atlas-to-folder test (macOS)
 
-Use this test when you want to exercise the real Atlas log-download API while keeping all storage local. The local folder emulates an S3 or GCS bucket. It does not authenticate to AWS or Google Cloud, create a cloud resource, call Bedrock/Vertex, generate reports, or run index/query statistics.
+Use this test when you want to exercise the real Atlas log-download API while keeping all storage local. The local folder emulates an S3 or GCS bucket. It does not use AWS or Google Cloud storage, create cloud storage resources, or run index/query statistics. The script can optionally call Amazon Bedrock after extraction to generate reports; all report files still remain in the local folder.
 
 ## What it runs
 
@@ -90,4 +90,6 @@ python -m agent.handler --stage extract --log-date 2026-09-26 --force-reextract
 
 ## Config template
 
-See [secret.local-atlas-folder.example.json](secret.local-atlas-folder.example.json). It is a local config file, not a cloud secret. Keep the `storage_provider` as `local` and `llm_provider` as `null` for this test.
+See [secret.local-atlas-folder.example.json](secret.local-atlas-folder.example.json). It is a local config file, not a cloud secret. Keep `storage_provider` as `local`. The script defaults `llm_provider` to `null`; select the optional Bedrock prompt only when you want local reports generated through Bedrock.
+
+**Defaults:** Bedrock uses `eu-west-1` (Ireland) and `eu.anthropic.claude-sonnet-5`. You may override either value when prompted if your organization provides a different approved inference-profile ID.

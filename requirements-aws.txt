@@ -1,2 +1,4 @@
 # AWS runtime (boto3 is preinstalled in the Lambda Python runtime; pin it for ECS/local)
 boto3>=1.34
+
+pymongo>=4.6

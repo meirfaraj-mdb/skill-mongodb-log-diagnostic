@@ -89,3 +89,5 @@ If you select an existing secret, its `bucket` and `prefix` control where the pi
 ## Cleanup
 
 At the end, the script asks before deleting a dedicated test secret or a bucket it created. Choose cleanup only after confirming the test results. AWS deletion may remain visible for a short time due to service propagation.
+
+**Defaults:** Bedrock uses `eu-west-1` (Ireland) and `eu.anthropic.claude-sonnet-5`. You may override either value when prompted if your organization provides a different approved inference-profile ID.
