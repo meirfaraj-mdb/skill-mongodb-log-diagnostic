@@ -33,7 +33,7 @@ read -r -s -p "Atlas API private key (input hidden): " ATLAS_PRIVATE_KEY; printf
 [[ -n "$CLUSTER_NAME" && -n "$GROUP_ID" && -n "$ATLAS_PUBLIC_KEY" && -n "$ATLAS_PRIVATE_KEY" ]] || die "Atlas values are required."
 prompt LOG_NAMES "Log names (comma-separated: auto,mongodb,mongos)" "auto"
 prompt GENERATE_REPORTS "Generate local reports with Amazon Bedrock? (yes/no)" "no"
-GENERATE_REPORTS="${GENERATE_REPORTS,,}"
+GENERATE_REPORTS=$(printf '%s' "$GENERATE_REPORTS" | tr '[:upper:]' '[:lower:]')
 [[ "$GENERATE_REPORTS" == yes || "$GENERATE_REPORTS" == no ]] || die "Enter yes or no."
 BEDROCK_REGION=""; BEDROCK_MODEL_ID=""; AWS_PROFILE_NAME=""
 if [[ "$GENERATE_REPORTS" == yes ]]; then

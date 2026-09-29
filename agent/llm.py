@@ -29,12 +29,23 @@ class BedrockLLM:
                                   config=Config(read_timeout=900, connect_timeout=30, retries={"max_attempts": 4, "mode": "adaptive"}))
         self.client = client
 
+    def _inference_config(self) -> dict:
+        """Build Converse inference config compatible with the selected model.
+
+        Claude Sonnet 5 rejects ``temperature`` in the Bedrock Converse API.
+        Keep the former low-temperature setting for other supported models.
+        """
+        config = {"maxTokens": self.max_tokens}
+        if "claude-sonnet-5" not in self.model_id.lower():
+            config["temperature"] = 0.1
+        return config
+
     def generate(self, system_prompt: str, user_content: str) -> str:
         messages = [{"role": "user", "content": [{"text": user_content}]}]
         parts = []
         for turn in range(self.max_continuations + 1):
             resp = self.client.converse(modelId=self.model_id, system=[{"text": system_prompt}], messages=messages,
-                                        inferenceConfig={"maxTokens": self.max_tokens, "temperature": 0.1})
+                                        inferenceConfig=self._inference_config())
             text = "".join(c.get("text", "") for c in resp["output"]["message"]["content"])
             parts.append(text)
             logger.info("Bedrock turn=%d stop=%s usage=%s", turn, resp.get("stopReason"), resp.get("usage"))
