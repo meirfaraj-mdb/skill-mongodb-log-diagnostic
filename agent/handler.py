@@ -13,7 +13,7 @@ import argparse
 import json
 import os
 
-from . import download_stage, extract_stage, report_stage, skills
+from . import download_stage, extract_stage, observability_stage, report_stage, skills
 from .common import logger
 from .providers import load_config
 
@@ -46,6 +46,8 @@ def run_pipeline(event: dict, config: dict | None = None) -> dict:
     if stage in ("all", "extract"):
         out["extract"] = extract_stage.run(config, log_date, logs=logs,
                                            skip_existing=not event.get("force_reextract", False))
+    if stage in ("all", "observability"):
+        out["observability"] = observability_stage.run(config, log_date)
     if stage in ("all", "report"):
         out["report"] = report_stage.run(config, log_date)
     return out
@@ -59,7 +61,7 @@ def lambda_handler(event, context):  # AWS Lambda
 
 def main(argv=None) -> None:  # Cloud Run Job / local
     p = argparse.ArgumentParser(description="MongoDB log diagnostic agent")
-    p.add_argument("--stage", default=os.environ.get("STAGE", "all"), choices=["all", "download", "extract", "report"])
+    p.add_argument("--stage", default=os.environ.get("STAGE", "all"), choices=["all", "download", "extract", "observability", "report"])
     p.add_argument("--log-date", default=None)
     p.add_argument("--no-skip-existing", action="store_true", help="re-download logs even if already stored")
     p.add_argument("--force-reextract", action="store_true", help="re-run a node extraction even when it already exists in storage")

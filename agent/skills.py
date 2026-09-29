@@ -51,3 +51,7 @@ def aws_storage():
 
 def gcp_storage():
     return load_skill_module("gcp-storage", "gcp_storage")
+
+
+def observability():
+    return load_skill_module("mongodb-observability", "observability")

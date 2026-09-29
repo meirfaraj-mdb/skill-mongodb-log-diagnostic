@@ -35,10 +35,13 @@ def build_system_prompt() -> str:
         "The document labelled `current` is the authoritative extractionOccurence.json. Baselines are labelled "
         "`n-1` (yesterday) and `n-8` (one week ago) and are extractionshort.json files. A `precomputed_diff` "
         "document gives deterministic comparisons; use its exact numbers for the historical comparison table. "
-        "You have no web access in this run: for driver CVEs, write `CVE lookup could not be completed from the "
-        "available sources` rather than guessing. Output ONLY the final Markdown report.",
+        "You have no web access in this run. The `offline_driver_cves` document is the only permitted CVE source: "
+        "use matching entries as confirmed offline-snapshot findings and include catalog `refreshed_at`; if its status "
+        "is `no_match_in_snapshot`, say that exactly, without claiming the driver is safe or a live lookup occurred. "
+        "Do not browse or invent CVEs. Output ONLY the final Markdown report.",
         "=== references/analysis-prompt.md ===\n" + _read_skill_text("references/analysis-prompt.md"),
         "=== references/extracted-signal-reference.md ===\n" + _read_skill_text("references/extracted-signal-reference.md"),
+        "=== references/analysis-prompt.offline-cve-overlay.md ===\n" + _read_skill_text("references/analysis-prompt.offline-cve-overlay.md"),
     ])
 
 
@@ -111,6 +114,9 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
         if diffs:
             docs.append(_doc("precomputed_diff", {}, json.dumps(diff_doc, separators=(",", ":"))))
         docs.append(_doc("offline_driver_cves", {}, json.dumps(offline_cves, separators=(",", ":"))))
+        for label, key in (("index_stats", layout.index_stats(log_date, host_dir)), ("query_stats", layout.query_stats(log_date, host_dir))):
+            if store.exists(key):
+                docs.append(_doc(label, {"node": host_dir}, store.get_text(key)))
         header = (f"Generate the MongoDB Log Diagnostic report for node `{host_dir}` ({log_name} log), "
                   f"log day {log_date} (Atlas project timezone day). Baselines supplied: "
                   f"{', '.join(d['label'] for d in diffs) or 'none -- omit historical-comparison claims'}.")

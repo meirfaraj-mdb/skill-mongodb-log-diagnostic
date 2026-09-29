@@ -40,7 +40,7 @@ def run_existing_bucket_diagnostics(log_date: str) -> dict:
 
 
 def run_diagnostic_stage(
-    stage: Literal["download", "extract", "report"],
+    stage: Literal["download", "extract", "observability", "report"],
     log_date: str | None = None,
     skip_existing: bool = True,
 ) -> dict:
@@ -48,7 +48,8 @@ def run_diagnostic_stage(
 
     Download fetches Atlas logs into GCS. Extraction handles one node at a time and
     skips a node whose canonical extract is already uploaded unless `skip_existing`
-    is false. Report generates D-2/D-8 diffs when available and the cluster summary.
+    is false. Observability collects node-local indexStats and, for Atlas only,
+    Query Shape Insights. Report generates D-2/D-8 diffs when available.
     """
     return _run(stage, log_date, skip_existing)
 
@@ -66,7 +67,8 @@ def build_root_agent():
         instruction=(
             "You operate the MongoDB Atlas log diagnostic workflow. "
             "For a daily Atlas API run, call run_daily_diagnostics. When the user asks to analyze existing GCS data without Atlas API access, call run_existing_bucket_diagnostics and require a date. For a requested backfill or "
-            "recovery, call run_diagnostic_stage with exactly one requested stage. "
+            "recovery, call run_diagnostic_stage with exactly one requested stage. In existing-bucket mode, "
+            "do not run observability because it deliberately has no MongoDB or Atlas access. "
             "Do not claim a run completed until the tool returns. Summarize only tool results."
         ),
         tools=[run_daily_diagnostics, run_existing_bucket_diagnostics, run_diagnostic_stage],
