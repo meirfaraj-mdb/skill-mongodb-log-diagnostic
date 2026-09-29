@@ -28,9 +28,9 @@ See `references/config-schema.md`. Required: `atlas_public_key`, `atlas_private_
 sent as epoch seconds `startDate` / `endDate`, exactly like the lambda.
 
 ## Output layout (relative)
-`<log_date>/<safe(host)>/<log_name>.gz`, where `safe()` replaces `[^A-Za-z0-9._-]` with `_`. A storage
+`<log_date>/<safe(host)>/mongodb/<log_name>.gz`, where `safe()` replaces `[^A-Za-z0-9._-]` with `_`. A storage
 caller prefixes this with its own bucket prefix, so the result is identical to the lambda's
-`<s3_prefix>/<date>/<host>/<log>.gz`.
+`<s3_prefix>/<date>/<host>/mongodb/<log>.gz`.
 
 ## CLI
 ```bash
