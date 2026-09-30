@@ -6,7 +6,7 @@
 
 Secret keys are the lambda's keys plus optional generic ones:
     bucket | s3_bucket | gcs_bucket      prefix | s3_prefix | gcs_prefix
-    storage_provider = s3 | gcs | local  llm_provider = bedrock | vertex
+    storage_provider = s3 | gcs | local  llm_provider = bedrock | vertex | anthropic
 """
 from __future__ import annotations
 
@@ -161,4 +161,6 @@ def get_llm(config: dict):
         return llm.BedrockLLM(config)
     if provider == "vertex":
         return llm.VertexLLM(config)
-    raise ValueError(f"Unknown or missing llm_provider {provider!r} (bedrock|vertex)")
+    if provider == "anthropic":
+        return llm.AnthropicLLM(config)
+    raise ValueError(f"Unknown or missing llm_provider {provider!r} (bedrock|vertex|anthropic)")

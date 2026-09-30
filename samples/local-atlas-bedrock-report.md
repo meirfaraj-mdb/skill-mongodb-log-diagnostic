@@ -26,7 +26,7 @@ chmod +x samples/macos-local-atlas-folder-test.sh
 ./samples/macos-local-atlas-folder-test.sh
 ```
 
-When asked, select `yes` for Bedrock reports, then provide:
+When asked for a report provider, select `bedrock` (the default is `none`), then provide:
 
 * Bedrock Region
 * Approved model or inference-profile ID
@@ -72,3 +72,9 @@ Choose `yes` to collect **Atlas Query Shape Insights for the previous 24 hours**
 ```
 
 The default source is `atlas_api`, so no direct MongoDB connection is needed. You may additionally choose direct `indexStats`; that requires a read-only MongoDB URI template containing `{host}`.
+
+## Use direct Claude instead
+
+Select `anthropic` at the report-provider prompt. Set `ANTHROPIC_API_KEY` in your shell or enter it at the hidden prompt. No AWS or Google login is needed for this option. The key is not written to the local JSON config; only `anthropic_model` is saved. The script installs the Anthropic SDK when selected. Use an Anthropic API model ID available to your account (the proposed default is `claude-sonnet-5`; override it if needed). The Atlas download and all generated files remain local.
+
+To rerun only reporting after the script exits, export the key in your terminal, set `llm_provider` to `anthropic` and `anthropic_model` in `.local-atlas-folder-test.json`, then run the report-only command above.

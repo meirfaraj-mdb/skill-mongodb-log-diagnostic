@@ -41,7 +41,7 @@ The lambda's keys are unchanged. **Existing AWS secrets keep working as-is**: `s
 |---|---|
 | `atlas_public_key`, `atlas_private_key`, `group_id`, `cluster_name`, `timezone`, `api_version`, `host_selector`/`hostnames`, `log_names` | Atlas skill (see `skills/mongodb-atlas-logs/references/config-schema.md`) |
 | `bucket` (or `s3_bucket` / `gcs_bucket`), `prefix` (or `s3_prefix` / `gcs_prefix`) | Accepts `s3://…` / `gs://…` / `file://…` to force the storage provider |
-| `storage_provider`, `llm_provider` | Optional overrides. Defaults: AWS = `s3` + `bedrock`, GCP = `gcs` + `vertex` |
+| `storage_provider`, `llm_provider` | Optional overrides. Defaults: AWS = `s3` + `bedrock`, GCP = `gcs` + `vertex`; local report option = `anthropic` (direct Claude API) |
 | `bedrock_model_id`, `bedrock_region` | AWS LLM |
 | `vertex_model`, `vertex_location`, `vertex_project` | GCP LLM (a `claude-*` model id uses the Anthropic publisher; anything else uses Gemini) |
 | `slow_ms`, `expected_node_count` (3), `report_max_tokens`, `report_max_input_chars`, `cluster_summary` | Pipeline tuning |
@@ -169,9 +169,9 @@ See `samples/secret.atlas-observability.example.json` and `skills/mongodb-observ
 
 The report pipeline uses `skills/mongodb-log-diagnostic/references/offline-driver-cves.json` when it has no Internet access. It reports only matching entries and the catalog refresh date. A no-match is explicitly not a clean bill of health. Refresh this checked-in snapshot manually from MongoDB Security Bulletins and Alerts.
 
-## Local Atlas + Vertex report test
+## Local Atlas report tests
 
-Use `samples/macos-local-atlas-vertex-test.sh` for Atlas download and local simulated-bucket extraction, with optional Vertex AI reports. See `samples/local-atlas-vertex-report.md`.
+Both `samples/macos-local-atlas-folder-test.sh` and `samples/macos-local-atlas-vertex-test.sh` download from Atlas and store logs, extracts and reports in a local folder. Reporting defaults to `none`; optionally choose `bedrock`, `vertex`, or `anthropic` (direct Claude API). Direct Claude uses `ANTHROPIC_API_KEY` from your environment or a hidden prompt; the API key is not saved to the local config. Use an Anthropic API model ID your account can invoke. See `samples/local-atlas-bedrock-report.md` and `samples/local-atlas-vertex-report.md`.
 
 ## Query-shape observability sources
 

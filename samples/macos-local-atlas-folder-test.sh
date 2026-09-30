@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# macOS: Atlas API -> local folder -> sequential extraction -> optional Bedrock reports.
+# macOS: Atlas API -> local folder -> extraction -> optional Bedrock/Vertex/direct Claude reports.
 # All logs, extracts, and reports stay local. Atlas and optional Bedrock are remote.
 set -euo pipefail
 
@@ -48,17 +48,35 @@ if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
     [[ -n "$MONGODB_URI_TEMPLATE" ]] || die "A MongoDB URI template is required for direct MongoDB collection."
   fi
 fi
-prompt GENERATE_REPORTS "Generate local reports with Amazon Bedrock? (yes/no)" "no"
-GENERATE_REPORTS=$(printf '%s' "$GENERATE_REPORTS" | tr '[:upper:]' '[:lower:]')
-[[ "$GENERATE_REPORTS" == yes || "$GENERATE_REPORTS" == no ]] || die "Enter yes or no."
+prompt REPORT_PROVIDER "Report provider (none/bedrock/vertex/anthropic)" "none"
+REPORT_PROVIDER=$(printf '%s' "$REPORT_PROVIDER" | tr '[:upper:]' '[:lower:]')
+[[ "$REPORT_PROVIDER" == none || "$REPORT_PROVIDER" == bedrock || "$REPORT_PROVIDER" == vertex || "$REPORT_PROVIDER" == anthropic ]] || die "Choose none, bedrock, vertex, or anthropic."
 BEDROCK_REGION=""; BEDROCK_MODEL_ID=""; AWS_PROFILE_NAME=""
-if [[ "$GENERATE_REPORTS" == yes ]]; then
-  note "Amazon Bedrock configuration"
-  prompt BEDROCK_REGION "AWS region for Bedrock" "eu-west-1"
-  prompt BEDROCK_MODEL_ID "Bedrock model or inference-profile ID" "eu.anthropic.claude-sonnet-5"
-  [[ -n "$BEDROCK_MODEL_ID" ]] || die "A Bedrock model or inference-profile ID is required."
-  prompt AWS_PROFILE_NAME "AWS profile (blank uses default credentials)" ""
-fi
+GCP_PROJECT=""; VERTEX_LOCATION=""; VERTEX_MODEL=""; ANTHROPIC_MODEL=""
+case "$REPORT_PROVIDER" in
+  bedrock)
+    note "Amazon Bedrock configuration"
+    prompt BEDROCK_REGION "AWS region" "eu-west-1"
+    prompt BEDROCK_MODEL_ID "Bedrock model or inference-profile ID" "eu.anthropic.claude-sonnet-5"
+    prompt AWS_PROFILE_NAME "AWS profile (blank uses default credentials)" ""
+    ;;
+  vertex)
+    note "Vertex AI configuration"
+    prompt GCP_PROJECT "GCP project ID" ""
+    [[ -n "$GCP_PROJECT" ]] || die "A GCP project ID is required for Vertex reports."
+    prompt VERTEX_LOCATION "Vertex location" "global"
+    prompt VERTEX_MODEL "Vertex Claude model ID" "claude-sonnet-5"
+    ;;
+  anthropic)
+    note "Direct Claude API configuration (no AWS/GCP credentials needed)"
+    prompt ANTHROPIC_MODEL "Anthropic API model ID (must be enabled for your API key)" "claude-sonnet-5"
+    if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+      read -r -s -p "Anthropic API key (input hidden): " ANTHROPIC_API_KEY; printf '\n'
+      [[ -n "$ANTHROPIC_API_KEY" ]] || die "ANTHROPIC_API_KEY is required for direct Claude reports."
+      export ANTHROPIC_API_KEY
+    fi
+    ;;
+esac
 
 note "Creating Python environment"
 python3 -m venv .venv-local-atlas-folder
@@ -68,29 +86,43 @@ python -m pip install --upgrade pip
 if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
   python -m pip install 'pymongo>=4.6' 'requests>=2.31'
 fi
-if [[ "$GENERATE_REPORTS" == yes ]]; then
-  python -m pip install -r requirements-aws.txt
-  [[ -z "$AWS_PROFILE_NAME" ]] || export AWS_PROFILE="$AWS_PROFILE_NAME"
-  export AWS_REGION="$BEDROCK_REGION"
-  note "Checking AWS identity used for Bedrock"
-  python - <<'PY'
+case "$REPORT_PROVIDER" in
+  bedrock)
+    python -m pip install -r requirements-aws.txt
+    [[ -z "$AWS_PROFILE_NAME" ]] || export AWS_PROFILE="$AWS_PROFILE_NAME"
+    export AWS_REGION="$BEDROCK_REGION"
+    note "Checking AWS identity used for Bedrock"
+    python - <<'PYCODE'
 import boto3
 try:
     print(boto3.client("sts").get_caller_identity()["Arn"])
 except Exception as exc:
     raise SystemExit("AWS credentials are not usable: " + str(exc))
-PY
-fi
+PYCODE
+    ;;
+  vertex)
+    command -v gcloud >/dev/null || die "gcloud is required for Vertex reports. Install Google Cloud CLI, then rerun."
+    python -m pip install 'google-auth>=2.27' 'requests>=2.31'
+    note "Authenticating Application Default Credentials for Vertex"
+    gcloud config set project "$GCP_PROJECT"
+    gcloud auth application-default login
+    ;;
+  anthropic)
+    python -m pip install 'anthropic>=0.49'
+    ;;
+esac
 
 CONFIG_FILE="$PROJECT_ROOT/.local-atlas-folder-test.json"
-python - "$CONFIG_FILE" "$LOCAL_BUCKET" "$PREFIX" "$TIMEZONE" "$CLUSTER_NAME" "$GROUP_ID" "$ATLAS_PUBLIC_KEY" "$ATLAS_PRIVATE_KEY" "$LOG_NAMES" "$ENABLE_OBSERVABILITY" "$QUERY_SHAPE_SOURCE" "$INDEX_STATS_ENABLED" "$MONGODB_URI_TEMPLATE" "$GENERATE_REPORTS" "$BEDROCK_REGION" "$BEDROCK_MODEL_ID" <<'PY'
+python - "$CONFIG_FILE" "$LOCAL_BUCKET" "$PREFIX" "$TIMEZONE" "$CLUSTER_NAME" "$GROUP_ID" "$ATLAS_PUBLIC_KEY" "$ATLAS_PRIVATE_KEY" "$LOG_NAMES" "$ENABLE_OBSERVABILITY" "$QUERY_SHAPE_SOURCE" "$INDEX_STATS_ENABLED" "$MONGODB_URI_TEMPLATE" "$REPORT_PROVIDER" "$BEDROCK_REGION" "$BEDROCK_MODEL_ID" "$GCP_PROJECT" "$VERTEX_LOCATION" "$VERTEX_MODEL" "$ANTHROPIC_MODEL" <<'PYCODE'
 import json, sys
-(path,bucket,prefix,tz,cluster,group,public,private,names,observability,query_source,index_stats,mongodb_uri,reports,region,model)=sys.argv[1:]
+(path,bucket,prefix,tz,cluster,group,public,private,names,observability,query_source,index_stats,mongodb_uri,provider,region,bedrock_model,project,location,vertex_model,anthropic_model)=sys.argv[1:]
 cfg={"input_mode":"atlas_api","storage_provider":"local","llm_provider":None,"bucket":bucket,"prefix":prefix,"timezone":tz,"cluster_name":cluster,"group_id":group,"atlas_public_key":public,"atlas_private_key":private,"api_version":"2025-03-12","log_names":[x.strip() for x in names.split(',') if x.strip()],"slow_ms":1000,"observability_enabled":observability == "yes", "deployment_type":"atlas", "query_shape_source":query_source, "query_shape_window_hours":24, "index_stats_enabled":index_stats == "yes"}
 if mongodb_uri: cfg["mongodb_uri_template"] = mongodb_uri
-if reports == "yes": cfg.update({"llm_provider":"bedrock","bedrock_region":region,"bedrock_model_id":model})
-open(path,"w",encoding="utf-8").write(json.dumps(cfg,indent=2))
-PY
+if provider == "bedrock": cfg.update({"llm_provider":"bedrock","bedrock_region":region,"bedrock_model_id":bedrock_model})
+if provider == "vertex": cfg.update({"llm_provider":"vertex","vertex_project":project,"vertex_location":location,"vertex_model":vertex_model})
+if provider == "anthropic": cfg.update({"llm_provider":"anthropic","anthropic_model":anthropic_model})
+with open(path,"w",encoding="utf-8") as f: json.dump(cfg,f,indent=2)
+PYCODE
 chmod 600 "$CONFIG_FILE"
 export CLOUD_PROVIDER=local ATLAS_CONFIG_FILE="$CONFIG_FILE" SKILLS_DIR="$PROJECT_ROOT/skills" DIAG_SKILL_DIR="$PROJECT_ROOT/skills/mongodb-log-diagnostic"
 
@@ -102,8 +134,8 @@ if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
   note "Collecting observability one node at a time"
   CMD=(python -m agent.handler --stage observability); [[ -z "$LOG_DATE" ]] || CMD+=(--log-date "$LOG_DATE"); "${CMD[@]}"
 fi
-if [[ "$GENERATE_REPORTS" == yes ]]; then
-  note "Generating Bedrock reports into the local bucket"
+if [[ "$REPORT_PROVIDER" != none ]]; then
+  note "Generating $REPORT_PROVIDER reports into the local bucket"
   CMD=(python -m agent.handler --stage report); [[ -z "$LOG_DATE" ]] || CMD+=(--log-date "$LOG_DATE"); "${CMD[@]}"
 fi
 [[ -n "$LOG_DATE" ]] || LOG_DATE="$(python - <<PY

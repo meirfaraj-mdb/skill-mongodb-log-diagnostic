@@ -90,6 +90,6 @@ python -m agent.handler --stage extract --log-date 2026-09-26 --force-reextract
 
 ## Config template
 
-See [secret.local-atlas-folder.example.json](secret.local-atlas-folder.example.json). It is a local config file, not a cloud secret. Keep `storage_provider` as `local`. The script defaults `llm_provider` to `null`; select the optional Bedrock prompt only when you want local reports generated through Bedrock.
+See [secret.local-atlas-folder.example.json](secret.local-atlas-folder.example.json). It is a local config file, not a cloud secret. Keep `storage_provider` as `local`. The script defaults to no reports; select `bedrock`, `vertex`, or `anthropic` when asked for a report provider. Direct Claude uses `ANTHROPIC_API_KEY` and no cloud-provider login.
 
 **Defaults:** Bedrock uses `eu-west-1` (Ireland) and `eu.anthropic.claude-sonnet-5`. You may override either value when prompted if your organization provides a different approved inference-profile ID.

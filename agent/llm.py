@@ -1,6 +1,7 @@
 """LLM backends for report generation.
 
   bedrock : Amazon Bedrock Converse API (boto3; Lambda role auth)
+  anthropic: Direct Claude API (ANTHROPIC_API_KEY)
   vertex  : Google Vertex AI (ADC service-account auth)
             - Gemini models   -> publishers/google/models/<m>:generateContent
             - Claude models   -> publishers/anthropic/models/<m>:rawPredict
@@ -114,4 +115,34 @@ class VertexLLM:
                 if cand.get("finishReason") != "MAX_TOKENS":
                     break
                 contents += [{"role": "model", "parts": [{"text": text}]}, {"role": "user", "parts": [{"text": CONTINUE}]}]
+        return "".join(parts)
+
+
+class AnthropicLLM:
+    """Direct Claude Messages API; API key supplied through environment, not config."""
+
+    def __init__(self, config: dict, client=None):
+        self.model = config.get("anthropic_model") or os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-5"
+        self.max_tokens = int(config.get("report_max_tokens", 16000))
+        self.max_continuations = int(config.get("report_max_continuations", 3))
+        if client is None:
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                raise ValueError("Set ANTHROPIC_API_KEY to use direct Claude reports (do not store it in the local config)")
+            import anthropic
+            client = anthropic.Anthropic(timeout=900.0, max_retries=3)
+        self.client = client
+
+    def generate(self, system_prompt: str, user_content: str) -> str:
+        messages = [{"role": "user", "content": user_content}]
+        parts = []
+        for turn in range(self.max_continuations + 1):
+            response = self.client.messages.create(
+                model=self.model, max_tokens=self.max_tokens, system=system_prompt, messages=messages
+            )
+            text = "".join(block.text for block in response.content if block.type == "text")
+            parts.append(text)
+            logger.info("Anthropic turn=%d stop=%s usage=%s", turn, response.stop_reason, response.usage)
+            if response.stop_reason != "max_tokens":
+                break
+            messages.extend([{"role": "assistant", "content": text}, {"role": "user", "content": CONTINUE}])
         return "".join(parts)

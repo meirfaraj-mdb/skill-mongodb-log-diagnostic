@@ -17,7 +17,7 @@ chmod +x samples/macos-local-atlas-vertex-test.sh
 ./samples/macos-local-atlas-vertex-test.sh
 ```
 
-Select `yes` for Vertex reports. The script runs `gcloud auth application-default login`; complete that browser login with the Google identity that has Vertex access.
+Select `vertex` for reports (the default is `none`). The script runs `gcloud auth application-default login`; complete that browser login with the Google identity that has Vertex access.
 
 Defaults:
 
@@ -45,3 +45,7 @@ The runner can collect Atlas Query Shape Insights after extraction and before op
 ```
 
 Direct `indexStats` is optional and requires a read-only MongoDB URI template with `{host}`.
+
+## Use direct Claude instead of Vertex
+
+Choose `anthropic` at the report-provider prompt. Supply `ANTHROPIC_API_KEY` through your shell or the hidden prompt and select the Anthropic API model ID available to your account. The proposed default is `claude-sonnet-5`; change it if your Anthropic account uses a different identifier. This path installs the Anthropic SDK, requires no `gcloud` login, and keeps all storage local. The key is never written to `.local-atlas-vertex-test.json`.
