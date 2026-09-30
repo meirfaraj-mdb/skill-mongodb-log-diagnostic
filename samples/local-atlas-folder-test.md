@@ -90,6 +90,8 @@ python -m agent.handler --stage extract --log-date 2026-09-26 --force-reextract
 
 ## Config template
 
-See [secret.local-atlas-folder.example.json](secret.local-atlas-folder.example.json). It is a local config file, not a cloud secret. Keep `storage_provider` as `local`. The script defaults to no reports; select `bedrock`, `vertex`, or `anthropic` when asked for a report provider. Direct Claude uses `ANTHROPIC_API_KEY` and no cloud-provider login.
+See [secret.local-atlas-folder.example.json](secret.local-atlas-folder.example.json). It is a local config file, not a cloud secret. Keep `storage_provider` as `local`. The script defaults to no reports; select `bedrock`, `vertex`, `anthropic`, or `claude_cli` when asked for a report provider. Direct Claude uses `ANTHROPIC_API_KEY` and no cloud-provider login.
 
 **Defaults:** Bedrock uses `eu-west-1` (Ireland) and `eu.anthropic.claude-sonnet-5`. You may override either value when prompted if your organization provides a different approved inference-profile ID.
+
+For reports without an API key, install and sign in to Claude Code (`claude`), then choose `claude_cli`; this uses your CLI login and requires internet. Logs, extracts, and reports remain in the local folder. No AWS or GCP login is required. An optional model prompt can be left blank to use the CLI default.

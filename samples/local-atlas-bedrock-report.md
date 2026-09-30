@@ -78,3 +78,9 @@ The default source is `atlas_api`, so no direct MongoDB connection is needed. Yo
 Select `anthropic` at the report-provider prompt. Set `ANTHROPIC_API_KEY` in your shell or enter it at the hidden prompt. No AWS or Google login is needed for this option. The key is not written to the local JSON config; only `anthropic_model` is saved. The script installs the Anthropic SDK when selected. Use an Anthropic API model ID available to your account (the proposed default is `claude-sonnet-5`; override it if needed). The Atlas download and all generated files remain local.
 
 To rerun only reporting after the script exits, export the key in your terminal, set `llm_provider` to `anthropic` and `anthropic_model` in `.local-atlas-folder-test.json`, then run the report-only command above.
+
+## Use your local Claude Code CLI (no API key)
+
+Install Claude Code on your Mac and run `claude` once to sign in. Select `claude_cli` at the report-provider prompt. Leave the model blank to use your CLI default, or enter a model accepted by your installed CLI. No `ANTHROPIC_API_KEY`, AWS, or GCP credentials are used for report generation in this option. It still contacts Claude over the network; this is **not offline inference**. The CLI runs in a temporary directory with tools disabled; verify your organization's policy permits sending the extracted diagnostic data to your Claude account. Atlas access is still needed for the download stage.
+
+To rerun only reports, set `llm_provider` to `claude_cli` in the script's generated `.local-atlas-*-test.json`, activate the corresponding virtual environment, and run `python -m agent.handler --stage report --log-date YYYY-MM-DD` with `CLOUD_PROVIDER=local`, `ATLAS_CONFIG_FILE`, and `DIAG_SKILL_DIR` set as in the local test guide.

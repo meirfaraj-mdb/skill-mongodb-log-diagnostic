@@ -48,11 +48,11 @@ if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
     [[ -n "$MONGODB_URI_TEMPLATE" ]] || die "A MongoDB URI template is required for direct MongoDB collection."
   fi
 fi
-prompt REPORT_PROVIDER "Report provider (none/bedrock/vertex/anthropic)" "none"
+prompt REPORT_PROVIDER "Report provider (none/bedrock/vertex/anthropic/claude_cli)" "none"
 REPORT_PROVIDER=$(printf '%s' "$REPORT_PROVIDER" | tr '[:upper:]' '[:lower:]')
-[[ "$REPORT_PROVIDER" == none || "$REPORT_PROVIDER" == bedrock || "$REPORT_PROVIDER" == vertex || "$REPORT_PROVIDER" == anthropic ]] || die "Choose none, bedrock, vertex, or anthropic."
+[[ "$REPORT_PROVIDER" == none || "$REPORT_PROVIDER" == bedrock || "$REPORT_PROVIDER" == vertex || "$REPORT_PROVIDER" == anthropic || "$REPORT_PROVIDER" == claude_cli ]] || die "Choose none, bedrock, vertex, anthropic, or claude_cli."
 BEDROCK_REGION=""; BEDROCK_MODEL_ID=""; AWS_PROFILE_NAME=""
-GCP_PROJECT=""; VERTEX_LOCATION=""; VERTEX_MODEL=""; ANTHROPIC_MODEL=""
+GCP_PROJECT=""; VERTEX_LOCATION=""; VERTEX_MODEL=""; ANTHROPIC_MODEL=""; CLAUDE_CLI_MODEL=""
 case "$REPORT_PROVIDER" in
   bedrock)
     note "Amazon Bedrock configuration"
@@ -66,6 +66,11 @@ case "$REPORT_PROVIDER" in
     [[ -n "$GCP_PROJECT" ]] || die "A GCP project ID is required for Vertex reports."
     prompt VERTEX_LOCATION "Vertex location" "global"
     prompt VERTEX_MODEL "Vertex Claude model ID" "claude-sonnet-5"
+    ;;
+  claude_cli)
+    note "Claude Code CLI configuration (uses your existing CLI login; still requires network)"
+    command -v claude >/dev/null || die "Install Claude Code CLI and sign in with 'claude' first."
+    prompt CLAUDE_CLI_MODEL "Claude CLI model (blank uses your CLI default)" ""
     ;;
   anthropic)
     note "Direct Claude API configuration (no AWS/GCP credentials needed)"
@@ -113,14 +118,17 @@ PYCODE
 esac
 
 CONFIG_FILE="$PROJECT_ROOT/.local-atlas-vertex-test.json"
-python - "$CONFIG_FILE" "$LOCAL_BUCKET" "$PREFIX" "$TIMEZONE" "$CLUSTER_NAME" "$GROUP_ID" "$ATLAS_PUBLIC_KEY" "$ATLAS_PRIVATE_KEY" "$LOG_NAMES" "$ENABLE_OBSERVABILITY" "$QUERY_SHAPE_SOURCE" "$INDEX_STATS_ENABLED" "$MONGODB_URI_TEMPLATE" "$REPORT_PROVIDER" "$BEDROCK_REGION" "$BEDROCK_MODEL_ID" "$GCP_PROJECT" "$VERTEX_LOCATION" "$VERTEX_MODEL" "$ANTHROPIC_MODEL" <<'PYCODE'
+python - "$CONFIG_FILE" "$LOCAL_BUCKET" "$PREFIX" "$TIMEZONE" "$CLUSTER_NAME" "$GROUP_ID" "$ATLAS_PUBLIC_KEY" "$ATLAS_PRIVATE_KEY" "$LOG_NAMES" "$ENABLE_OBSERVABILITY" "$QUERY_SHAPE_SOURCE" "$INDEX_STATS_ENABLED" "$MONGODB_URI_TEMPLATE" "$REPORT_PROVIDER" "$BEDROCK_REGION" "$BEDROCK_MODEL_ID" "$GCP_PROJECT" "$VERTEX_LOCATION" "$VERTEX_MODEL" "$ANTHROPIC_MODEL" "$CLAUDE_CLI_MODEL" <<'PYCODE'
 import json, sys
-(path,bucket,prefix,tz,cluster,group,public,private,names,observability,query_source,index_stats,mongodb_uri,provider,region,bedrock_model,project,location,vertex_model,anthropic_model)=sys.argv[1:]
+(path,bucket,prefix,tz,cluster,group,public,private,names,observability,query_source,index_stats,mongodb_uri,provider,region,bedrock_model,project,location,vertex_model,anthropic_model,claude_cli_model)=sys.argv[1:]
 cfg={"input_mode":"atlas_api","storage_provider":"local","llm_provider":None,"bucket":bucket,"prefix":prefix,"timezone":tz,"cluster_name":cluster,"group_id":group,"atlas_public_key":public,"atlas_private_key":private,"api_version":"2025-03-12","log_names":[x.strip() for x in names.split(',') if x.strip()],"slow_ms":1000,"observability_enabled":observability == "yes", "deployment_type":"atlas", "query_shape_source":query_source, "query_shape_window_hours":24, "index_stats_enabled":index_stats == "yes"}
 if mongodb_uri: cfg["mongodb_uri_template"] = mongodb_uri
 if provider == "bedrock": cfg.update({"llm_provider":"bedrock","bedrock_region":region,"bedrock_model_id":bedrock_model})
 if provider == "vertex": cfg.update({"llm_provider":"vertex","vertex_project":project,"vertex_location":location,"vertex_model":vertex_model})
 if provider == "anthropic": cfg.update({"llm_provider":"anthropic","anthropic_model":anthropic_model})
+if provider == "claude_cli":
+    cfg["llm_provider"] = "claude_cli"
+    if claude_cli_model: cfg["claude_cli_model"] = claude_cli_model
 with open(path,"w",encoding="utf-8") as f: json.dump(cfg,f,indent=2)
 PYCODE
 chmod 600 "$CONFIG_FILE"

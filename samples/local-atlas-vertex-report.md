@@ -49,3 +49,9 @@ Direct `indexStats` is optional and requires a read-only MongoDB URI template wi
 ## Use direct Claude instead of Vertex
 
 Choose `anthropic` at the report-provider prompt. Supply `ANTHROPIC_API_KEY` through your shell or the hidden prompt and select the Anthropic API model ID available to your account. The proposed default is `claude-sonnet-5`; change it if your Anthropic account uses a different identifier. This path installs the Anthropic SDK, requires no `gcloud` login, and keeps all storage local. The key is never written to `.local-atlas-vertex-test.json`.
+
+## Use your local Claude Code CLI (no API key)
+
+Install Claude Code on your Mac and run `claude` once to sign in. Select `claude_cli` at the report-provider prompt. Leave the model blank to use your CLI default, or enter a model accepted by your installed CLI. No `ANTHROPIC_API_KEY`, AWS, or GCP credentials are used for report generation in this option. It still contacts Claude over the network; this is **not offline inference**. The CLI runs in a temporary directory with tools disabled; verify your organization's policy permits sending the extracted diagnostic data to your Claude account. Atlas access is still needed for the download stage.
+
+To rerun only reports, set `llm_provider` to `claude_cli` in the script's generated `.local-atlas-*-test.json`, activate the corresponding virtual environment, and run `python -m agent.handler --stage report --log-date YYYY-MM-DD` with `CLOUD_PROVIDER=local`, `ATLAS_CONFIG_FILE`, and `DIAG_SKILL_DIR` set as in the local test guide.
