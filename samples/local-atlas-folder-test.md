@@ -32,3 +32,10 @@ The parallel runner `samples/macos-local-atlas-vertex-test.sh` offers the same s
 The same keys apply to the local folder, `s3://<bucket>/`, or `gs://<bucket>/`. Atlas download skips existing raw objects; extraction skips when all three outputs already exist. Choose an isolated prefix for testing. There is **no automatic cleanup** of real-bucket objects. The generated `.local-atlas-*-test.json` contains Atlas credentials, has restricted file permissions, and must not be committed or shared. The script does not test real cloud writes until the run begins; list access alone does not guarantee write access.
 
 For separate manual stage invocations, activate the script's `.venv-local-atlas-*` environment and set `CLOUD_PROVIDER=local`, `ATLAS_CONFIG_FILE` to its generated JSON, `SKILLS_DIR` to the project's `skills/` and `DIAG_SKILL_DIR` to `skills/mongodb-log-diagnostic/`. The storage backend is selected by `storage_provider` in that JSON; `CLOUD_PROVIDER=local` means the **config is local**, not that the bucket must be local.
+
+### Reuse interactive choices
+
+Both macOS Atlas runners can save the chosen non-secret settings to `~/.localsample` after you confirm the selected bucket target. Answer `yes` to the save prompt. The next run shows them as editable prompt defaults. The file is JSON with owner-only (`0600`) permissions; you may inspect or remove it with `cat ~/.localsample` or `rm ~/.localsample`. Atlas API keys, Anthropic API keys, MongoDB connection URIs, and log dates are **not** stored, so you must supply credentials each time (the date defaults to yesterday). Existing local run config files still contain Atlas credentials; keep those private.
+
+
+If the skill scripts are missing, run `./samples/restore-vendored-skills.sh` first (GitHub access required), or accept the restore prompt. The runners offer to save non-secret choices to `~/.localsample` **before** cloud authentication, so an S3 bucket/region/profile/prefix choice persists even if the first AWS check fails.

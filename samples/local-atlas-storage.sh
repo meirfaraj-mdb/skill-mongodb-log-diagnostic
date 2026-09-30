@@ -94,3 +94,70 @@ for key in store.list_keys(sys.argv[1]):
 PY
   fi
 }
+
+# Non-secret interactive defaults shared by both macOS Atlas runners.
+# Read JSON as data, never source it as shell code. No Atlas/API keys or MongoDB URIs.
+SAMPLE_DEFAULTS_FILE="${HOME}/.localsample"
+sample_default() {
+  local key="$1" fallback="$2"
+  python3 - "$SAMPLE_DEFAULTS_FILE" "$key" "$fallback" "${STORAGE_PROVIDER:-}" <<'PY'
+import json, os, sys
+path, key, fallback, provider = sys.argv[1:]
+allowed = {
+    'STORAGE_PROVIDER', 'LOCAL_BUCKET', 'BUCKET', 'STORAGE_AWS_REGION',
+    'STORAGE_AWS_PROFILE', 'STORAGE_GCP_PROJECT', 'PREFIX', 'TIMEZONE',
+    'CLUSTER_NAME', 'GROUP_ID', 'LOG_NAMES', 'ENABLE_OBSERVABILITY',
+    'QUERY_SHAPE_SOURCE', 'INDEX_STATS_ENABLED', 'REPORT_PROVIDER',
+    'BEDROCK_REGION', 'BEDROCK_MODEL_ID', 'AWS_PROFILE_NAME', 'GCP_PROJECT',
+    'VERTEX_LOCATION', 'VERTEX_MODEL', 'ANTHROPIC_MODEL', 'CLAUDE_CLI_MODEL'
+}
+if key in allowed and os.path.isfile(path) and not os.path.islink(path):
+    try:
+        with open(path, encoding='utf-8') as f:
+            saved = json.load(f)
+        value = saved.get(key)
+        if key == "BUCKET" and saved.get("STORAGE_PROVIDER") != provider:
+            value = None
+        if isinstance(value, str):
+            print(value)
+            raise SystemExit(0)
+    except (OSError, ValueError, AttributeError):
+        pass
+print(fallback)
+PY
+}
+
+save_atlas_sample_defaults() {
+  local answer key
+  printf '\nSave these non-secret choices as defaults in %s? (yes/no) [no]: ' "$SAMPLE_DEFAULTS_FILE"
+  read -r answer
+  [[ "$(printf '%s' "${answer:-no}" | tr '[:upper:]' '[:lower:]')" == yes ]] || return 0
+  # Never persist ATLAS_PRIVATE_KEY, ATLAS_PUBLIC_KEY, MONGODB_URI_TEMPLATE,
+  # ANTHROPIC_API_KEY, or LOG_DATE (a stale date is dangerous on reruns).
+  local keys=(STORAGE_PROVIDER LOCAL_BUCKET BUCKET STORAGE_AWS_REGION STORAGE_AWS_PROFILE
+    STORAGE_GCP_PROJECT PREFIX TIMEZONE CLUSTER_NAME GROUP_ID LOG_NAMES
+    ENABLE_OBSERVABILITY QUERY_SHAPE_SOURCE INDEX_STATS_ENABLED REPORT_PROVIDER
+    BEDROCK_REGION BEDROCK_MODEL_ID AWS_PROFILE_NAME GCP_PROJECT VERTEX_LOCATION
+    VERTEX_MODEL ANTHROPIC_MODEL CLAUDE_CLI_MODEL)
+  local pairs=()
+  for key in "${keys[@]}"; do pairs+=("$key=${!key-}"); done
+  python3 - "$SAMPLE_DEFAULTS_FILE" "${pairs[@]}" <<'PY'
+import json, os, stat, sys, tempfile
+path = sys.argv[1]
+if os.path.lexists(path) and (os.path.islink(path) or not os.path.isfile(path)):
+    raise SystemExit('Refusing to replace a symlink or non-file: ' + path)
+# Files are private even if a previous save used a wider permission mask.
+values = dict(item.split('=', 1) for item in sys.argv[2:])
+fd, tmp = tempfile.mkstemp(prefix='.localsample-', dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+        json.dump(values, stream, indent=2, sort_keys=True)
+        stream.write('\n')
+    os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+print('Saved defaults to ' + path + ' (mode 0600; no credentials).')
+PY
+}

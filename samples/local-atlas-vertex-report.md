@@ -55,3 +55,10 @@ Choose `anthropic` at the report-provider prompt. Supply `ANTHROPIC_API_KEY` thr
 Install Claude Code on your Mac and run `claude` once to sign in. Select `claude_cli` at the report-provider prompt. Leave the model blank to use your CLI default, or enter a model accepted by your installed CLI. No `ANTHROPIC_API_KEY` or cloud model credentials are used for report generation in this option; S3/GCS storage still requires its own credentials. It still contacts Claude over the network; this is **not offline inference**. The CLI runs in a temporary directory with tools disabled; verify your organization's policy permits sending the extracted diagnostic data to your Claude account. Atlas access is still needed for the download stage.
 
 To rerun only reports, set `llm_provider` to `claude_cli` in the script's generated `.local-atlas-*-test.json`, activate the corresponding virtual environment, and run `python -m agent.handler --stage report --log-date YYYY-MM-DD` with `CLOUD_PROVIDER=local`, `ATLAS_CONFIG_FILE`, and `DIAG_SKILL_DIR` set as in the local test guide.
+
+### Reuse interactive choices
+
+Both macOS Atlas runners can save the chosen non-secret settings to `~/.localsample` after you confirm the selected bucket target. Answer `yes` to the save prompt. The next run shows them as editable prompt defaults. The file is JSON with owner-only (`0600`) permissions; you may inspect or remove it with `cat ~/.localsample` or `rm ~/.localsample`. Atlas API keys, Anthropic API keys, MongoDB connection URIs, and log dates are **not** stored, so you must supply credentials each time (the date defaults to yesterday). Existing local run config files still contain Atlas credentials; keep those private.
+
+
+If the skill scripts are missing, run `./samples/restore-vendored-skills.sh` first (GitHub access required), or accept the restore prompt. The runners offer to save non-secret choices to `~/.localsample` **before** cloud authentication, so an S3 bucket/region/profile/prefix choice persists even if the first AWS check fails.

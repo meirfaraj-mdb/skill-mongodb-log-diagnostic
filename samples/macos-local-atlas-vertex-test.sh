@@ -7,18 +7,42 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 note() { printf '\n==> %s\n' "$*"; }
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
-prompt() { local var="$1" label="$2" default="${3:-}" value; read -r -p "$label${default:+ [$default]}: " value; printf -v "$var" '%s' "${value:-$default}"; }
+prompt() { local var="$1" label="$2" default="${3:-}" value; if [[ "$var" != LOG_DATE ]] && declare -f sample_default >/dev/null; then default="$(sample_default "$var" "$default")"; fi; read -r -p "$label${default:+ [$default]}: " value; printf -v "$var" '%s' "${value:-$default}"; }
 [[ "$(uname -s)" == Darwin ]] || die "This script is for macOS."
 command -v python3 >/dev/null || die "python3 is required."
 
+source "$PROJECT_ROOT/samples/local-atlas-storage.sh"
+# Prompt to restore missing skill files from the repository before collecting credentials.
+if [[ ! -f skills/mongodb-atlas-logs/scripts/atlas_logs.py ||
+      ! -f skills/mongodb-log-diagnostic/scripts/extract_mongodb_log.py ||
+      ! -f skills/mongodb-log-diagnostic/scripts/ftdc_decoder.py ||
+      ! -f skills/mongodb-log-diagnostic/scripts/driver_compatibility.py ]]; then
+  read -r -p "Skill files missing. Restore both skills from GitHub now? (yes/no) [no]: " restore_skills
+  if [[ "$(printf '%s' "${restore_skills:-no}" | tr '[:upper:]' '[:lower:]')" == yes ]]; then
+    "$PROJECT_ROOT/samples/restore-vendored-skills.sh"
+  fi
+fi
 for f in skills/mongodb-atlas-logs/scripts/atlas_logs.py \
   skills/mongodb-log-diagnostic/scripts/extract_mongodb_log.py \
+  skills/mongodb-log-diagnostic/scripts/ftdc_decoder.py \
+  skills/mongodb-log-diagnostic/scripts/driver_compatibility.py \
   skills/mongodb-log-diagnostic/references/analysis-prompt.md; do
-  [[ -f "$f" ]] || die "Missing vendored skill file: $f"
+  [[ -f "$f" ]] || die "Missing vendored skill file: $f (run samples/restore-vendored-skills.sh)"
 done
 
-source "$PROJECT_ROOT/samples/local-atlas-storage.sh"
 choose_atlas_storage
+case "$STORAGE_PROVIDER" in
+  s3) storage_module=skills/aws-storage/scripts/aws_storage.py ;;
+  gcs) storage_module=skills/gcp-storage/scripts/gcp_storage.py ;;
+  *) storage_module="" ;;
+esac
+if [[ -n "$storage_module" && ! -f "$storage_module" ]]; then
+  read -r -p "Storage skill missing ($storage_module). Restore skills from GitHub now? (yes/no) [no]: " restore_storage
+  if [[ "$(printf '%s' "${restore_storage:-no}" | tr '[:upper:]' '[:lower:]')" == yes ]]; then
+    "$PROJECT_ROOT/samples/restore-vendored-skills.sh"
+  fi
+  [[ -f "$storage_module" ]] || die "Missing vendored storage file: $storage_module"
+fi
 prompt LOG_DATE "Log date (YYYY-MM-DD; blank means yesterday)" ""
 [[ -z "$LOG_DATE" || "$LOG_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "Log date must be YYYY-MM-DD."
 prompt TIMEZONE "Timezone used for yesterday" "Asia/Jerusalem"
@@ -35,6 +59,7 @@ ENABLE_OBSERVABILITY=$(printf '%s' "$ENABLE_OBSERVABILITY" | tr '[:upper:]' '[:l
 [[ "$ENABLE_OBSERVABILITY" == yes || "$ENABLE_OBSERVABILITY" == no ]] || die "Enter yes or no."
 OBS_HOSTS=""; QUERY_SHAPE_SOURCE="disabled"; INDEX_STATS_ENABLED="no"; MONGODB_URI_TEMPLATE=""
 if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
+  [[ -f skills/mongodb-observability/scripts/observability.py ]] || die "Missing observability skill. Run samples/restore-vendored-skills.sh"
   note "Observability configuration (nodes are discovered directly from Atlas)"
   prompt QUERY_SHAPE_SOURCE "Query-shape source (atlas_api/mongodb/bucket)" "atlas_api"
   [[ "$QUERY_SHAPE_SOURCE" == atlas_api || "$QUERY_SHAPE_SOURCE" == mongodb || "$QUERY_SHAPE_SOURCE" == bucket ]] || die "Use atlas_api, mongodb, or bucket."
@@ -88,6 +113,10 @@ case "$REPORT_PROVIDER" in
     fi
     ;;
 esac
+
+# Persist selections before installing dependencies or checking S3/GCS access.
+# Failed cloud authentication must not discard a newly selected S3 bucket.
+save_atlas_sample_defaults
 
 note "Creating Python environment"
 python3 -m venv .venv-local-atlas-vertex

@@ -171,7 +171,7 @@ The report pipeline uses `skills/mongodb-log-diagnostic/references/offline-drive
 
 ## Local Atlas report tests
 
-Both `samples/macos-local-atlas-folder-test.sh` and `samples/macos-local-atlas-vertex-test.sh` download from Atlas and prompt for storage: local folder (default), an existing S3 bucket, or an existing GCS bucket. The selected storage holds logs, extracts, observability data, and reports. Reporting defaults to `none`; optionally choose `bedrock`, `vertex`, `anthropic` (direct API), or `claude_cli` (installed Claude Code CLI). Direct Claude uses `ANTHROPIC_API_KEY` from your environment or a hidden prompt; the API key is not saved to the local config. Use an Anthropic API model ID your account can invoke. `claude_cli` uses your existing `claude` login instead of an API key, requires internet, and works with any of these storage targets when run locally. See `samples/local-atlas-bedrock-report.md` and `samples/local-atlas-vertex-report.md`.
+Both `samples/macos-local-atlas-folder-test.sh` and `samples/macos-local-atlas-vertex-test.sh` download from Atlas and prompt for storage: local folder (default), an existing S3 bucket, or an existing GCS bucket. The selected storage holds logs, extracts, observability data, and reports. Reporting defaults to `none`; optionally choose `bedrock`, `vertex`, `anthropic` (direct API), or `claude_cli` (installed Claude Code CLI). Direct Claude uses `ANTHROPIC_API_KEY` from your environment or a hidden prompt; the API key is not saved to the local config. Use an Anthropic API model ID your account can invoke. `claude_cli` uses your existing `claude` login instead of an API key, requires internet, and works with any of these storage targets when run locally. See `samples/local-atlas-bedrock-report.md` and `samples/local-atlas-vertex-report.md`. Both runners can save non-secret prompt choices to `~/.localsample` (JSON, mode `0600`); on the next run, these appear as defaults and can be overridden. Saving is opt-in at each run. Atlas keys, Anthropic API keys, MongoDB URIs, and the log date are never saved there. Remove `~/.localsample` to reset these defaults.
 
 ## Query-shape observability sources
 
@@ -190,3 +190,21 @@ See `skills/mongodb-observability/SKILL.md` and
 `samples/secret.existing-bucket-query-shapes.example.json`.
 
 For S3/GCS local-run authentication, permissions, and the required complete diagnostic skill, see [local Atlas storage test](samples/local-atlas-folder-test.md). Real-bucket runs require explicit confirmation and never create a bucket or cloud secret.
+
+
+### Restore vendored skills / saved macOS choices
+
+If a downloaded package lacks the executable diagnostic or Atlas skill files, run
+`./samples/restore-vendored-skills.sh` on a machine with GitHub access **before** testing or deploying.
+This clones the repository’s `main` branch, verifies the Python files compile, and copies
+**all five skill directories** into `skills/`. To use an existing checkout instead,
+run `./samples/restore-vendored-skills.sh --source-dir /path/to/checkout`.
+Review the downloaded repository code before running it; this command follows current `main`.
+The interactive local Atlas runners offer to restore missing skills before collecting keys.
+
+Both runners offer to save non-secret defaults in `~/.localsample` (mode 0600).
+Saving takes place **before S3/GCS credential checks**: a failed AWS login does not lose
+the newly selected S3 bucket, region, profile, or prefix. On the next run, choose
+`s3` (or accept the saved choice) to reuse those values. Atlas private/public keys,
+MongoDB URIs, Anthropic keys, and log dates are never persisted. Delete `~/.localsample`
+to reset saved choices.
