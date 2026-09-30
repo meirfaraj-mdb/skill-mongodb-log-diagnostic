@@ -42,4 +42,7 @@ If the skill scripts are missing, run `./samples/restore-vendored-skills.sh` fir
 
 ### S3 download troubleshooting
 
+S3 uploads stage one complete compressed log under the system temporary directory before multipart upload. Ensure the Mac has at least the size of the largest `.gz` log in free temporary disk space; set `TMPDIR` before running to change that location. If Atlas resets the connection mid-log, the downloader retries the whole response (up to the configured retry count); it does not upload a partial S3 object. A completed S3 object is skipped on rerun.
+
+
 `cloud=local storage=s3` is normal: `local` means the runner reads its JSON config on your Mac; `s3` selects the storage backend. If a node's Atlas download or S3 upload fails, the run now stops before extraction and reports the node and error. Successful uploads are resumable. `ListBucket` preflight does not establish object-level `GetObject` (needed for `head_object`/extract) or `PutObject` access. Review the stage error for `AccessDenied`, `NoSuchBucket`, `PermanentRedirect`, or other S3 errors. Never share the generated config or Atlas credentials when reporting failures.

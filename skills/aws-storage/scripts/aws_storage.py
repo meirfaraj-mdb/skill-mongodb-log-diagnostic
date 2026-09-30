@@ -7,6 +7,8 @@ import base64
 import json
 import mimetypes
 import sys
+import shutil
+import tempfile
 from pathlib import Path
 
 SCHEME = "s3"
@@ -67,7 +69,14 @@ class S3Store:
         return self.uri(key)
 
     def upload_stream(self, fileobj, key: str, content_type: str, metadata: dict | None = None) -> str:
-        self.s3.upload_fileobj(fileobj, self.bucket, key, ExtraArgs=self._extra(content_type, metadata))
+        # boto3's multipart upload may read/retry the source out of order. Atlas
+        # HTTP responses cannot be replayed or seeked; stage the complete body
+        # before starting S3 transfer. upload_file then retries from a local file.
+        with tempfile.TemporaryDirectory(prefix="atlas-s3-upload-") as tmp:
+            staged = Path(tmp) / "log.gz"
+            with staged.open("wb") as dest:
+                shutil.copyfileobj(fileobj, dest, 8 * 1024 * 1024)
+            self.upload(staged, key, content_type, metadata)
         return self.uri(key)
 
     def put_text(self, key: str, text: str, content_type: str) -> str:

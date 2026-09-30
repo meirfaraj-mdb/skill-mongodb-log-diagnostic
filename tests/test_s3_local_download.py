@@ -25,10 +25,10 @@ class FakeS3:
             error = RuntimeError("not found")
             error.response = {"Error": {"Code": "404"}}
             raise error
-    def upload_fileobj(self, fh, bucket, key, ExtraArgs=None):
+    def upload_file(self, filename, bucket, key, ExtraArgs=None):
         if key == self.fail_key:
             raise RuntimeError("AccessDenied: s3:PutObject")
-        self.objects[(bucket, key)] = fh.read()
+        self.objects[(bucket, key)] = Path(filename).read_bytes()
 
 class FakeAtlasClient:
     def __init__(self): self.calls = []

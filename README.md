@@ -17,7 +17,7 @@ google_adk_agent/             ADK root agent; tools call the shared deterministi
 ## Flow (identical on both clouds)
 | Step | Skills used | Output in the bucket |
 |---|---|---|
-| 1. Download D-1 logs for every node | `mongodb-atlas-logs` + `aws-storage`/`gcp-storage` (streamed upload) | `<prefix>/<D-1>/<host>/mongodb/<log-name>.gz` (same keys as the old lambda) |
+| 1. Download D-1 logs for every node | `mongodb-atlas-logs` + `aws-storage`/`gcp-storage` (S3 stages to local disk for replayable multipart upload) | `<prefix>/<D-1>/<host>/mongodb/<log-name>.gz` (same keys as the old lambda) |
 | 2. Extract per node | `mongodb-log-diagnostic/scripts/extract_mongodb_log.py` | `<prefix>/<D-1>/<host>/extracts/<log-name>/{extractionOccurence.json, extractionshort.json, handoff.md}` |
 | 3. Report per node + diff vs D-2 (n-1) and D-8 (n-8) if they exist | `references/analysis-prompt.md` + `references/extracted-signal-reference.md` → LLM | `<prefix>/<D-1>/<host>/reports/<log-name>/{report.md,diff.json}; cluster/reports/{cluster-summary.md,manifest.json}` |
 

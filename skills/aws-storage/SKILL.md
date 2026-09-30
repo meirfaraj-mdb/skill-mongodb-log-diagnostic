@@ -12,7 +12,7 @@ Provides the **ObjectStore contract** on Amazon S3 and a **secret loader** for A
 - Uses `boto3` (provided in the AWS Lambda runtime; `pip install boto3` elsewhere). Credentials come from the
   default chain (Lambda role, ECS task role, `AWS_PROFILE`, ...). Never pass keys on the command line.
 - Secret values are returned to the caller only. The CLI prints secret **key names**, never values.
-- Uploads are streamed with multipart (`upload_fileobj`), so gzip logs of several GB never need to be held in memory.
+- `upload_stream` first writes the entire upstream HTTP response to a temporary local file, then uses boto3 `upload_file` (multipart/replayable) for S3. This avoids rereading a non-seekable Atlas response during S3 retries; it uses disk space equal to at least one compressed log. Temporary files are removed after success or failure. Set `TMPDIR` to a filesystem with sufficient free space for the largest log.
 
 ## ObjectStore contract (shared with gcp-storage)
 | Method | Meaning |
@@ -21,7 +21,7 @@ Provides the **ObjectStore contract** on Amazon S3 and a **secret loader** for A
 | `list_keys(prefix) -> list[str]` | All keys under prefix (paginated) |
 | `download(key, path)` | Download to a local file (creates parent dirs) |
 | `upload(path, key, content_type, metadata=None) -> uri` | Upload a local file |
-| `upload_stream(fileobj, key, content_type, metadata=None) -> uri` | Streamed upload of an unknown-length stream |
+| `upload_stream(fileobj, key, content_type, metadata=None) -> uri` | Stage an unknown-length stream to disk, then upload to S3 |
 | `put_text(key, text, content_type) -> uri` / `get_text(key) -> str` | Small UTF-8 objects |
 | `uri(key) -> str` | `s3://bucket/key` |
 

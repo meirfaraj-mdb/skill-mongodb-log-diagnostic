@@ -17,6 +17,7 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from http.client import IncompleteRead
 from urllib.parse import quote, urlencode
 from urllib.request import HTTPDigestAuthHandler, HTTPPasswordMgrWithDefaultRealm, Request, build_opener
 from zoneinfo import ZoneInfo
@@ -125,7 +126,8 @@ def process_matches_cluster(process: dict, config: dict) -> bool:
         return hostname in set(config["hostnames"]) or alias in set(config["hostnames"])
     if config.get("host_selector"):
         return bool(re.search(config["host_selector"], f"{hostname} {alias}", re.I))
-    # Without an explicit filter, include all data-bearing processes in this Atlas project.
+    # A group can contain process hostnames unrelated to the cluster display name.
+    # Filters are optional; callers may explicitly narrow a multi-cluster group.
     return True
 
 
@@ -146,7 +148,7 @@ def target_hosts(config: dict, client=None) -> list[dict]:
     targets = [p for p in list_processes(client, config["group_id"])
                if p.get("typeName") != "NO_DATA" and process_matches_cluster(p, config)]
     if not targets:
-        raise RuntimeError("No data-bearing Atlas processes found. Check group_id or optional host filters.")
+        raise RuntimeError("No hosts matched the cluster. Configure host_selector or hostnames.")
     return targets
 
 
@@ -183,9 +185,25 @@ def archive_logs(config: dict, log_date: str | None = None, sink=None, exists=No
             response = None
             started = time.perf_counter()
             try:
-                response = client.download_log(group_id, host, log_name, start, end)
-                with response:
-                    location = sink(entry, response, metadata)
+                # An Atlas HTTP response can reset halfway through a long read.
+                # Restart from a fresh response; the sink must not publish a
+                # partially read object (the S3 sink stages before uploading).
+                for transfer_attempt in range(1, getattr(client, "max_retries", 3) + 1):
+                    try:
+                        response = client.download_log(group_id, host, log_name, start, end)
+                        with response:
+                            location = sink(entry, response, metadata)
+                        break
+                    except (ConnectionResetError, IncompleteRead, TimeoutError, URLError) as interrupted:
+                        if transfer_attempt >= getattr(client, "max_retries", 3):
+                            raise
+                        logger.warning("Atlas log stream interrupted host=%s log=%s attempt=%d/%d: %s",
+                                       host, log_name, transfer_attempt, getattr(client, "max_retries", 3), interrupted)
+                        time.sleep(client._retry_delay(transfer_attempt) if hasattr(client, "_retry_delay") else min(2 ** (transfer_attempt - 1), 30))
+                    finally:
+                        if response is not None:
+                            response.close()
+                            response = None
                 logs.append({**entry, "status": "downloaded", "location": location,
                              "elapsed_seconds": round(time.perf_counter() - started, 3)})
             except Exception as error:
