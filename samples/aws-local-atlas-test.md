@@ -80,7 +80,7 @@ Cluster-level report files, when enabled, are written to:
 s3://<bucket>/<prefix>/<YYYY-MM-DD>/cluster/reports/
 ```
 
-Rerunning extraction skips a node/log when `extractionOccurence.json` already exists. To rerun it manually, use `--force-reextract`.
+Rerunning extraction skips a node/log only when `extractionOccurence.json`, `extractionshort.json`, and `handoff.md` all exist. To rerun it manually, use `--force-reextract`.
 
 ## Existing secret mode
 

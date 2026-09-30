@@ -22,6 +22,7 @@ from urllib.request import HTTPDigestAuthHandler, HTTPPasswordMgrWithDefaultReal
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("atlas_logs")
+
 REQUIRED_KEYS = ["atlas_public_key", "atlas_private_key", "group_id", "cluster_name", "timezone", "api_version"]
 RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
 
@@ -74,7 +75,8 @@ class AtlasClient:
             started = time.perf_counter()
             try:
                 resp = self.opener.open(req, timeout=self.timeout)
-                logger.info("Atlas GET ok attempt=%d status=%s elapsed=%.3fs", attempt, getattr(resp, "status", "?"), time.perf_counter() - started)
+                logger.info("Atlas GET ok attempt=%d status=%s elapsed=%.3fs", attempt,
+                            getattr(resp, "status", "?"), time.perf_counter() - started)
                 return resp
             except HTTPError as error:
                 last_error = error
@@ -99,7 +101,8 @@ class AtlasClient:
             return json.load(resp)
 
     def download_log(self, group_id, host_name, log_name, start_date, end_date):
-        path = f"/groups/{quote(group_id, safe='')}/clusters/{quote(host_name, safe='')}/logs/{quote(log_name, safe='')}.gz"
+        path = (f"/groups/{quote(group_id, safe='')}/clusters/{quote(host_name, safe='')}"
+                f"/logs/{quote(log_name, safe='')}.gz")
         url = f"{self.base_url}{path}?{urlencode({'startDate': start_date, 'endDate': end_date})}"
         return self._request(url, f"application/vnd.atlas.{self.api_version}+gzip")
 
@@ -107,7 +110,8 @@ class AtlasClient:
 def list_processes(client, group_id: str) -> list[dict]:
     processes, page, size = [], 1, 500
     while True:
-        payload = client.get_json(f"/groups/{quote(group_id, safe='')}/processes", {"itemsPerPage": size, "pageNum": page, "includeCount": "true", "pretty": "false"})
+        payload = client.get_json(f"/groups/{quote(group_id, safe='')}/processes",
+                                  {"itemsPerPage": size, "pageNum": page, "includeCount": "true", "pretty": "false"})
         batch = payload.get("results", [])
         processes.extend(batch)
         if not batch or len(batch) < size:
@@ -121,7 +125,7 @@ def process_matches_cluster(process: dict, config: dict) -> bool:
         return hostname in set(config["hostnames"]) or alias in set(config["hostnames"])
     if config.get("host_selector"):
         return bool(re.search(config["host_selector"], f"{hostname} {alias}", re.I))
-    # Filters are optional: include every data-bearing process in this Atlas project.
+    # Without an explicit filter, include all data-bearing processes in this Atlas project.
     return True
 
 
@@ -132,20 +136,25 @@ def log_names_for_process(process: dict, config: dict) -> list[str]:
     is_mongos = process.get("typeName") == "SHARD_MONGOS"
     if "auto" in configured:
         return ["mongos" if is_mongos else "mongodb"]
-    return [n for n in configured if not (is_mongos and n.startswith("mongodb")) and not (not is_mongos and n.startswith("mongos"))]
+    return [n for n in configured
+            if not (is_mongos and n.startswith("mongodb")) and not (not is_mongos and n.startswith("mongos"))]
 
 
 def target_hosts(config: dict, client=None) -> list[dict]:
     validate_config(config)
     client = client or AtlasClient(config)
-    targets = [p for p in list_processes(client, config["group_id"]) if p.get("typeName") != "NO_DATA" and process_matches_cluster(p, config)]
+    targets = [p for p in list_processes(client, config["group_id"])
+               if p.get("typeName") != "NO_DATA" and process_matches_cluster(p, config)]
     if not targets:
-        raise RuntimeError("No hosts matched the cluster. Configure host_selector or hostnames.")
+        raise RuntimeError("No data-bearing Atlas processes found. Check group_id or optional host filters.")
     return targets
 
 
 def archive_logs(config: dict, log_date: str | None = None, sink=None, exists=None, client=None) -> dict:
-    """Download target-host logs and hand each response to ``sink``."""
+    """Download each target host log for `log_date` and hand it to `sink(entry, fileobj, metadata)`.
+
+    `exists(entry) -> bool` (optional) lets the caller skip logs already archived.
+    """
     if sink is None:
         raise ValueError("sink is required (use local_dir_sink() for local output)")
     validate_config(config)
@@ -153,6 +162,7 @@ def archive_logs(config: dict, log_date: str | None = None, sink=None, exists=No
     log_date = log_date or previous_day(config["timezone"])
     start, end = day_window(log_date, config["timezone"])
     group_id, cluster = config["group_id"], config["cluster_name"]
+
     logs, skipped, failed = [], [], []
     for process in target_hosts(config, client):
         host = process.get("hostname")
@@ -160,20 +170,24 @@ def archive_logs(config: dict, log_date: str | None = None, sink=None, exists=No
             continue
         for log_name in log_names_for_process(process, config):
             host_dir = safe_filename(host)
-            entry = {"host": host, "host_dir": host_dir, "log_name": log_name, "log_date": log_date, "process_type": process.get("typeName"), "relative_path": f"{log_date}/{host_dir}/{log_name}.gz"}
+            entry = {"host": host, "host_dir": host_dir, "log_name": log_name, "log_date": log_date,
+                     "process_type": process.get("typeName"),
+                     "relative_path": f"{log_date}/{host_dir}/mongodb/{log_name}.gz"}
             if exists is not None and exists(entry):
                 logger.info("Already archived, skipping %s", entry["relative_path"])
                 skipped.append(entry["relative_path"])
                 logs.append({**entry, "status": "skipped_existing"})
                 continue
-            metadata = {"cluster": cluster, "host": host, "log-name": log_name, "start-date": str(start), "end-date": str(end)}
+            metadata = {"cluster": cluster, "host": host, "log-name": log_name,
+                        "start-date": str(start), "end-date": str(end)}
             response = None
             started = time.perf_counter()
             try:
                 response = client.download_log(group_id, host, log_name, start, end)
                 with response:
                     location = sink(entry, response, metadata)
-                logs.append({**entry, "status": "downloaded", "location": location, "elapsed_seconds": round(time.perf_counter() - started, 3)})
+                logs.append({**entry, "status": "downloaded", "location": location,
+                             "elapsed_seconds": round(time.perf_counter() - started, 3)})
             except Exception as error:
                 logger.exception("Download failed host=%s log=%s", host, log_name)
                 failed.append({"host": host, "log_name": log_name, "error": str(error)[:500]})
@@ -187,12 +201,13 @@ def archive_logs(config: dict, log_date: str | None = None, sink=None, exists=No
 
 def local_dir_sink(output_dir: str | Path):
     root = Path(output_dir)
+
     def sink(entry, fileobj, metadata):
         path = root / entry["relative_path"]
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("wb") as out:
             shutil.copyfileobj(fileobj, out, 8 * 1024 * 1024)
-        path.with_suffix(".gz.meta.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        path.with_suffix(".gz.meta.json").write_text(json.dumps(metadata, indent=2))
         return str(path)
     return sink
 
@@ -208,7 +223,7 @@ def _load_cli_config(path: str | None) -> dict:
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(message)s")
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", help="JSON file with Atlas config")
+    p.add_argument("--config", help="JSON file with Atlas config (see references/config-schema.md)")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list-hosts")
     d = sub.add_parser("download")
@@ -218,12 +233,15 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     config = _load_cli_config(args.config)
     if args.cmd == "list-hosts":
-        print(json.dumps([{"hostname": h.get("hostname"), "typeName": h.get("typeName"), "logs": log_names_for_process(h, config)} for h in target_hosts(config)], indent=2))
+        hosts = [{"hostname": h.get("hostname"), "typeName": h.get("typeName"), "logs": log_names_for_process(h, config)}
+                 for h in target_hosts(config)]
+        print(json.dumps(hosts, indent=2))
         return 0
     root = Path(args.output_dir)
     exists = None if args.overwrite else (lambda e: (root / e["relative_path"]).is_file())
     print(json.dumps(archive_logs(config, args.log_date, sink=local_dir_sink(root), exists=exists), indent=2))
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -41,10 +41,12 @@ def extract_one(store, layout: Layout, log_date: str, entry: dict, slow_ms: floa
                 skip_existing: bool = True, timeout_s: int = 3 * 3600) -> dict:
     host_dir, log_name = entry["host_dir"], entry["log_name"]
     targets = {n: layout.extract(log_date, host_dir, log_name, n) for n in EXTRACT_FILES}
-    # A completed canonical extraction means this node/log was already uploaded.
+    # Skip only when every expected output is present. A partially uploaded run must retry.
     # Process entries sequentially: download -> extract -> upload all outputs -> next node.
-    if skip_existing and store.exists(targets["extractionOccurence.json"]):
+    if skip_existing and all(store.exists(key) for key in targets.values()):
+        logger.info("Skipping completed extraction for %s/%s", host_dir, log_name)
         return {**entry, "status": "skipped_existing", "extract": targets}
+    validate_skill_bundle(skill_dir)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="extract-", dir=WORK_DIR))
     try:
@@ -88,7 +90,7 @@ def _shard(items: list, index: int | None, count: int | None) -> list:
 
 def run(config: dict, log_date: str, logs: list[dict] | None = None, skip_existing: bool = True,
         store=None, shard_index: int | None = None, shard_count: int | None = None) -> dict:
-    skill_dir = validate_skill_bundle()
+    skill_dir = diagnostic_skill_dir()
     layout = Layout.from_config(config)
     if store is None:
         from .providers import get_store

@@ -8,7 +8,7 @@ Use this test when you want to exercise the real Atlas log-download API while ke
 Atlas Admin API → local bucket folder → local extractor → local extracts
 ```
 
-The download and extraction stages run separately. Extraction processes one node/log at a time and skips an already completed extraction unless you later run the CLI with `--force-reextract`.
+The download and extraction stages run separately. Extraction processes one node/log at a time and skips an extraction only when all three output files are present unless you later run the CLI with `--force-reextract`.
 
 ## Prerequisites
 

@@ -22,6 +22,8 @@ for f in ("ftdc_decoder.py", "driver_compatibility.py"):
     (diag / "scripts" / f).write_text("#!/usr/bin/env python3\n")
 (diag / "references/analysis-prompt.md").write_text("ANALYSIS_PROMPT_MARKER")
 (diag / "references/extracted-signal-reference.md").write_text("SIGNAL_REF_MARKER")
+(diag / "references/analysis-prompt.offline-cve-overlay.md").write_text("OFFLINE_CVE_MARKER")
+(diag / "references/offline-driver-cves.json").write_text(json.dumps({"$schema": "mongodb-log-diagnostic.offline-driver-cves/v1", "catalog_version": "test", "refreshed_at": "2026-09-29", "entries": []}))
 (diag / "scripts/extract_mongodb_log.py").write_text(textwrap.dedent('''\
     #!/usr/bin/env python3
     import argparse, gzip, json
