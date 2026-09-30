@@ -164,7 +164,7 @@ def get_llm(config: dict):
     if provider == "anthropic":
         return llm.AnthropicLLM(config)
     if provider == "claude_cli":
-        if config.get("cloud") != "local" or config.get("storage_provider") != "local":
-            raise ValueError("claude_cli is for local runs with local storage only")
+        if config.get("cloud") != "local":
+            raise ValueError("claude_cli is for locally executed runs only")
         return llm.ClaudeCLILLM(config)
     raise ValueError(f"Unknown or missing llm_provider {provider!r} (bedrock|vertex|anthropic|claude_cli)")

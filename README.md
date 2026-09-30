@@ -171,7 +171,7 @@ The report pipeline uses `skills/mongodb-log-diagnostic/references/offline-drive
 
 ## Local Atlas report tests
 
-Both `samples/macos-local-atlas-folder-test.sh` and `samples/macos-local-atlas-vertex-test.sh` download from Atlas and store logs, extracts and reports in a local folder. Reporting defaults to `none`; optionally choose `bedrock`, `vertex`, `anthropic` (direct API), or `claude_cli` (installed Claude Code CLI). Direct Claude uses `ANTHROPIC_API_KEY` from your environment or a hidden prompt; the API key is not saved to the local config. Use an Anthropic API model ID your account can invoke. `claude_cli` uses your existing `claude` login instead of an API key, requires internet, and is supported only with local storage (not hosted AWS/GCP). See `samples/local-atlas-bedrock-report.md` and `samples/local-atlas-vertex-report.md`.
+Both `samples/macos-local-atlas-folder-test.sh` and `samples/macos-local-atlas-vertex-test.sh` download from Atlas and prompt for storage: local folder (default), an existing S3 bucket, or an existing GCS bucket. The selected storage holds logs, extracts, observability data, and reports. Reporting defaults to `none`; optionally choose `bedrock`, `vertex`, `anthropic` (direct API), or `claude_cli` (installed Claude Code CLI). Direct Claude uses `ANTHROPIC_API_KEY` from your environment or a hidden prompt; the API key is not saved to the local config. Use an Anthropic API model ID your account can invoke. `claude_cli` uses your existing `claude` login instead of an API key, requires internet, and works with any of these storage targets when run locally. See `samples/local-atlas-bedrock-report.md` and `samples/local-atlas-vertex-report.md`.
 
 ## Query-shape observability sources
 
@@ -188,3 +188,5 @@ When the optional `observability` stage is enabled, query shapes are written per
 
 See `skills/mongodb-observability/SKILL.md` and
 `samples/secret.existing-bucket-query-shapes.example.json`.
+
+For S3/GCS local-run authentication, permissions, and the required complete diagnostic skill, see [local Atlas storage test](samples/local-atlas-folder-test.md). Real-bucket runs require explicit confirmation and never create a bucket or cloud secret.
