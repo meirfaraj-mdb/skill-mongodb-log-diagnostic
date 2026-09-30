@@ -175,7 +175,7 @@ chmod 600 "$CONFIG_FILE"
 export CLOUD_PROVIDER=local ATLAS_CONFIG_FILE="$CONFIG_FILE" SKILLS_DIR="$PROJECT_ROOT/skills" DIAG_SKILL_DIR="$PROJECT_ROOT/skills/mongodb-log-diagnostic"
 [[ "$REPORT_PROVIDER" != vertex ]] || export GOOGLE_CLOUD_PROJECT="$GCP_PROJECT"
 
-confirm_atlas_storage
+show_atlas_storage_target
 note "Downloading from Atlas into the selected bucket"
 CMD=(python -m agent.handler --stage download); [[ -z "$LOG_DATE" ]] || CMD+=(--log-date "$LOG_DATE"); "${CMD[@]}"
 note "Extracting one node/log at a time"

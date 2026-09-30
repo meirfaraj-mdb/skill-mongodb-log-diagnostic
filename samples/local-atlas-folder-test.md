@@ -18,7 +18,7 @@ chmod +x samples/macos-local-atlas-folder-test.sh
 ./samples/macos-local-atlas-folder-test.sh
 ```
 
-The parallel runner `samples/macos-local-atlas-vertex-test.sh` offers the same storage choices, with a separate virtualenv/config file. Both default to **local** storage and **no reports**. Choose `s3` or `gcs` and enter an existing bucket *name*, its region/project and an isolated test prefix. The script checks credentials and bucket listing, shows the target, and asks for `yes` before writing. It installs only the required storage SDK into its local virtualenv. Choose a report provider separately (`none`, `bedrock`, `vertex`, `anthropic`, `claude_cli`).
+The parallel runner `samples/macos-local-atlas-vertex-test.sh` offers the same storage choices, with a separate virtualenv/config file. Both default to **local** storage and **no reports**. Choose `s3` or `gcs` and enter an existing bucket *name*, its region/project and an isolated test prefix. The script checks credentials and bucket listing, and shows the target before writing. It installs only the required storage SDK into its local virtualenv. Choose a report provider separately (`none`, `bedrock`, `vertex`, `anthropic`, `claude_cli`).
 
 ```text
 <prefix>/<YYYY-MM-DD>/<node>/mongodb/<log>.gz
@@ -35,7 +35,11 @@ For separate manual stage invocations, activate the script's `.venv-local-atlas-
 
 ### Reuse interactive choices
 
-Both macOS Atlas runners can save the chosen non-secret settings to `~/.localsample` after you confirm the selected bucket target. Answer `yes` to the save prompt. The next run shows them as editable prompt defaults. The file is JSON with owner-only (`0600`) permissions; you may inspect or remove it with `cat ~/.localsample` or `rm ~/.localsample`. Atlas API keys, Anthropic API keys, MongoDB connection URIs, and log dates are **not** stored, so you must supply credentials each time (the date defaults to yesterday). Existing local run config files still contain Atlas credentials; keep those private.
+Both macOS Atlas runners can save the chosen non-secret settings to `~/.localsample` after choosing the storage target. Answer `yes` to the save prompt. The next run shows them as editable prompt defaults. The file is JSON with owner-only (`0600`) permissions; you may inspect or remove it with `cat ~/.localsample` or `rm ~/.localsample`. Atlas API keys, Anthropic API keys, MongoDB connection URIs, and log dates are **not** stored, so you must supply credentials each time (the date defaults to yesterday). Existing local run config files still contain Atlas credentials; keep those private.
 
 
 If the skill scripts are missing, run `./samples/restore-vendored-skills.sh` first (GitHub access required), or accept the restore prompt. The runners offer to save non-secret choices to `~/.localsample` **before** cloud authentication, so an S3 bucket/region/profile/prefix choice persists even if the first AWS check fails.
+
+### S3 download troubleshooting
+
+`cloud=local storage=s3` is normal: `local` means the runner reads its JSON config on your Mac; `s3` selects the storage backend. If a node's Atlas download or S3 upload fails, the run now stops before extraction and reports the node and error. Successful uploads are resumable. `ListBucket` preflight does not establish object-level `GetObject` (needed for `head_object`/extract) or `PutObject` access. Review the stage error for `AccessDenied`, `NoSuchBucket`, `PermanentRedirect`, or other S3 errors. Never share the generated config or Atlas credentials when reporting failures.

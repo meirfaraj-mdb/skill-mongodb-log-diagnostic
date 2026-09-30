@@ -189,7 +189,7 @@ When the optional `observability` stage is enabled, query shapes are written per
 See `skills/mongodb-observability/SKILL.md` and
 `samples/secret.existing-bucket-query-shapes.example.json`.
 
-For S3/GCS local-run authentication, permissions, and the required complete diagnostic skill, see [local Atlas storage test](samples/local-atlas-folder-test.md). Real-bucket runs require explicit confirmation and never create a bucket or cloud secret.
+For S3/GCS local-run authentication, permissions, and the required complete diagnostic skill, see [local Atlas storage test](samples/local-atlas-folder-test.md). Real-bucket runs show the chosen target before writing and never create a bucket or cloud secret.
 
 
 ### Restore vendored skills / saved macOS choices

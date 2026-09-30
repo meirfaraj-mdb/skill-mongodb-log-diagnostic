@@ -6,7 +6,7 @@ Keys: <prefix>/<date>/<host>/mongodb/<log_name>.gz. Multiple raw log names can c
 from __future__ import annotations
 
 from . import skills
-from .common import Layout
+from .common import Layout, logger
 
 
 def run(config: dict, log_date: str | None = None, skip_existing: bool = True, store=None, client=None) -> dict:
@@ -26,4 +26,13 @@ def run(config: dict, log_date: str | None = None, skip_existing: bool = True, s
     result = atlas.archive_logs(config, log_date, sink=sink, exists=exists, client=client)
     for entry in result["logs"]:
         entry["key"] = key_for(entry)
+        logger.info("Atlas log %s: %s", entry["status"], store.uri(entry["key"]))
+    # The Atlas skill records individual failures. Stop before extraction if even
+    # one Atlas download or bucket upload failed; successful nodes remain resumable.
+    if result.get("failed"):
+        failures = "; ".join(
+            f"{item.get('host', '?')}/{item.get('log_name', '?')}: {item.get('error', 'unknown error')}"
+            for item in result["failed"]
+        )
+        raise RuntimeError(f"Atlas download or {config.get('storage_provider', 'bucket')} upload failed: {failures}")
     return result

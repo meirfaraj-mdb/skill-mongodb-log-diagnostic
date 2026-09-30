@@ -69,13 +69,11 @@ PY
   esac
 }
 
-confirm_atlas_storage() {
+show_atlas_storage_target() {
   [[ "$STORAGE_PROVIDER" == local ]] && return
-  local uri reply
+  local uri
   if [[ "$STORAGE_PROVIDER" == s3 ]]; then uri="s3://$BUCKET/$PREFIX/"; else uri="gs://$BUCKET/$PREFIX/"; fi
-  printf '\nDownload/extract/observability/reports may write to %s (existing complete outputs are skipped).\n' "$uri"
-  read -r -p 'Confirm real bucket target (yes/no) [no]: ' reply
-  [[ "$reply" == yes ]] || die "Cancelled; no objects were written."
+  printf '\nWriting to %s (existing complete outputs are skipped).\n' "$uri"
 }
 
 show_atlas_storage_outputs() {
