@@ -5,10 +5,13 @@ its tools invoke ``agent.handler.run_pipeline`` from the shared pipeline.
 """
 from __future__ import annotations
 
-import json
+import logging
+import os
 from typing import Literal
 
 from .runtime import configure_gcp_runtime
+
+logger = logging.getLogger(__name__)
 
 
 def _run(stage: str, log_date: str | None = None, skip_existing: bool = True) -> dict:
@@ -54,19 +57,57 @@ def run_diagnostic_stage(
     return _run(stage, log_date, skip_existing)
 
 
+def _orchestration_model_from_secret() -> str:
+    """Read the same secret as the pipeline, without logging its payload.
+
+    ADK needs its model before it can call tools. This runs at agent import, so the
+    deployment identity (during import validation) and runtime identity must be able
+    to read the secret. Do not call load_config here: that validates Atlas credentials
+    and other pipeline settings before the agent can even start.
+    """
+    configure_gcp_runtime()
+    from agent.providers import load_raw_config
+
+    config = load_raw_config("gcp")
+    if config.get("llm_provider", "vertex") != "vertex":
+        raise ValueError("ADK orchestration requires llm_provider=vertex in the secret")
+    model = config.get("vertex_model") or os.environ.get("VERTEX_MODEL")
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("Set vertex_model to an accessible Gemini model in the Atlas secret")
+    model = model.strip()
+    if model.startswith("publishers/google/models/"):
+        model = model.removeprefix("publishers/google/models/")
+    if not model.startswith("gemini-") or "/" in model or ":" in model:
+        raise ValueError("ADK orchestration requires a Gemini vertex_model in the Atlas secret; "
+                         "Claude report models cannot be used by this LlmAgent")
+
+    project = config.get("vertex_project") or config.get("gcp_project") or os.environ.get("GOOGLE_CLOUD_PROJECT")
+    location = config.get("vertex_location") or os.environ.get("VERTEX_LOCATION") or "us-central1"
+    if not project:
+        raise ValueError("Set vertex_project or gcp_project in the Atlas secret")
+    # configure_gcp_runtime has already resolved ATLAS_SECRET_ID; changing the model
+    # project here must not move secret lookup to another project on later tool calls.
+    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
+    os.environ["GOOGLE_CLOUD_PROJECT"] = project
+    os.environ["GOOGLE_CLOUD_LOCATION"] = location
+    logger.info("ADK orchestration configured model=%s project=%s location=%s", model, project, location)
+    return model
+
+
 def build_root_agent():
-    """Construct lazily so local tests need not install Google ADK."""
+    """Construct the ADK agent using the report model from the runtime secret."""
+    model = _orchestration_model_from_secret()
     from google.adk.agents import LlmAgent
 
-    # The model only chooses between tightly-scoped Python tools; data processing is
-    # deterministic in the shared pipeline, not delegated to conversational reasoning.
     return LlmAgent(
         name="mongodb_log_diagnostic",
-        model="claude-sonnet-5",
+        model=model,
         description="Runs MongoDB Atlas log diagnostics and uploads reports to Google Cloud Storage.",
         instruction=(
             "You operate the MongoDB Atlas log diagnostic workflow. "
-            "For a daily Atlas API run, call run_daily_diagnostics. When the user asks to analyze existing GCS data without Atlas API access, call run_existing_bucket_diagnostics and require a date. For a requested backfill or "
+            "For a daily Atlas API run, call run_daily_diagnostics. "
+            "When the user asks to analyze existing GCS data without Atlas API access, "
+            "call run_existing_bucket_diagnostics and require a date. For a requested backfill or "
             "recovery, call run_diagnostic_stage with exactly one requested stage. In existing-bucket mode, "
             "do not run observability because it deliberately has no MongoDB or Atlas access. "
             "Do not claim a run completed until the tool returns. Summarize only tool results."
