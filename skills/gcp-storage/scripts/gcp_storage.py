@@ -4,14 +4,36 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import mimetypes
 import os
-import shutil
 import sys
+import time
 from pathlib import Path
 
 SCHEME = "gs"
 CHUNK = 8 * 1024 * 1024
+logger = logging.getLogger("gcp_storage")
+
+
+def _log_upload_error(error, target, phase, bytes_written, started):
+    """Log only cloud error fields; never log headers, tokens, or upload URLs."""
+    response = getattr(error, "response", None)
+    body = getattr(response, "content", b"") if response is not None else b""
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", errors="replace")
+    try:
+        detail = json.loads(body).get("error", {})
+        message = detail.get("message", "")
+        reasons = ",".join(str(item.get("reason", "")) for item in detail.get("errors", [])
+                           if isinstance(item, dict))
+    except (ValueError, AttributeError, TypeError):
+        message, reasons = "", ""
+    logger.error("GCS upload failed target=%s phase=%s bytes_written=%d "
+                 "elapsed_seconds=%.1f error_type=%s http_status=%s message=%s reasons=%s",
+                 target, phase, bytes_written, time.monotonic() - started,
+                 type(error).__name__, getattr(response, "status_code", "?"),
+                 str(message).replace("\n", " ")[:500], reasons[:200])
 
 
 def parse_uri(uri: str) -> tuple[str, str]:
@@ -58,9 +80,38 @@ class GCSStore:
 
     def upload_stream(self, fileobj, key: str, content_type: str, metadata: dict | None = None) -> str:
         blob = self._blob(key, metadata)
-        with blob.open("wb", content_type=content_type) as writer:  # resumable, unknown length
-            shutil.copyfileobj(fileobj, writer, CHUNK)
-        return self.uri(key)
+        target = self.uri(key)
+        started = time.monotonic()
+        bytes_written = 0
+        phase = "open_writer"
+        logger.info("GCS resumable upload starting target=%s chunk_size=%d", target, CHUNK)
+        writer = None
+        try:
+            # Explicit close only after EOF: context-manager exit would try to
+            # publish a partial object if an Atlas read failed.
+            writer = blob.open("wb", content_type=content_type)
+            phase = "read_atlas"
+            while True:
+                data = fileobj.read(CHUNK)
+                if not data:
+                    break
+                phase = "write_gcs"
+                writer.write(data)
+                bytes_written += len(data)
+                phase = "read_atlas"
+            phase = "finalize_gcs"
+            writer.close()
+            logger.info("GCS upload complete target=%s bytes_written=%d elapsed_seconds=%.1f",
+                        target, bytes_written, time.monotonic() - started)
+        except BaseException as error:
+            _log_upload_error(error, target, phase, bytes_written, started)
+            if writer is not None:
+                try:
+                    writer.terminate()  # Never finalize a partial Atlas response.
+                except Exception:
+                    pass
+            raise
+        return target
 
     def put_text(self, key: str, text: str, content_type: str) -> str:
         self.bucket.blob(key).upload_from_string(text.encode("utf-8"), content_type=content_type)

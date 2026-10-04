@@ -1,17 +1,17 @@
 """Cloud selection: secret source, object storage and LLM backend.
 
-    CLOUD_PROVIDER = aws | gcp | local   (auto-detected when unset)
-    ATLAS_SECRET_ID                       AWS: ARN/name   GCP: projects/<p>/secrets/<name>[/versions/<v>]
-    ATLAS_CONFIG_FILE                     local/dev: JSON file with the same keys
-
+CLOUD_PROVIDER = aws | gcp | local   (auto-detected when unset)
+ATLAS_SECRET_ID                       AWS: ARN/name   GCP: projects/<p>/secrets/<name>[/versions/<v>]
+ATLAS_CONFIG_FILE                     local/dev: JSON file with the same keys
 Secret keys are the lambda's keys plus optional generic ones:
-    bucket | s3_bucket | gcs_bucket      prefix | s3_prefix | gcs_prefix
-    storage_provider = s3 | gcs | local  llm_provider = bedrock | vertex | anthropic | claude_cli
+bucket | s3_bucket | gcs_bucket      prefix | s3_prefix | gcs_prefix
+storage_provider = s3 | gcs | local  llm_provider = bedrock | vertex | anthropic | claude_cli
 """
 from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from . import skills
@@ -74,8 +74,7 @@ def normalize_config(raw: dict, cloud: str) -> dict:
     cfg["input_mode"] = str(cfg.get("input_mode", "atlas_api")).strip().lower()
     if cfg["input_mode"] not in {"atlas_api", "existing_bucket"}:
         raise ValueError("input_mode must be atlas_api or existing_bucket")
-    # Existing-bucket mode is intentionally usable with a minimal secret: it never
-    # contacts Atlas and therefore must not require Atlas API credentials/config.
+    # Existing-bucket mode has no Atlas calls and needs no Atlas credentials.
     if cfg["input_mode"] == "atlas_api":
         skills.atlas_logs().validate_config(cfg)
     cfg.setdefault("cluster_name", cfg.get("report_name") or "MongoDB cluster")
@@ -95,7 +94,7 @@ def load_config() -> dict:
 
 
 class LocalStore:
-    """Filesystem ObjectStore (dev/test/on-prem). Same contract as S3Store / GCSStore."""
+    """Filesystem ObjectStore (dev/test/on-prem); same contract as S3Store/GCSStore."""
     scheme = "file"
 
     def __init__(self, root):
@@ -123,14 +122,29 @@ class LocalStore:
 
     def upload(self, path, key, content_type, metadata=None):
         self._p(key).parent.mkdir(parents=True, exist_ok=True)
-        self._p(key).write_bytes(Path(path).read_bytes()); self._write_meta(key, content_type, metadata)
+        self._p(key).write_bytes(Path(path).read_bytes())
+        self._write_meta(key, content_type, metadata)
         return self.uri(key)
 
     def upload_stream(self, fileobj, key, content_type, metadata=None):
-        import shutil
-        self._p(key).parent.mkdir(parents=True, exist_ok=True)
-        with self._p(key).open("wb") as out:
-            shutil.copyfileobj(fileobj, out, 8 * 1024 * 1024)
+        target = self._p(key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # A dropped Atlas connection must not leave a partial file that
+        # skip_existing will mistake for a completed log on the next run.
+        name = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="wb", dir=target.parent,
+                                             prefix=".atlas-upload-", delete=False) as out:
+                name = out.name
+                while True:
+                    data = fileobj.read(8 * 1024 * 1024)
+                    if not data:
+                        break
+                    out.write(data)
+            os.replace(name, target)
+        finally:
+            if name and os.path.exists(name):
+                os.unlink(name)
         self._write_meta(key, content_type, metadata)
         return self.uri(key)
 

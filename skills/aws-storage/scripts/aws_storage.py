@@ -5,13 +5,15 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import logging
 import mimetypes
 import sys
-import shutil
-import tempfile
+import time
 from pathlib import Path
 
 SCHEME = "s3"
+PART_SIZE = 8 * 1024 * 1024
+logger = logging.getLogger("aws_storage")
 
 
 def _boto3():
@@ -69,15 +71,69 @@ class S3Store:
         return self.uri(key)
 
     def upload_stream(self, fileobj, key: str, content_type: str, metadata: dict | None = None) -> str:
-        # boto3's multipart upload may read/retry the source out of order. Atlas
-        # HTTP responses cannot be replayed or seeked; stage the complete body
-        # before starting S3 transfer. upload_file then retries from a local file.
-        with tempfile.TemporaryDirectory(prefix="atlas-s3-upload-") as tmp:
-            staged = Path(tmp) / "log.gz"
-            with staged.open("wb") as dest:
-                shutil.copyfileobj(fileobj, dest, 8 * 1024 * 1024)
-            self.upload(staged, key, content_type, metadata)
-        return self.uri(key)
+        # Never pass a non-seekable Atlas response to boto3's transfer manager.
+        # A part is at most 8 MiB and can be retried by the S3 SDK.
+        extra = self._extra(content_type, metadata)
+        target = self.uri(key)
+        started = time.monotonic()
+        stage, sent, upload_id = "read_first_part", 0, None
+        logger.info("S3 upload starting target=%s part_size=%d", target, PART_SIZE)
+
+        def read_part():
+            data = bytearray()
+            while len(data) < PART_SIZE:
+                chunk = fileobj.read(PART_SIZE - len(data))
+                if not chunk:
+                    break
+                data.extend(chunk)
+            return bytes(data)
+
+        try:
+            first = read_part()
+            if len(first) < PART_SIZE:
+                stage = "put_object"
+                self.s3.put_object(Bucket=self.bucket, Key=key, Body=first, **extra)
+                sent = len(first)
+            else:
+                stage = "create_multipart_upload"
+                upload_id = self.s3.create_multipart_upload(Bucket=self.bucket, Key=key, **extra)["UploadId"]
+                parts = []
+                part = first
+                while part:
+                    number = len(parts) + 1
+                    stage = "upload_part"
+                    result = self.s3.upload_part(Bucket=self.bucket, Key=key, UploadId=upload_id,
+                                                 PartNumber=number, Body=part)
+                    parts.append({"PartNumber": number, "ETag": result["ETag"]})
+                    sent += len(part)
+                    stage = "read_next_part"
+                    part = read_part()
+                stage = "complete_multipart_upload"
+                self.s3.complete_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id,
+                                                   MultipartUpload={"Parts": parts})
+            logger.info("S3 upload complete target=%s bytes_confirmed=%d elapsed_seconds=%.1f",
+                        target, sent, time.monotonic() - started)
+        except BaseException as error:
+            response = getattr(error, "response", {})
+            response = response if isinstance(response, dict) else {}
+            detail = response.get("Error", {})
+            detail = detail if isinstance(detail, dict) else {}
+            meta = response.get("ResponseMetadata", {})
+            meta = meta if isinstance(meta, dict) else {}
+            logger.error("S3 upload failed target=%s phase=%s bytes_confirmed=%d "
+                         "elapsed_seconds=%.1f error_type=%s aws_code=%s aws_message=%s "
+                         "http_status=%s request_id=%s",
+                         target, stage, sent, time.monotonic() - started, type(error).__name__,
+                         detail.get("Code"), str(detail.get("Message", "")).replace("\n", " ")[:300],
+                         meta.get("HTTPStatusCode"), meta.get("RequestId"))
+            if upload_id is not None:
+                try:
+                    self.s3.abort_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id)
+                except Exception as abort_error:
+                    logger.warning("S3 multipart abort failed target=%s error_type=%s",
+                                   target, type(abort_error).__name__)
+            raise
+        return target
 
     def put_text(self, key: str, text: str, content_type: str) -> str:
         self.s3.put_object(Bucket=self.bucket, Key=key, Body=text.encode("utf-8"), ContentType=content_type)
