@@ -1,12 +1,4 @@
-"""Entry points (same pipeline on both clouds).
-
-AWS  : Lambda handler `agent.handler.lambda_handler` (event JSON)
-GCP  : Cloud Run Job  `python -m agent.handler --stage ...` (args / env)
-Local: `CLOUD_PROVIDER=local ATLAS_CONFIG_FILE=cfg.json python -m agent.handler`
-
-Options: stage = all | download | extract | report
-         log_date = YYYY-MM-DD (default D-1 in the secret's timezone; env LOG_DATE also honoured)
-"""
+"""Entry points for the MongoDB log diagnostic pipeline."""
 from __future__ import annotations
 
 import argparse
@@ -37,35 +29,41 @@ def run_pipeline(event: dict, config: dict | None = None) -> dict:
     logs = event.get("logs")
     if stage in ("all", "download"):
         if config.get("input_mode") == "existing_bucket":
-            # Raw .gz logs must already be at <prefix>/<date>/<host>/<log>.gz.
-            # Extraction/report stages discover them directly from storage.
-            out["download"] = {"status": "skipped_existing_bucket", "log_date": log_date, "logs": logs or []}
+            out["download"] = {"status": "skipped_existing_bucket", "log_date": log_date,
+                               "logs": logs or []}
         else:
-            out["download"] = download_stage.run(config, log_date, skip_existing=event.get("skip_existing", True))
+            out["download"] = download_stage.run(
+                config, log_date, skip_existing=event.get("skip_existing", True))
             logs = out["download"]["logs"]
     if stage in ("all", "extract"):
-        out["extract"] = extract_stage.run(config, log_date, logs=logs,
-                                           skip_existing=not event.get("force_reextract", False))
+        out["extract"] = extract_stage.run(
+            config, log_date, logs=logs,
+            skip_existing=not event.get("force_reextract", False))
     if stage in ("all", "observability"):
         out["observability"] = observability_stage.run(config, log_date)
-    if stage in ("all", "report"):
-        out["report"] = report_stage.run(config, log_date)
+    if stage in ("all", "report", "cluster-summary"):
+        out["report"] = report_stage.run(
+            config, log_date, summary_only=(stage == "cluster-summary"))
     return out
 
 
-def lambda_handler(event, context):  # AWS Lambda
+def lambda_handler(event, context):
     event = event if isinstance(event, dict) else {}
-    logger.info("Lambda invocation stage=%s log_date=%s", event.get("stage", "all"), event.get("log_date"))
+    logger.info("Lambda invocation stage=%s log_date=%s", event.get("stage", "all"),
+                event.get("log_date"))
     return run_pipeline(event)
 
 
-def main(argv=None) -> None:  # Cloud Run Job / local
-    p = argparse.ArgumentParser(description="MongoDB log diagnostic agent")
-    p.add_argument("--stage", default=os.environ.get("STAGE", "all"), choices=["all", "download", "extract", "observability", "report"])
-    p.add_argument("--log-date", default=None)
-    p.add_argument("--no-skip-existing", action="store_true", help="re-download logs even if already stored")
-    p.add_argument("--force-reextract", action="store_true", help="re-run a node extraction even when it already exists in storage")
-    args = p.parse_args(argv)
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description="MongoDB log diagnostic agent")
+    parser.add_argument("--stage", default=os.environ.get("STAGE", "all"),
+                        choices=["all", "download", "extract", "observability", "report", "cluster-summary"])
+    parser.add_argument("--log-date", default=None)
+    parser.add_argument("--no-skip-existing", action="store_true",
+                        help="re-download logs even if already stored")
+    parser.add_argument("--force-reextract", action="store_true",
+                        help="re-run a node extraction even when it already exists in storage")
+    args = parser.parse_args(argv)
     result = run_pipeline({"stage": args.stage, "log_date": args.log_date,
                            "skip_existing": not args.no_skip_existing,
                            "force_reextract": args.force_reextract})

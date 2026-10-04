@@ -1,111 +1,147 @@
 {
   "$schema": "mongodb-log-diagnostic.offline-driver-cves/v1",
   "catalog_name": "MongoDB driver offline CVE catalog",
-  "catalog_version": "2026.09.27.1",
-  "refreshed_at": "2026-09-27",
-  "refresh_owner": "Manual: update this checked-in file after review of MongoDB Security Bulletins / Alerts.",
-  "coverage_note": "Offline, curated snapshot only. It is not a complete or real-time vulnerability feed. A missing match is not evidence that a driver version has no vulnerability.",
+  "catalog_version": "2026-10-04-osv-candidates",
+  "refreshed_at": "2026-10-04",
+  "refresh_owner": "OSV automated import; human review required for new/changed ranges",
+  "coverage_note": "Incomplete OSV snapshot for exact allowlisted packages; C/C++ and the PHP native extension are not covered. New or changed matches are unreviewed and excluded from reports. Absence of a match is not evidence of safety; a match does not establish application exposure.",
   "sources": [
-    "https://www.mongodb.com/resources/products/mongodb-security-bulletins",
-    "https://www.mongodb.com/resources/products/alerts"
+    "https://api.osv.dev/v1"
   ],
   "entries": [
     {
-      "cve": "CVE-2024-3374",
-      "driver": "PyMongo",
-      "affected": [{"introduced": "0", "fixed": "4.6.3"}],
-      "severity": "medium",
-      "cvss_v3": 5.3,
-      "summary": "Out-of-bounds read in the bson module.",
-      "source": "https://www.mongodb.com/resources/products/mongodb-security-bulletins"
-    },
-    {
-      "cve": "CVE-2023-1409",
+      "cve": "CVE-2021-20328",
       "driver": "mongo-java-driver",
       "affected": [
-        {"introduced": "3.6.0", "fixed": "3.6.10"},
-        {"introduced": "4.0.0", "fixed": "4.17.0"},
-        {"introduced": "5.0.0", "fixed": "5.8.0"}
+        {
+          "introduced": "3.11.0",
+          "fixed": "3.11.3"
+        },
+        {
+          "introduced": "3.12.0",
+          "fixed": "3.12.8"
+        },
+        {
+          "introduced": "4.0.0",
+          "fixed": "4.0.6"
+        },
+        {
+          "introduced": "4.1.0",
+          "fixed": "4.1.2"
+        },
+        {
+          "introduced": "4.2.0",
+          "fixed": "4.2.1"
+        }
       ],
-      "severity": "medium",
-      "cvss_v3": 5.3,
-      "summary": "Command listener may publish authentication-related data when enabled.",
-      "source": "https://www.mongodb.com/resources/products/mongodb-security-bulletins"
+      "severity": "review advisory",
+      "summary": "Improper Certificate Validation in MongoDB",
+      "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
+      "source": "https://api.osv.dev/v1/vulns/GHSA-rghw-6px2-fgwc",
+      "reviewed": false,
+      "packages": [
+        {
+          "ecosystem": "Maven",
+          "name": "org.mongodb:mongodb-driver-sync",
+          "osv_id": "GHSA-rghw-6px2-fgwc"
+        }
+      ]
     },
     {
-      "cve": "CVE-2026-88031",
-      "driver": "mongo-java-driver",
-      "affected": [{"introduced": "4.6.0", "fixed": "5.11.1"}],
-      "severity": "medium",
-      "cvss_v3": 6.1,
-      "summary": "Cancellation race in reactive client-side encryption.",
-      "source": "https://www.mongodb.com/resources/products/alerts"
-    },
-    {
-      "cve": "CVE-2021-20331",
-      "driver": "mongo-go-driver",
-      "affected": [{"introduced": "1.0.0", "fixed": "1.5.1"}],
-      "severity": "medium",
-      "cvss_v3": 4.2,
-      "summary": "Improper validation of specific cstrings during marshaling.",
-      "source": "https://www.mongodb.com/resources/products/mongodb-security-bulletins"
-    },
-    {
-      "cve": "CVE-2026-88031",
-      "driver": "mongo-go-driver",
+      "cve": "CVE-2021-32050",
+      "driver": "mongo-nodejs-driver",
       "affected": [
-        {"introduced": "1.0.0", "fixed": "1.17.10"},
-        {"introduced": "2.0.0", "fixed": "2.9.1"}
+        {
+          "introduced": "3.6.0",
+          "fixed": "3.6.10"
+        },
+        {
+          "introduced": "4.0.0",
+          "fixed": "4.17.0"
+        },
+        {
+          "introduced": "5.0.0",
+          "fixed": "5.8.0"
+        }
       ],
-      "severity": "medium",
-      "cvss_v3": 6.1,
-      "summary": "GridFS delete may not use an exact file-ID match.",
-      "source": "https://github.com/mongodb/mongo-go-driver/releases/tag/v1.17.10"
+      "severity": "review advisory",
+      "summary": "MongoDB Driver may publish events containing authentication-related data",
+      "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
+      "source": "https://api.osv.dev/v1/vulns/GHSA-vxvm-qww3-2fh7",
+      "reviewed": false,
+      "packages": [
+        {
+          "ecosystem": "npm",
+          "name": "mongodb",
+          "osv_id": "GHSA-vxvm-qww3-2fh7"
+        }
+      ]
     },
     {
-      "cve": "CVE-2022-24272",
-      "driver": "mongo-csharp-driver",
-      "affected": [{"introduced": "0", "fixed": "2.18.1"}],
-      "severity": "medium",
-      "cvss_v3": 6.5,
-      "summary": "Deserialization of compromised objects may lead to remote code execution in specific .NET Framework configurations.",
-      "source": "https://www.mongodb.com/resources/products/mongodb-security-bulletins"
+      "cve": "CVE-2021-32050",
+      "driver": "mongo-php-driver",
+      "affected": [
+        {
+          "introduced": "1.0.0",
+          "fixed": "1.9.2"
+        }
+      ],
+      "severity": "review advisory",
+      "summary": "MongoDB Driver may publish events containing authentication-related data",
+      "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
+      "source": "https://api.osv.dev/v1/vulns/GHSA-vxvm-qww3-2fh7",
+      "reviewed": false,
+      "packages": [
+        {
+          "ecosystem": "Packagist",
+          "name": "mongodb/mongodb",
+          "osv_id": "GHSA-vxvm-qww3-2fh7"
+        }
+      ]
     },
     {
-      "cve": "CVE-2021-20326",
-      "driver": "mongo-csharp-driver",
-      "affected": [{"introduced": "2.12.0", "fixed": "2.12.2"}],
-      "severity": "medium",
-      "cvss_v3": 6.5,
-      "summary": "Command listener may publish authentication-related data when enabled.",
-      "source": "https://www.mongodb.com/resources/products/alerts"
-    },
-    {
-      "cve": "CVE-2023-0436",
-      "driver": "mongoc",
-      "affected": [{"introduced": "0", "fixed": "1.25.0"}],
-      "severity": "medium",
-      "cvss_v3": 4.5,
-      "summary": "Infinite loop during BSON UTF-8 validation.",
-      "source": "https://www.mongodb.com/resources/products/mongodb-security-bulletins"
-    },
-    {
-      "cve": "CVE-2024-6383",
-      "driver": "mongoc",
-      "affected": [{"introduced": "0", "fixed": "1.26.2"}],
-      "severity": "medium",
-      "cvss_v3": 5.3,
-      "summary": "Accessing an untrusted directory may allow local privilege escalation.",
-      "source": "https://www.mongodb.com/resources/products/mongodb-security-bulletins"
+      "cve": "CVE-2026-81525",
+      "driver": "mongo-php-driver",
+      "affected": [
+        {
+          "introduced": "2.0.0",
+          "fixed": "2.4.1"
+        }
+      ],
+      "severity": "review advisory",
+      "summary": "mongodb: Reject \".\" and NUL bytes in database and collection names",
+      "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
+      "source": "https://api.osv.dev/v1/vulns/GHSA-65fr-j4p9-vc33",
+      "reviewed": false,
+      "packages": [
+        {
+          "ecosystem": "Packagist",
+          "name": "mongodb/mongodb",
+          "osv_id": "GHSA-65fr-j4p9-vc33"
+        }
+      ]
     },
     {
       "cve": "CVE-2024-6382",
-      "driver": "mongoc",
-      "affected": [{"introduced": "0", "fixed": "1.27.1"}],
-      "severity": "medium",
-      "cvss_v3": 6.4,
-      "summary": "Potential buffer overflow in bson_string_append.",
-      "source": "https://www.mongodb.com/resources/products/mongodb-security-bulletins"
+      "driver": "mongo-rust-driver",
+      "affected": [
+        {
+          "introduced": "2.0.0",
+          "fixed": "2.8.2"
+        }
+      ],
+      "severity": "review advisory",
+      "summary": "MongoDB Rust driver may issue unintended commands",
+      "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
+      "source": "https://api.osv.dev/v1/vulns/GHSA-32jf-h775-g29h",
+      "reviewed": false,
+      "packages": [
+        {
+          "ecosystem": "crates.io",
+          "name": "mongodb",
+          "osv_id": "GHSA-32jf-h775-g29h"
+        }
+      ]
     }
   ]
 }
