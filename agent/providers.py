@@ -1,12 +1,4 @@
-"""Cloud selection: secret source, object storage and LLM backend.
-
-CLOUD_PROVIDER = aws | gcp | local   (auto-detected when unset)
-ATLAS_SECRET_ID                       AWS: ARN/name   GCP: projects/<p>/secrets/<name>[/versions/<v>]
-ATLAS_CONFIG_FILE                     local/dev: JSON file with the same keys
-Secret keys are the lambda's keys plus optional generic ones:
-bucket | s3_bucket | gcs_bucket      prefix | s3_prefix | gcs_prefix
-storage_provider = s3 | gcs | local  llm_provider = bedrock | vertex | anthropic | claude_cli
-"""
+"""Select cloud, load non-secret settings from env, and Atlas API keys from secret."""
 from __future__ import annotations
 
 import json
@@ -30,9 +22,11 @@ def detect_cloud() -> str:
         if explicit not in CLOUD_DEFAULTS:
             raise ValueError(f"CLOUD_PROVIDER must be aws|gcp|local, got {explicit!r}")
         return explicit
-    if os.environ.get("AWS_LAMBDA_FUNCTION_NAME") or os.environ.get("AWS_EXECUTION_ENV") or os.environ.get("ECS_CONTAINER_METADATA_URI_V4"):
+    if any(os.environ.get(x) for x in (
+        "AWS_LAMBDA_FUNCTION_NAME", "AWS_EXECUTION_ENV", "ECS_CONTAINER_METADATA_URI_V4"
+    )):
         return "aws"
-    if os.environ.get("CLOUD_RUN_JOB") or os.environ.get("K_SERVICE") or os.environ.get("FUNCTION_TARGET"):
+    if any(os.environ.get(x) for x in ("CLOUD_RUN_JOB", "K_SERVICE", "FUNCTION_TARGET")):
         return "gcp"
     secret = os.environ.get("ATLAS_SECRET_ID", "")
     if secret.startswith("arn:aws:"):
@@ -44,40 +38,112 @@ def detect_cloud() -> str:
     raise RuntimeError("Cannot detect cloud: set CLOUD_PROVIDER=aws|gcp|local")
 
 
+# Non-secret settings only. Never accept these settings from the secret payload.
+_ENV_FIELDS = {
+    "input_mode": "INPUT_MODE", "group_id": "GROUP_ID", "cluster_name": "CLUSTER_NAME",
+    "timezone": "TIMEZONE", "api_version": "API_VERSION", "log_names": "LOG_NAMES",
+    "host_selector": "HOST_SELECTOR", "http_timeout_seconds": "HTTP_TIMEOUT_SECONDS",
+    "max_retries": "MAX_RETRIES", "bucket": "BUCKET", "prefix": "PREFIX",
+    "slow_ms": "SLOW_MS", "expected_node_count": "EXPECTED_NODE_COUNT",
+    "report_max_tokens": "REPORT_MAX_TOKENS", "report_max_input_chars": "REPORT_MAX_INPUT_CHARS",
+    "cluster_summary": "CLUSTER_SUMMARY", "llm_provider": "LLM_PROVIDER",
+    "bedrock_model_id": "BEDROCK_MODEL_ID", "bedrock_region": "BEDROCK_REGION",
+    "vertex_model": "VERTEX_MODEL", "vertex_location": "VERTEX_LOCATION",
+    "vertex_project": "VERTEX_PROJECT", "storage_provider": "STORAGE_PROVIDER",
+    "aws_region": "AWS_REGION", "gcp_project": "GCP_PROJECT",
+}
+_INT_FIELDS = {"http_timeout_seconds", "max_retries", "slow_ms", "expected_node_count",
+               "report_max_tokens", "report_max_input_chars"}
+_CREDENTIAL_FIELDS = {"atlas_public_key", "atlas_private_key"}
+
+
+def _env_config() -> dict:
+    result = {}
+    for key, suffix in _ENV_FIELDS.items():
+        name = "MONGODB_LOG_DIAG_" + suffix
+        value = os.environ.get(name)
+        if value is None or not value.strip():
+            continue
+        value = value.strip()
+        if key in _INT_FIELDS:
+            try:
+                value = int(value)
+            except ValueError as exc:
+                raise ValueError(f"{name} must be an integer") from exc
+        elif key == "cluster_summary":
+            if value.lower() not in ("true", "false", "1", "0"):
+                raise ValueError(f"{name} must be true or false")
+            value = value.lower() in ("true", "1")
+        elif key == "log_names":
+            if value.startswith("["):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"{name} must be a JSON list or comma-separated names") from exc
+            else:
+                value = [item.strip() for item in value.split(",") if item.strip()]
+            if not isinstance(value, list) or not value or not all(
+                isinstance(item, str) and item for item in value
+            ):
+                raise ValueError(f"{name} must contain at least one log name")
+        result[key] = value
+    return result
+
+
 def load_raw_config(cloud: str) -> dict:
+    """Read only Atlas public/private keys, and only when Atlas API is used."""
+    mode = os.environ.get("MONGODB_LOG_DIAG_INPUT_MODE", "atlas_api").strip().lower()
+    if mode == "existing_bucket":
+        return {}
+    if mode != "atlas_api":
+        raise ValueError("MONGODB_LOG_DIAG_INPUT_MODE must be atlas_api or existing_bucket")
     if os.environ.get("ATLAS_CONFIG_FILE"):
-        return json.loads(Path(os.environ["ATLAS_CONFIG_FILE"]).read_text(encoding="utf-8"))
-    secret_id = os.environ.get("ATLAS_SECRET_ID")
-    if not secret_id:
-        raise RuntimeError("Set ATLAS_SECRET_ID (or ATLAS_CONFIG_FILE for local runs)")
-    if cloud == "aws":
-        return skills.aws_storage().load_secret(secret_id)
-    if cloud == "gcp":
-        return skills.gcp_storage().load_secret(secret_id)
-    raise RuntimeError("local cloud requires ATLAS_CONFIG_FILE")
+        raw = json.loads(Path(os.environ["ATLAS_CONFIG_FILE"]).read_text(encoding="utf-8"))
+    else:
+        secret_id = os.environ.get("ATLAS_SECRET_ID")
+        if not secret_id:
+            raise RuntimeError("Set ATLAS_SECRET_ID for atlas_api mode")
+        if cloud == "aws":
+            raw = skills.aws_storage().load_secret(secret_id)
+        elif cloud == "gcp":
+            raw = skills.gcp_storage().load_secret(secret_id)
+        else:
+            raise RuntimeError("local cloud requires ATLAS_CONFIG_FILE for atlas_api mode")
+    if not isinstance(raw, dict):
+        raise ValueError("Atlas secret must be a JSON object")
+    unexpected = set(raw) - _CREDENTIAL_FIELDS
+    if unexpected:
+        raise ValueError("Atlas secret must contain only atlas_public_key and atlas_private_key; "
+                         "move all non-secret settings to MONGODB_LOG_DIAG_* environment variables")
+    if not all(isinstance(raw.get(key), str) and raw[key].strip() for key in _CREDENTIAL_FIELDS):
+        raise ValueError("Atlas secret must contain non-empty atlas_public_key and atlas_private_key")
+    return dict(raw)
 
 
 def normalize_config(raw: dict, cloud: str) -> dict:
-    cfg = dict(raw)
+    # Keep non-sensitive settings env-only, even if normalize_config is called directly.
+    if set(raw) - _CREDENTIAL_FIELDS:
+        raise ValueError("Config payload must contain only Atlas API credentials")
+    cfg = _env_config()
+    cfg.update(raw)
     defaults = CLOUD_DEFAULTS[cloud]
-    bucket = cfg.get("bucket") or cfg.get("s3_bucket") or cfg.get("gcs_bucket")
+    bucket = cfg.get("bucket")
     if not bucket:
-        raise ValueError("Missing bucket: set bucket (or s3_bucket / gcs_bucket) in the secret")
+        raise ValueError("Missing MONGODB_LOG_DIAG_BUCKET environment variable")
     storage = cfg.get("storage_provider")
     for scheme, provider in (("s3://", "s3"), ("gs://", "gcs"), ("file://", "local")):
         if bucket.startswith(scheme):
             bucket, storage = bucket[len(scheme):].rstrip("/"), storage or provider
     cfg["bucket"] = bucket
     cfg["storage_provider"] = storage or defaults["storage_provider"]
-    cfg["prefix"] = (cfg.get("prefix") or cfg.get("s3_prefix") or cfg.get("gcs_prefix") or "mongodb-atlas-logs").strip("/")
+    cfg["prefix"] = (cfg.get("prefix") or "mongodb-atlas-logs").strip("/")
     cfg["llm_provider"] = cfg.get("llm_provider") or defaults["llm_provider"]
     cfg["input_mode"] = str(cfg.get("input_mode", "atlas_api")).strip().lower()
     if cfg["input_mode"] not in {"atlas_api", "existing_bucket"}:
         raise ValueError("input_mode must be atlas_api or existing_bucket")
-    # Existing-bucket mode has no Atlas calls and needs no Atlas credentials.
     if cfg["input_mode"] == "atlas_api":
         skills.atlas_logs().validate_config(cfg)
-    cfg.setdefault("cluster_name", cfg.get("report_name") or "MongoDB cluster")
+    cfg.setdefault("cluster_name", "MongoDB cluster")
     cfg.setdefault("timezone", "UTC")
     if cfg["llm_provider"] == "vertex" and not (cfg.get("vertex_model") or os.environ.get("VERTEX_MODEL")):
         cfg["vertex_model"] = "claude-sonnet-5"
@@ -89,7 +155,8 @@ def load_config() -> dict:
     cloud = detect_cloud()
     cfg = normalize_config(load_raw_config(cloud), cloud)
     logger.info("Config loaded cloud=%s input_mode=%s storage=%s bucket=%s prefix=%s llm=%s cluster=%s",
-                cloud, cfg["input_mode"], cfg["storage_provider"], cfg["bucket"], cfg["prefix"], cfg["llm_provider"], cfg["cluster_name"])
+                cloud, cfg["input_mode"], cfg["storage_provider"], cfg["bucket"], cfg["prefix"],
+                cfg["llm_provider"], cfg["cluster_name"])
     return cfg
 
 
@@ -111,7 +178,8 @@ class LocalStore:
 
     def list_keys(self, prefix):
         return sorted(str(p.relative_to(self.root)) for p in self.root.rglob("*")
-                      if p.is_file() and not p.name.endswith(".meta.json") and str(p.relative_to(self.root)).startswith(prefix))
+                      if p.is_file() and not p.name.endswith(".meta.json")
+                      and str(p.relative_to(self.root)).startswith(prefix))
 
     def download(self, key, path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -129,8 +197,6 @@ class LocalStore:
     def upload_stream(self, fileobj, key, content_type, metadata=None):
         target = self._p(key)
         target.parent.mkdir(parents=True, exist_ok=True)
-        # A dropped Atlas connection must not leave a partial file that
-        # skip_existing will mistake for a completed log on the next run.
         name = None
         try:
             with tempfile.NamedTemporaryFile(mode="wb", dir=target.parent,
