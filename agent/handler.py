@@ -40,7 +40,10 @@ def run_pipeline(event: dict, config: dict | None = None) -> dict:
             config, log_date, logs=logs,
             skip_existing=not event.get("force_reextract", False))
     if stage in ("all", "observability"):
-        out["observability"] = observability_stage.run(config, log_date)
+        if config.get("input_mode") == "existing_bucket":
+            out["observability"] = {"status": "skipped_existing_bucket", "log_date": log_date}
+        else:
+            out["observability"] = observability_stage.run(config, log_date)
     if stage in ("all", "report", "cluster-summary"):
         out["report"] = report_stage.run(
             config, log_date, summary_only=(stage == "cluster-summary"))

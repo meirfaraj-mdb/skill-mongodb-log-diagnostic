@@ -71,11 +71,6 @@ if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
     [[ -n "$MONGODB_URI_TEMPLATE" ]] || die "A MongoDB URI template is required for direct MongoDB collection."
   fi
 fi
-# This unchanged provider loader does not read observability-specific env settings.
-# Stop rather than silently running with the wrong query-shape/index configuration.
-if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
-  die "Observability options are not supported by the unchanged agent/providers.py; select no for this local sample, or configure observability in a separately reviewed change."
-fi
 prompt REPORT_PROVIDER "Report provider (none/bedrock/vertex/anthropic/claude_cli)" "none"
 REPORT_PROVIDER=$(printf '%s' "$REPORT_PROVIDER" | tr '[:upper:]' '[:lower:]')
 [[ "$REPORT_PROVIDER" == none || "$REPORT_PROVIDER" == bedrock || "$REPORT_PROVIDER" == vertex || "$REPORT_PROVIDER" == anthropic || "$REPORT_PROVIDER" == claude_cli ]] || die "Choose none, bedrock, vertex, anthropic, or claude_cli."
@@ -236,7 +231,54 @@ note "Extracting one node/log at a time"
 CMD=(python -m agent.handler --stage extract); [[ -z "$LOG_DATE" ]] || CMD+=(--log-date "$LOG_DATE"); "${CMD[@]}"
 if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
   note "Collecting observability one node at a time"
-  CMD=(python -m agent.handler --stage observability); [[ -z "$LOG_DATE" ]] || CMD+=(--log-date "$LOG_DATE"); "${CMD[@]}"
+  # The unchanged provider loads general settings and keys-only Atlas credentials.
+  # These stage-specific choices are local to this invocation, not put in the secret.
+  export MONGODB_LOG_DIAG_OBSERVABILITY_ENABLED=true
+  export MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE="$QUERY_SHAPE_SOURCE"
+  export MONGODB_LOG_DIAG_QUERY_SHAPE_WINDOW_HOURS=24
+  export MONGODB_LOG_DIAG_INDEX_STATS_ENABLED="$INDEX_STATS_ENABLED"
+  if [[ -n "$MONGODB_URI_TEMPLATE" ]]; then
+    export MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE="$MONGODB_URI_TEMPLATE"
+  fi
+  unset MONGODB_URI_TEMPLATE
+  python - "$LOG_DATE" <<'PYCODE'
+import json
+import os
+import sys
+from agent.handler import run_pipeline
+from agent.providers import load_config
+from agent import skills
+
+cfg = load_config()
+source = os.environ["MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE"]
+index_stats = os.environ["MONGODB_LOG_DIAG_INDEX_STATS_ENABLED"] == "yes"
+if cfg["input_mode"] != "atlas_api":
+    raise SystemExit("Live observability requires atlas_api mode in this sample")
+if source not in {"atlas_api", "mongodb", "bucket"}:
+    raise SystemExit("Unsupported query-shape source")
+if (index_stats or source == "mongodb") and not os.environ.get("MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE"):
+    raise SystemExit("Direct MongoDB collection requires a URI template")
+cfg.update({
+    "observability_enabled": True,
+    "deployment_type": "atlas",
+    "query_shape_source": source,
+    "query_shape_window_hours": int(os.environ["MONGODB_LOG_DIAG_QUERY_SHAPE_WINDOW_HOURS"]),
+    "index_stats_enabled": index_stats,
+})
+if os.environ.get("MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE"):
+    cfg["mongodb_uri_template"] = os.environ["MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE"]
+log_date = sys.argv[1] or skills.atlas_logs().previous_day(cfg["timezone"])
+result = run_pipeline({"stage": "observability", "log_date": log_date}, config=cfg)["observability"]
+# Do not print MongoDB URI, Atlas keys, or per-node exception text.
+nodes = result.get("nodes", [])
+failed = sum(bool(node.get("errors")) for node in nodes)
+print(json.dumps({"status": result.get("status"), "nodes": len(nodes), "nodes_with_errors": failed}))
+if result.get("status") != "completed" or failed:
+    raise SystemExit("Observability did not complete successfully; inspect stage logs")
+PYCODE
+  unset MONGODB_LOG_DIAG_OBSERVABILITY_ENABLED MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE \
+    MONGODB_LOG_DIAG_QUERY_SHAPE_WINDOW_HOURS MONGODB_LOG_DIAG_INDEX_STATS_ENABLED \
+    MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE
 fi
 if [[ "$REPORT_PROVIDER" != none ]]; then
   note "Generating $REPORT_PROVIDER reports into the selected bucket"

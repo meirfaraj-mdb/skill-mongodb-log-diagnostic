@@ -143,6 +143,10 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     logger.info("Report input node=%s chars=%d current_file=%s baselines=%s",
                 host_dir, len(user), current_file, [b[0] for b in baselines])
     report_md = llm.generate(system_prompt, user)
+    from .report_shape_mapping import append_reported_shapes
+    stats_key = layout.query_stats(log_date, host_dir)
+    report_md = append_reported_shapes(
+        report_md, current, store.get_text(stats_key) if store.exists(stats_key) else None)
     _validate_offline_cves(report_md, {m["cve"] for m in offline_cves["matches"]})
     uploads = {"report": store.put_text(layout.report(log_date, host_dir, log_name, "report.md"),
                                         report_md, "text/markdown; charset=utf-8")}
@@ -250,6 +254,9 @@ def _validate_customer_summary(text: str) -> None:
 
 
 CLUSTER_PROMPT = (
+    "Begin with a short ## Executive summary before the priority sections: "
+    "three observed or plausible customer risks, the top immediate actions, "
+    "and the main uncertainty or missing evidence. Do not assert unverified impact. "
     "Write a concise customer-facing Markdown cluster summary. Prioritize confirmed or plausible "
     "customer-facing availability, application query latency, query-shape regressions, and indexing "
     "candidates. Do not list internal-only mongot, Search, Automation Agent, Monitoring Module driver "
@@ -316,6 +323,12 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
                 + _doc("query_shape_insights", {"date": log_date}, json.dumps(evidence))
                 + "\n\n" + body)
         summary = llm.generate(CLUSTER_PROMPT, user)
+        if not re.search(r"(?im)^#{1,2}\s*Executive summary\b", summary[:1200]):
+            summary = llm.generate(
+                CLUSTER_PROMPT + " REQUIRE the heading ## Executive summary at the top. "
+                "Keep all conclusions grounded in the same supplied evidence.", user)
+        if not re.search(r"(?im)^#{1,2}\s*Executive summary\b", summary[:1200]):
+            raise ValueError("Cluster summary omitted its required executive summary")
         _validate_customer_summary(summary)
         cluster_uri = store.put_text(layout.cluster_report(log_date, "cluster-summary.md"),
                                      summary, "text/markdown; charset=utf-8")
