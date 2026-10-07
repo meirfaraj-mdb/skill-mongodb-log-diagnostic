@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # macOS: Atlas API -> local folder / S3 / GCS -> extraction -> optional reports.
 set -euo pipefail
-umask 077  # local config contains Atlas credentials
+umask 077  # local credential file contains Atlas API keys
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -155,24 +155,86 @@ PYCODE
     ;;
 esac
 
-CONFIG_FILE="$PROJECT_ROOT/.local-atlas-folder-test.json"
-python - "$CONFIG_FILE" "$BUCKET" "$PREFIX" "$TIMEZONE" "$CLUSTER_NAME" "$GROUP_ID" "$ATLAS_PUBLIC_KEY" "$ATLAS_PRIVATE_KEY" "$LOG_NAMES" "$ENABLE_OBSERVABILITY" "$QUERY_SHAPE_SOURCE" "$INDEX_STATS_ENABLED" "$MONGODB_URI_TEMPLATE" "$REPORT_PROVIDER" "$BEDROCK_REGION" "$BEDROCK_MODEL_ID" "$GCP_PROJECT" "$VERTEX_LOCATION" "$VERTEX_MODEL" "$ANTHROPIC_MODEL" "$CLAUDE_CLI_MODEL" "$STORAGE_PROVIDER" "$STORAGE_AWS_REGION" "$STORAGE_GCP_PROJECT" <<'PYCODE'
-import json, sys
-(path,bucket,prefix,tz,cluster,group,public,private,names,observability,query_source,index_stats,mongodb_uri,provider,region,bedrock_model,project,location,vertex_model,anthropic_model,claude_cli_model,storage_provider,aws_region,gcp_project)=sys.argv[1:]
-cfg={"input_mode":"atlas_api","storage_provider":storage_provider,"llm_provider":None,"bucket":bucket,"prefix":prefix,"timezone":tz,"cluster_name":cluster,"group_id":group,"atlas_public_key":public,"atlas_private_key":private,"api_version":"2025-03-12","log_names":[x.strip() for x in names.split(',') if x.strip()],"slow_ms":1000,"observability_enabled":observability == "yes", "deployment_type":"atlas", "query_shape_source":query_source, "query_shape_window_hours":24, "index_stats_enabled":index_stats == "yes"}
-if aws_region: cfg["aws_region"] = aws_region
-if gcp_project: cfg["gcp_project"] = gcp_project
-if mongodb_uri: cfg["mongodb_uri_template"] = mongodb_uri
-if provider == "bedrock": cfg.update({"llm_provider":"bedrock","bedrock_region":region,"bedrock_model_id":bedrock_model})
-if provider == "vertex": cfg.update({"llm_provider":"vertex","vertex_project":project,"vertex_location":location,"vertex_model":vertex_model})
-if provider == "anthropic": cfg.update({"llm_provider":"anthropic","anthropic_model":anthropic_model})
-if provider == "claude_cli":
-    cfg["llm_provider"] = "claude_cli"
-    if claude_cli_model: cfg["claude_cli_model"] = claude_cli_model
-with open(path,"w",encoding="utf-8") as f: json.dump(cfg,f,indent=2)
+# Keep only API keys in the local secret file. All other configuration is env-only.
+# Do not pass credentials in process argv or write them to an env file.
+# A fresh temporary credentials-only file prevents accidentally loading an older
+# mixed config at .local-atlas-folder-test.json. Remove it even if a stage fails.
+CONFIG_FILE="$(mktemp "$PROJECT_ROOT/.local-atlas-keys.XXXXXXXX")"
+trap 'rm -f -- "$CONFIG_FILE"' EXIT
+
+ATLAS_PUBLIC_KEY="$ATLAS_PUBLIC_KEY" ATLAS_PRIVATE_KEY="$ATLAS_PRIVATE_KEY" \
+  python - "$CONFIG_FILE" <<'PYCODE'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+path.write_text(json.dumps({
+    "atlas_public_key": os.environ["ATLAS_PUBLIC_KEY"],
+    "atlas_private_key": os.environ["ATLAS_PRIVATE_KEY"],
+}, indent=2) + "\n", encoding="utf-8")
 PYCODE
 chmod 600 "$CONFIG_FILE"
-export CLOUD_PROVIDER=local ATLAS_CONFIG_FILE="$CONFIG_FILE" SKILLS_DIR="$PROJECT_ROOT/skills" DIAG_SKILL_DIR="$PROJECT_ROOT/skills/mongodb-log-diagnostic"
+# Fail before any Atlas requests if an old script or unexpected writer produced
+# another config shape. Print names only, never credential values.
+python - "$CONFIG_FILE" <<'PYCODE'
+import json, sys
+from pathlib import Path
+keys = set(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")))
+expected = {"atlas_public_key", "atlas_private_key"}
+if keys != expected:
+    raise SystemExit(f"Generated Atlas secret has unexpected keys: {sorted(keys - expected)}")
+print("Generated Atlas secret verified: only public/private API keys")
+PYCODE
+unset ATLAS_PUBLIC_KEY ATLAS_PRIVATE_KEY
+
+unset ATLAS_SECRET_ID
+export CLOUD_PROVIDER=local ATLAS_CONFIG_FILE="$CONFIG_FILE" \
+  SKILLS_DIR="$PROJECT_ROOT/skills" DIAG_SKILL_DIR="$PROJECT_ROOT/skills/mongodb-log-diagnostic"
+export MONGODB_LOG_DIAG_INPUT_MODE=atlas_api
+export MONGODB_LOG_DIAG_STORAGE_PROVIDER="$STORAGE_PROVIDER"
+export MONGODB_LOG_DIAG_BUCKET="$BUCKET"
+export MONGODB_LOG_DIAG_PREFIX="$PREFIX"
+export MONGODB_LOG_DIAG_TIMEZONE="$TIMEZONE"
+export MONGODB_LOG_DIAG_CLUSTER_NAME="$CLUSTER_NAME"
+export MONGODB_LOG_DIAG_GROUP_ID="$GROUP_ID"
+export MONGODB_LOG_DIAG_API_VERSION=2025-03-12
+export MONGODB_LOG_DIAG_LOG_NAMES="$LOG_NAMES"
+export MONGODB_LOG_DIAG_SLOW_MS=1000
+export MONGODB_LOG_DIAG_OBSERVABILITY_ENABLED="$( [[ "$ENABLE_OBSERVABILITY" == yes ]] && printf true || printf false )"
+export MONGODB_LOG_DIAG_DEPLOYMENT_TYPE=atlas
+export MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE="$QUERY_SHAPE_SOURCE"
+export MONGODB_LOG_DIAG_QUERY_SHAPE_WINDOW_HOURS=24
+export MONGODB_LOG_DIAG_INDEX_STATS_ENABLED="$( [[ "$INDEX_STATS_ENABLED" == yes ]] && printf true || printf false )"
+if [[ -n "$MONGODB_URI_TEMPLATE" ]]; then
+  # May contain credentials: local process environment only; never put it in the API-key JSON.
+  export MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE="$MONGODB_URI_TEMPLATE"
+fi
+if [[ -n "$STORAGE_AWS_REGION" ]]; then export MONGODB_LOG_DIAG_AWS_REGION="$STORAGE_AWS_REGION"; fi
+if [[ -n "$STORAGE_GCP_PROJECT" ]]; then export MONGODB_LOG_DIAG_GCP_PROJECT="$STORAGE_GCP_PROJECT"; fi
+if [[ "$REPORT_PROVIDER" != none ]]; then
+  export MONGODB_LOG_DIAG_LLM_PROVIDER="$REPORT_PROVIDER"
+  case "$REPORT_PROVIDER" in
+    bedrock)
+      export MONGODB_LOG_DIAG_BEDROCK_REGION="$BEDROCK_REGION"
+      export MONGODB_LOG_DIAG_BEDROCK_MODEL_ID="$BEDROCK_MODEL_ID"
+      ;;
+    vertex)
+      export MONGODB_LOG_DIAG_VERTEX_PROJECT="$GCP_PROJECT"
+      export MONGODB_LOG_DIAG_VERTEX_LOCATION="$VERTEX_LOCATION"
+      export MONGODB_LOG_DIAG_VERTEX_MODEL="$VERTEX_MODEL"
+      ;;
+    anthropic) export MONGODB_LOG_DIAG_ANTHROPIC_MODEL="$ANTHROPIC_MODEL" ;;
+    claude_cli)
+      if [[ -n "$CLAUDE_CLI_MODEL" ]]; then
+        export MONGODB_LOG_DIAG_CLAUDE_CLI_MODEL="$CLAUDE_CLI_MODEL"
+      fi
+      ;;
+  esac
+else
+  unset MONGODB_LOG_DIAG_LLM_PROVIDER
+fi
 
 show_atlas_storage_target
 note "Downloading from Atlas into the selected bucket"
@@ -194,4 +256,4 @@ print((datetime.now(ZoneInfo('$TIMEZONE'))-timedelta(days=1)).date())
 PY
 )"
 show_atlas_storage_outputs "$LOG_DATE"
-printf '\nLocal config (contains Atlas credentials; do not commit it): %s\n' "$CONFIG_FILE"
+printf '\nTemporary Atlas API-key file is removed on exit; non-secret settings were exported as environment variables.\n'
