@@ -43,9 +43,44 @@ if [[ -n "$storage_module" && ! -f "$storage_module" ]]; then
   fi
   [[ -f "$storage_module" ]] || die "Missing vendored storage file: $storage_module"
 fi
-prompt LOG_DATE "Log date (YYYY-MM-DD; blank means yesterday)" ""
-[[ -z "$LOG_DATE" || "$LOG_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "Log date must be YYYY-MM-DD."
+prompt LOG_DATE "Log date (YYYY-MM-DD, or number of days ending yesterday; blank means yesterday)" ""
 prompt TIMEZONE "Timezone used for yesterday" "Asia/Jerusalem"
+# Plan all dates once in the selected timezone, oldest first. 1 means yesterday.
+if ! DATE_PLAN="$(LOG_DATE_INPUT="$LOG_DATE" LOG_TIMEZONE="$TIMEZONE" python3 - <<'PYDATES'
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+import os
+import re
+
+value = os.environ["LOG_DATE_INPUT"].strip()
+try:
+    yesterday = datetime.now(ZoneInfo(os.environ["LOG_TIMEZONE"])).date() - timedelta(days=1)
+    if not value:
+        days = [yesterday]
+    elif re.fullmatch(r"[0-9]+", value):
+        count = int(value)
+        if not 1 <= count <= 365:
+            raise ValueError("Day count must be between 1 and 365")
+        days = [yesterday - timedelta(days=offset) for offset in range(count - 1, -1, -1)]
+    else:
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            raise ValueError("Enter YYYY-MM-DD or a positive day count")
+        days = [date.fromisoformat(value)]
+    print("\n".join(map(str, days)))
+except (ValueError, OverflowError) as exc:
+    raise SystemExit(f"Invalid date, count, or timezone: {exc}")
+PYDATES
+)"; then
+  die "Unable to plan log dates."
+fi
+LOG_DATES=()
+while IFS= read -r day; do LOG_DATES+=("$day"); done <<< "$DATE_PLAN"
+REPORT_DATE="${LOG_DATES[${#LOG_DATES[@]}-1]}"
+if [[ "$LOG_DATE" =~ ^[0-9]+$ ]]; then
+  note "Processing ${#LOG_DATES[@]} days through $REPORT_DATE; reporting only $REPORT_DATE"
+else
+  note "Processing and reporting $REPORT_DATE"
+fi
 
 note "Atlas API configuration"
 prompt CLUSTER_NAME "Atlas cluster name" ""
@@ -54,7 +89,7 @@ prompt ATLAS_PUBLIC_KEY "Atlas API public key" ""
 read -r -s -p "Atlas API private key (input hidden): " ATLAS_PRIVATE_KEY; printf '\n'
 [[ -n "$CLUSTER_NAME" && -n "$GROUP_ID" && -n "$ATLAS_PUBLIC_KEY" && -n "$ATLAS_PRIVATE_KEY" ]] || die "Atlas values are required."
 prompt LOG_NAMES "Log names (comma-separated: auto,mongodb,mongos)" "auto"
-prompt ENABLE_OBSERVABILITY "Collect Atlas Query Shape Insights for the last 24 hours? (yes/no)" "no"
+prompt ENABLE_OBSERVABILITY "Collect observability for each selected day? (yes/no)" "no"
 ENABLE_OBSERVABILITY=$(printf '%s' "$ENABLE_OBSERVABILITY" | tr '[:upper:]' '[:lower:]')
 [[ "$ENABLE_OBSERVABILITY" == yes || "$ENABLE_OBSERVABILITY" == no ]] || die "Enter yes or no."
 OBS_HOSTS=""; QUERY_SHAPE_SOURCE="disabled"; INDEX_STATS_ENABLED="no"; MONGODB_URI_TEMPLATE=""
@@ -225,10 +260,12 @@ print("Atlas credential file verified: keys-only")
 PYCODE
 
 show_atlas_storage_target
+for CURRENT_DATE in "${LOG_DATES[@]}"; do
+  note "Processing $CURRENT_DATE"
 note "Downloading from Atlas into the selected bucket"
-CMD=(python -m agent.handler --stage download); [[ -z "$LOG_DATE" ]] || CMD+=(--log-date "$LOG_DATE"); "${CMD[@]}"
+python -m agent.handler --stage download --log-date "$CURRENT_DATE"
 note "Extracting one node/log at a time"
-CMD=(python -m agent.handler --stage extract); [[ -z "$LOG_DATE" ]] || CMD+=(--log-date "$LOG_DATE"); "${CMD[@]}"
+python -m agent.handler --stage extract --log-date "$CURRENT_DATE"
 if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
   note "Collecting observability one node at a time"
   # The unchanged provider loads general settings and keys-only Atlas credentials.
@@ -240,8 +277,7 @@ if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
   if [[ -n "$MONGODB_URI_TEMPLATE" ]]; then
     export MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE="$MONGODB_URI_TEMPLATE"
   fi
-  unset MONGODB_URI_TEMPLATE
-  python - "$LOG_DATE" <<'PYCODE'
+  python - "$CURRENT_DATE" <<'PYCODE'
 import json
 import os
 import sys
@@ -280,15 +316,10 @@ PYCODE
     MONGODB_LOG_DIAG_QUERY_SHAPE_WINDOW_HOURS MONGODB_LOG_DIAG_INDEX_STATS_ENABLED \
     MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE
 fi
+done
 if [[ "$REPORT_PROVIDER" != none ]]; then
   note "Generating $REPORT_PROVIDER reports into the selected bucket"
-  CMD=(python -m agent.handler --stage report); [[ -z "$LOG_DATE" ]] || CMD+=(--log-date "$LOG_DATE"); "${CMD[@]}"
+  python -m agent.handler --stage report --log-date "$REPORT_DATE"
 fi
-[[ -n "$LOG_DATE" ]] || LOG_DATE="$(python - <<PY
-from datetime import datetime,timedelta
-from zoneinfo import ZoneInfo
-print((datetime.now(ZoneInfo('$TIMEZONE'))-timedelta(days=1)).date())
-PY
-)"
-show_atlas_storage_outputs "$LOG_DATE"
+show_atlas_storage_outputs "$REPORT_DATE"
 printf '\nTemporary keys-only credential file will be removed on exit.\n'
