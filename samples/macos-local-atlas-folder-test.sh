@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # macOS: Atlas API -> local folder / S3 / GCS -> extraction -> optional reports.
 set -euo pipefail
-umask 077  # local credential file contains Atlas API keys
+umask 077  # credential file contains Atlas API keys
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -71,6 +71,11 @@ if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
     [[ -n "$MONGODB_URI_TEMPLATE" ]] || die "A MongoDB URI template is required for direct MongoDB collection."
   fi
 fi
+# This unchanged provider loader does not read observability-specific env settings.
+# Stop rather than silently running with the wrong query-shape/index configuration.
+if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
+  die "Observability options are not supported by the unchanged agent/providers.py; select no for this local sample, or configure observability in a separately reviewed change."
+fi
 prompt REPORT_PROVIDER "Report provider (none/bedrock/vertex/anthropic/claude_cli)" "none"
 REPORT_PROVIDER=$(printf '%s' "$REPORT_PROVIDER" | tr '[:upper:]' '[:lower:]')
 [[ "$REPORT_PROVIDER" == none || "$REPORT_PROVIDER" == bedrock || "$REPORT_PROVIDER" == vertex || "$REPORT_PROVIDER" == anthropic || "$REPORT_PROVIDER" == claude_cli ]] || die "Choose none, bedrock, vertex, anthropic, or claude_cli."
@@ -80,6 +85,11 @@ case "$REPORT_PROVIDER" in
   bedrock)
     note "Amazon Bedrock configuration"
     prompt BEDROCK_REGION "AWS region" "eu-west-1"
+    # Saved sample defaults may contain a Vertex location (global), which is not
+    # an AWS Bedrock region and yields bedrock-runtime.global.amazonaws.com.
+    if [[ ! "$BEDROCK_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]]; then
+      die "Invalid Bedrock AWS region: $BEDROCK_REGION (choose a region such as eu-west-1, not global)."
+    fi
     prompt BEDROCK_MODEL_ID "Bedrock model or inference-profile ID" "eu.anthropic.claude-sonnet-5"
     if [[ "$STORAGE_PROVIDER" == s3 ]]; then
       AWS_PROFILE_NAME="$STORAGE_AWS_PROFILE"
@@ -131,8 +141,8 @@ case "$REPORT_PROVIDER" in
   bedrock)
     python -m pip install -r requirements-aws.txt
     [[ -z "$AWS_PROFILE_NAME" ]] || export AWS_PROFILE="$AWS_PROFILE_NAME"
-    export AWS_REGION="$BEDROCK_REGION"
-    note "Checking AWS identity used for Bedrock"
+    export AWS_REGION="$BEDROCK_REGION" AWS_DEFAULT_REGION="$BEDROCK_REGION"
+    note "Checking AWS identity used for Bedrock (region: $BEDROCK_REGION)"
     python - <<'PYCODE'
 import boto3
 try:
@@ -155,41 +165,24 @@ PYCODE
     ;;
 esac
 
-# Keep only API keys in the local secret file. All other configuration is env-only.
-# Do not pass credentials in process argv or write them to an env file.
-# A fresh temporary credentials-only file prevents accidentally loading an older
-# mixed config at .local-atlas-folder-test.json. Remove it even if a stage fails.
-CONFIG_FILE="$(mktemp "$PROJECT_ROOT/.local-atlas-keys.XXXXXXXX")"
-trap 'rm -f -- "$CONFIG_FILE"' EXIT
-
+# Use a fresh keys-only file, never the prior mixed config file. Remove it on exit.
+CONFIG_FILE="$(mktemp "${TMPDIR:-/tmp}/mongodb-atlas-keys.XXXXXXXX")"
+cleanup_credentials() { rm -f -- "$CONFIG_FILE"; }
+trap cleanup_credentials EXIT
+# Pass private key via the child's environment, never its process command line.
 ATLAS_PUBLIC_KEY="$ATLAS_PUBLIC_KEY" ATLAS_PRIVATE_KEY="$ATLAS_PRIVATE_KEY" \
   python - "$CONFIG_FILE" <<'PYCODE'
 import json
 import os
 import sys
 from pathlib import Path
-
-path = Path(sys.argv[1])
-path.write_text(json.dumps({
+Path(sys.argv[1]).write_text(json.dumps({
     "atlas_public_key": os.environ["ATLAS_PUBLIC_KEY"],
     "atlas_private_key": os.environ["ATLAS_PRIVATE_KEY"],
-}, indent=2) + "\n", encoding="utf-8")
+}) + "\n", encoding="utf-8")
 PYCODE
 chmod 600 "$CONFIG_FILE"
-# Fail before any Atlas requests if an old script or unexpected writer produced
-# another config shape. Print names only, never credential values.
-python - "$CONFIG_FILE" <<'PYCODE'
-import json, sys
-from pathlib import Path
-keys = set(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")))
-expected = {"atlas_public_key", "atlas_private_key"}
-if keys != expected:
-    raise SystemExit(f"Generated Atlas secret has unexpected keys: {sorted(keys - expected)}")
-print("Generated Atlas secret verified: only public/private API keys")
-PYCODE
 unset ATLAS_PUBLIC_KEY ATLAS_PRIVATE_KEY
-
-unset ATLAS_SECRET_ID
 export CLOUD_PROVIDER=local ATLAS_CONFIG_FILE="$CONFIG_FILE" \
   SKILLS_DIR="$PROJECT_ROOT/skills" DIAG_SKILL_DIR="$PROJECT_ROOT/skills/mongodb-log-diagnostic"
 export MONGODB_LOG_DIAG_INPUT_MODE=atlas_api
@@ -202,15 +195,6 @@ export MONGODB_LOG_DIAG_GROUP_ID="$GROUP_ID"
 export MONGODB_LOG_DIAG_API_VERSION=2025-03-12
 export MONGODB_LOG_DIAG_LOG_NAMES="$LOG_NAMES"
 export MONGODB_LOG_DIAG_SLOW_MS=1000
-export MONGODB_LOG_DIAG_OBSERVABILITY_ENABLED="$( [[ "$ENABLE_OBSERVABILITY" == yes ]] && printf true || printf false )"
-export MONGODB_LOG_DIAG_DEPLOYMENT_TYPE=atlas
-export MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE="$QUERY_SHAPE_SOURCE"
-export MONGODB_LOG_DIAG_QUERY_SHAPE_WINDOW_HOURS=24
-export MONGODB_LOG_DIAG_INDEX_STATS_ENABLED="$( [[ "$INDEX_STATS_ENABLED" == yes ]] && printf true || printf false )"
-if [[ -n "$MONGODB_URI_TEMPLATE" ]]; then
-  # May contain credentials: local process environment only; never put it in the API-key JSON.
-  export MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE="$MONGODB_URI_TEMPLATE"
-fi
 if [[ -n "$STORAGE_AWS_REGION" ]]; then export MONGODB_LOG_DIAG_AWS_REGION="$STORAGE_AWS_REGION"; fi
 if [[ -n "$STORAGE_GCP_PROJECT" ]]; then export MONGODB_LOG_DIAG_GCP_PROJECT="$STORAGE_GCP_PROJECT"; fi
 if [[ "$REPORT_PROVIDER" != none ]]; then
@@ -225,16 +209,25 @@ if [[ "$REPORT_PROVIDER" != none ]]; then
       export MONGODB_LOG_DIAG_VERTEX_LOCATION="$VERTEX_LOCATION"
       export MONGODB_LOG_DIAG_VERTEX_MODEL="$VERTEX_MODEL"
       ;;
-    anthropic) export MONGODB_LOG_DIAG_ANTHROPIC_MODEL="$ANTHROPIC_MODEL" ;;
-    claude_cli)
-      if [[ -n "$CLAUDE_CLI_MODEL" ]]; then
-        export MONGODB_LOG_DIAG_CLAUDE_CLI_MODEL="$CLAUDE_CLI_MODEL"
-      fi
+    anthropic|claude_cli)
+      note "The unchanged provider loader does not expose per-provider model overrides; using its default model."
       ;;
   esac
 else
   unset MONGODB_LOG_DIAG_LLM_PROVIDER
 fi
+
+# Fail before any network operation if the generated secret is not keys-only.
+python - <<'PYCODE'
+import json
+import os
+from pathlib import Path
+path = Path(os.environ["ATLAS_CONFIG_FILE"])
+keys = set(json.loads(path.read_text(encoding="utf-8")))
+if keys != {"atlas_public_key", "atlas_private_key"}:
+    raise SystemExit("Generated Atlas credential file has unexpected fields")
+print("Atlas credential file verified: keys-only")
+PYCODE
 
 show_atlas_storage_target
 note "Downloading from Atlas into the selected bucket"
@@ -256,4 +249,4 @@ print((datetime.now(ZoneInfo('$TIMEZONE'))-timedelta(days=1)).date())
 PY
 )"
 show_atlas_storage_outputs "$LOG_DATE"
-printf '\nTemporary Atlas API-key file is removed on exit; non-secret settings were exported as environment variables.\n'
+printf '\nTemporary keys-only credential file will be removed on exit.\n'
