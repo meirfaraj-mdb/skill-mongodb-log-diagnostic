@@ -5,6 +5,13 @@ import logging
 import os
 from typing import Literal
 
+from .tls_diagnostics import log_gateway_tls_trust
+
+# Earliest application-controlled step: inspect the running container before
+# importing runtime configuration or initializing any Google/ADK clients.
+# Managed Agent Engine startup can still happen before this module is imported.
+log_gateway_tls_trust()
+
 from .runtime import configure_gcp_runtime
 
 logger = logging.getLogger(__name__)

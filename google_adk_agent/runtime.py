@@ -17,6 +17,8 @@ def configure_gcp_runtime() -> None:
         if project:
             os.environ["GOOGLE_CLOUD_PROJECT"] = project
     project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if os.environ.get("MONGODB_LOG_DIAG_INPUT_MODE", "atlas_api").strip().lower() == "existing_bucket":
+        return
     secret_name = os.environ.get("ATLAS_SECRET_NAME", "atlas-log-agent")
     if project and not os.environ.get("ATLAS_SECRET_ID"):
         os.environ["ATLAS_SECRET_ID"] = f"projects/{project}/secrets/{secret_name}/versions/latest"
