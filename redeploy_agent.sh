@@ -12,6 +12,7 @@ set -eu
 [ -f "$ENV_FILE" ] && [ -f "$AGENT_DIR/agent.py" ] && [ -f "$AGENT_DIR/tls_diagnostics.py" ] || {
   echo 'Run from repository root with the existing env and agent files' >&2; exit 1;
 }
+[ -f "$AGENT_DIR/requirements.txt" ] || { echo "Missing agent requirements.txt" >&2; exit 1; }
 [ -d agent ] && [ -d skills ] || { echo 'Missing agent/ or skills/ directory' >&2; exit 1; }
 command -v adk >/dev/null 2>&1 || { echo 'ADK CLI not found' >&2; exit 1; }
 command -v gcloud >/dev/null 2>&1 || { echo 'gcloud CLI not found' >&2; exit 1; }
@@ -69,6 +70,7 @@ printf 'Deploying with gateway CA fingerprint %s (diagnostic only; no CA install
 adk deploy agent_engine \
   "--project=$PROJECT" "--region=$REGION" "--agent_engine_id=$ENGINE_ID" \
   "--display_name=$DISPLAY_NAME" \
-  --extra_packages=agent --extra_packages=skills \
-  "--env_file=$DEPLOY_ENV" "$AGENT_DIR"
+  "--env_file=$DEPLOY_ENV" \
+  "--requirements_file=$AGENT_DIR/requirements.txt" \
+  "$AGENT_DIR"
 echo 'Redeployed. Invoke a session and inspect the startup TLS diagnostic.'

@@ -43,7 +43,7 @@ _ENV_FIELDS = {
     "input_mode": "INPUT_MODE", "group_id": "GROUP_ID", "cluster_name": "CLUSTER_NAME",
     "timezone": "TIMEZONE", "api_version": "API_VERSION", "log_names": "LOG_NAMES",
     "host_selector": "HOST_SELECTOR", "http_timeout_seconds": "HTTP_TIMEOUT_SECONDS",
-    "max_retries": "MAX_RETRIES", "bucket": "BUCKET", "prefix": "PREFIX",
+    "max_retries": "MAX_RETRIES", "bucket": "BUCKET", "input_bucket": "INPUT_BUCKET", "prefix": "PREFIX",
     "slow_ms": "SLOW_MS", "expected_node_count": "EXPECTED_NODE_COUNT",
     "report_max_tokens": "REPORT_MAX_TOKENS", "report_max_input_chars": "REPORT_MAX_INPUT_CHARS",
     "cluster_summary": "CLUSTER_SUMMARY", "llm_provider": "LLM_PROVIDER",
@@ -136,6 +136,19 @@ def normalize_config(raw: dict, cloud: str) -> dict:
             bucket, storage = bucket[len(scheme):].rstrip("/"), storage or provider
     cfg["bucket"] = bucket
     cfg["storage_provider"] = storage or defaults["storage_provider"]
+    # The input bucket uses the same backend, credentials and object-key prefix.
+    input_bucket = cfg.get("input_bucket") or bucket
+    for scheme, provider in (("s3://", "s3"), ("gs://", "gcs"), ("file://", "local")):
+        if input_bucket.startswith(scheme):
+            if provider != cfg["storage_provider"]:
+                raise ValueError("input_bucket and bucket must use the same storage provider")
+            input_bucket = input_bucket[len(scheme):].rstrip("/")
+            break
+    if not input_bucket:
+        raise ValueError("input_bucket must not be empty")
+    if cfg["storage_provider"] != "local" and "/" in input_bucket:
+        raise ValueError("input_bucket must be a bucket name; use prefix for object paths")
+    cfg["input_bucket"] = input_bucket
     cfg["prefix"] = (cfg.get("prefix") or "mongodb-atlas-logs").strip("/")
     cfg["llm_provider"] = cfg.get("llm_provider") or defaults["llm_provider"]
     cfg["input_mode"] = str(cfg.get("input_mode", "atlas_api")).strip().lower()
@@ -223,7 +236,7 @@ class LocalStore:
         return self._p(key).read_text(encoding="utf-8")
 
 
-def get_store(config: dict):
+def _get_single_store(config: dict):
     provider = config["storage_provider"]
     if provider == "s3":
         return skills.aws_storage().S3Store(config["bucket"], region=config.get("aws_region"))
@@ -232,6 +245,17 @@ def get_store(config: dict):
     if provider == "local":
         return LocalStore(config["bucket"])
     raise ValueError(f"Unknown storage_provider {provider!r}")
+
+
+def get_store(config: dict):
+    """Route supplied inputs separately from extracts and reports."""
+    from .bucket_routing import SplitBucketStore
+    output = _get_single_store(config)
+    input_bucket = config.get("input_bucket") or config["bucket"]
+    if input_bucket == config["bucket"]:
+        return output  # Preserve the existing single-bucket contract.
+    inputs = _get_single_store({**config, "bucket": input_bucket})
+    return SplitBucketStore(inputs, output, config["prefix"])
 
 
 def get_llm(config: dict):
