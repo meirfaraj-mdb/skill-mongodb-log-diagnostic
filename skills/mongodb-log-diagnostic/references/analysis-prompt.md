@@ -121,11 +121,15 @@ Use the compact occurrence formats exactly:
 
 Do not silently convert these keys into local time or confuse error minute buckets with exact slow-operation timestamps.
 
+## Customer-facing exclusion rule (overrides other report requirements)
+
+Do not include discussion of Atlas-internal or Atlas-managed services, agents, components, maintenance/platform operations, internal driver/CVE observations, or internal system namespaces. Do not name them, describe their behavior, report that they are affected, or mention them as excluded, irrelevant, or uncertain. Omit internal-only observations silently. If there is independently supported evidence of a customer-facing symptom, report only the symptom and its evidence without attributing it to internal systems. When attribution is unavailable, say `Source not identified from available evidence`; do not speculate whether the source is internal or customer-owned. An observed application name alone does not establish customer ownership: include a name only when supplied evidence explicitly verifies it as customer-owned; otherwise omit the name. Do not recommend customer changes to Atlas-managed software.
+
 ## Driver compatibility and CVE/update analysis
 
 Analyze `driverCompatibility` separately from MongoDB server findings. Do not wait for a CVE ID to be present in the extraction: the extractor normally provides driver names and versions, while CVE identification requires an explicit advisory lookup.
 
-Inspect **every** driver/version in `driverCompatibility`, including `distinct_compatible_drivers`, not only `incompatible_drivers`. A driver can be compatible with the observed MongoDB server and still be vulnerable, end-of-life, or behind a security fix.
+Inspect driver versions for explicitly customer-owned applications only. Exclude unverified and Atlas-managed application associations and omit their driver names, versions, compatibility findings, and CVE observations. For an explicitly customer-owned application, inspect **every** observed version in `driverCompatibility`, including `distinct_compatible_drivers`, not only `incompatible_drivers`. A driver can be compatible with the observed MongoDB server and still be vulnerable, end-of-life, or behind a security fix.
 
 Distinguish:
 

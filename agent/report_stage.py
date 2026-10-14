@@ -20,20 +20,24 @@ def build_system_prompt() -> str:
     return "\n\n".join([
         "CVE and application-attribution safety rules OVERRIDE conflicting text in the base skill: "
         "The offline_driver_cves document is a limited reviewed snapshot, not a web lookup. A matching "
-        "driver/version is a review candidate, never proof of exploitation or vulnerable component use. "
-        "Only name applications tied to the same driver/version in observed_app_names, or the same slow "
-        "group in app_names; distinguish internal Atlas services from customer apps. For topology and "
-        "TLS errors with no app mapping state attribution unknown. Show an issue-to-application matrix. "
+        "customer-driver/version is a review candidate, never proof of exploitation or vulnerable use. "
+        "Only name an application when the supplied evidence explicitly establishes customer ownership; "
+        "an observed appName alone is not proof of ownership. Omit unverified app names, Atlas-managed "
+        "application names, and findings whose only subject is Atlas-managed software. For topology and "
+        "TLS errors without verified customer attribution, state that the source is not identified; do not "
+        "speculate about internal or customer ownership. "
         "Never fabricate CVEs, upgrades, application impact, or universal server-driver compatibility. "
-        "Do not advise customer upgrades of mongot. The reviewed offline overlay has precedence over "
-        "base analysis-prompt.md.",
-        "Customer-facing scope: only lead with issues that affect or could reasonably affect customer "
-        "applications or query workloads. Internal-only mongot, Automation Agent, Monitoring Module, or "
-        "Atlas Search driver/CVE/scan observations are not customer tasks. If an internal event has "
-        "customer impact, describe the symptom and recommend Atlas Support/platform review, not customer "
-        "modification of internal software. Distinguish observed from plausible impact. A customer "
-        "namespace alone does not prove client ownership. Index recommendations require query-shape "
-        "metrics plus explain/index inventory; change streams and natural scans do not establish missing indexes.",
+        "The reviewed offline overlay has precedence over base analysis-prompt.md.",
+        "Customer-facing exclusion rule: do not include any discussion of internal Atlas components, "
+        "services, agents, maintenance/platform operations, internal driver/CVE findings, or internal "
+        "system namespaces. Do not name them, describe their behavior, say they are affected, or mention "
+        "them as excluded/irrelevant/unknown. Omit those observations silently. If an independently "
+        "supported customer symptom exists, report only that symptom and its evidence without attributing "
+        "it to an internal component. If attribution is unavailable, say 'source not identified from the "
+        "available evidence'. Never recommend a customer change to Atlas-managed software. Distinguish "
+        "observed from plausible customer impact. A customer namespace alone does not prove client "
+        "ownership. Index recommendations require query-shape metrics plus explain/index inventory; "
+        "change streams and natural scans do not establish missing indexes.",
         "You are running inside an automated pipeline. Follow the MongoDB Log Diagnostic skill exactly.",
         "Adapter note: the analysis prompt refers to `/home/user/extraction.json`; extraction files are "
         "supplied inline in labelled <document> tags. `current` is extractionOccurence.json; `n-1` and "
@@ -147,6 +151,9 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     stats_key = layout.query_stats(log_date, host_dir)
     report_md = append_reported_shapes(
         report_md, current, store.get_text(stats_key) if store.exists(stats_key) else None)
+    report_md, removed_internal = _strip_internal_content(report_md)
+    if removed_internal:
+        logger.info("Removed %d internal-only content block(s) from node report", removed_internal)
     _validate_offline_cves(report_md, {m["cve"] for m in offline_cves["matches"]})
     uploads = {"report": store.put_text(layout.report(log_date, host_dir, log_name, "report.md"),
                                         report_md, "text/markdown; charset=utf-8")}
@@ -244,13 +251,111 @@ def summarize_query_stats(store, layout, log_date, nodes, limit=15):
     return output
 
 
+# Remove internal-only material from customer-facing Markdown even if the model emits it.
+# The filter intentionally targets known Atlas-managed component names, internal markers, and
+# system namespaces; it does not broadly remove ordinary mentions of MongoDB Atlas or customer software.
+_INTERNAL_REPORT_RE = re.compile(
+    r"\binternal\b|"
+    r"\batlas[\s-]+managed\b|"
+    r"\bplatform[\s-]+operations?\b|\bsystem[\s-]+namespaces?\b|"
+    r"\b(?:mongot|automation[\s-]+agent|monitoring[\s-]+module)\b|"
+    r"\batlas[\s-]+(?:automation|monitoring)(?:[\s-]+(?:agent|module|client|service))?\b|"
+    r"\batlas[\s-]+search[\s-]+(?:java[\s-]+)?driver\b|"
+    r"__mdb_internal(?:_[\w.$-]*)?|"
+    r"(?:^|[\s`])(?:admin|config)\.system(?:\.[\w.$-]+)?|"
+    r"(?:^|[\s`])local\.oplog\.rs\b",
+    re.I,
+)
+_HEADING_RE = re.compile(r"^\s*(#{1,6})\s+.*$")
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)")
+
+
+def _strip_internal_content(markdown: str) -> tuple[str, int]:
+    """Drop internal-only paragraphs, list items, table rows, and titled sections."""
+    blocks = re.split(r"\n[ \t]*\n", markdown.strip()) if markdown.strip() else []
+    kept: list[str] = []
+    removed = 0
+    skip_heading_level: int | None = None
+
+    for block in blocks:
+        lines = block.splitlines()
+        if not lines:
+            continue
+        first_heading = _HEADING_RE.match(lines[0])
+        if skip_heading_level is not None:
+            if first_heading and len(first_heading.group(1)) <= skip_heading_level:
+                skip_heading_level = None
+            else:
+                removed += 1
+                continue
+        if first_heading and _INTERNAL_REPORT_RE.search(lines[0]):
+            skip_heading_level = len(first_heading.group(1))
+            removed += 1
+            continue
+
+        # Preserve valid tables while removing only rows containing internal-only content.
+        if len(lines) >= 2 and all(line.lstrip().startswith("|") for line in lines):
+            table_lines = []
+            for idx, line in enumerate(lines):
+                if idx < 2 and _INTERNAL_REPORT_RE.search(line):
+                    table_lines = []
+                    removed += 1
+                    break
+                if idx >= 2 and _INTERNAL_REPORT_RE.search(line):
+                    removed += 1
+                    continue
+                table_lines.append(line)
+            if table_lines and len(table_lines) > 2:
+                kept.append("\n".join(table_lines))
+            elif table_lines:
+                removed += 1
+            continue
+
+        # Drop offending bullets independently so unrelated customer findings survive.
+        if _LIST_ITEM_RE.match(lines[0]):
+            items: list[list[str]] = []
+            for line in lines:
+                if _LIST_ITEM_RE.match(line) or not items:
+                    items.append([line])
+                else:
+                    items[-1].append(line)
+            safe_items = []
+            for item in items:
+                text = "\n".join(item)
+                if _INTERNAL_REPORT_RE.search(text):
+                    removed += 1
+                else:
+                    safe_items.append(text)
+            if safe_items:
+                kept.append("\n".join(safe_items))
+            continue
+
+        # Preserve supported customer facts in a paragraph while dropping only the
+        # sentence that names an internal component or makes an internal-only claim.
+        sentences = re.split(r"(?<=[.!?])\s+", block)
+        safe_sentences = []
+        dropped_sentences = 0
+        for sentence in sentences:
+            if _INTERNAL_REPORT_RE.search(sentence):
+                dropped_sentences += 1
+            elif sentence.strip():
+                safe_sentences.append(sentence.strip())
+        if dropped_sentences:
+            removed += dropped_sentences
+            if safe_sentences:
+                kept.append(" ".join(safe_sentences))
+            continue
+        kept.append(block)
+
+    result = "\n\n".join(kept).strip()
+    if not result:
+        result = "No customer-facing findings could be substantiated from the supplied evidence."
+    return result + "\n", removed
+
+
 def _validate_customer_summary(text: str) -> None:
     if re.search(r"\bCVE-\d{4}-\d{4,}\b", text, re.I):
         raise ValueError("Cluster summary contains a CVE without customer-use verification")
-    for line in text.splitlines():
-        if re.search(r"\b(?:upgrade|update|patch)\b", line, re.I) and re.search(
-                r"\b(?:mongot|atlas search java driver|automation agent|monitoring module)\b", line, re.I):
-            raise ValueError("Cluster summary recommends modifying Atlas-managed software")
 
 
 CLUSTER_PROMPT = (
@@ -259,10 +364,11 @@ CLUSTER_PROMPT = (
     "and the main uncertainty or missing evidence. Do not assert unverified impact. "
     "Write a concise customer-facing Markdown cluster summary. Prioritize confirmed or plausible "
     "customer-facing availability, application query latency, query-shape regressions, and indexing "
-    "candidates. Do not list internal-only mongot, Search, Automation Agent, Monitoring Module driver "
-    "CVEs, compatibility upgrades, scans or slow commands as customer tasks. Include an internal event "
-    "only with evidence of customer-facing impact or an Atlas Support escalation; separate hypothesis "
-    "from observation. For each priority give impact, evidence (node/namespace/query hash/metrics), "
+    "candidates. Completely omit Atlas-internal or Atlas-managed components, services, agents, platform "
+    "operations, their names, and their driver/CVE findings, even as exclusions or uncertain hypotheses. "
+    "If logs show a customer-relevant symptom but its source is unknown, report only the symptom and say "
+    "the source is not identified; do not speculate about internal systems. For each priority give impact, "
+    "evidence (node/namespace/query hash/metrics), "
     "affected customer application if attributable, owner/action, and confidence; otherwise say "
     "application attribution unknown. Query Shape Insights may use a recent lookback rather than the "
     "log day: don't claim same-day timing without timestamps. Rank customer query shapes by work, "
@@ -272,7 +378,7 @@ CLUSTER_PROMPT = (
     "__mdb_internal_search are not evidence of a missing customer index. If shapes/indexStats are "
     "inconclusive, say 'No index gap verified from available evidence' and say what to collect. "
     "Use only supplied node reports and bounded query evidence; do not invent metrics or CVEs. "
-    "Do not recommend customer modification of Atlas-managed software. State n-1/n-8 trends only if "
+    "Do not instruct customers to change vendor-managed platform components. State n-1/n-8 trends only if "
     "present. Do not fill a quota of actions. Never expose credentials, IPs or query literals."
 )
 
@@ -329,6 +435,9 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
                 "Keep all conclusions grounded in the same supplied evidence.", user)
         if not re.search(r"(?im)^#{1,2}\s*Executive summary\b", summary[:1200]):
             raise ValueError("Cluster summary omitted its required executive summary")
+        summary, removed_internal = _strip_internal_content(summary)
+        if removed_internal:
+            logger.info("Removed %d internal-only content block(s) from cluster summary", removed_internal)
         _validate_customer_summary(summary)
         cluster_uri = store.put_text(layout.cluster_report(log_date, "cluster-summary.md"),
                                      summary, "text/markdown; charset=utf-8")

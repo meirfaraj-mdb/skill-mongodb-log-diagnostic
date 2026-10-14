@@ -52,8 +52,27 @@ _ENV_FIELDS = {
     "vertex_project": "VERTEX_PROJECT", "storage_provider": "STORAGE_PROVIDER",
     "aws_region": "AWS_REGION", "gcp_project": "GCP_PROJECT",
 }
+_ENV_FIELDS.update({
+    "observability_enabled": "OBSERVABILITY_ENABLED", "deployment_type": "DEPLOYMENT_TYPE",
+    "observability_hosts": "OBSERVABILITY_HOSTS", "observability_sources": "OBSERVABILITY_SOURCES",
+    "mongodb_uri_template": "MONGODB_URI_TEMPLATE", "mongodb_timeout_ms": "MONGODB_TIMEOUT_MS",
+    "mongodb_max_time_ms": "MONGODB_MAX_TIME_MS", "observability_max_rows": "OBSERVABILITY_MAX_ROWS",
+    "index_stats_enabled": "INDEX_STATS_ENABLED", "index_stats_max_collections": "INDEX_STATS_MAX_COLLECTIONS",
+    "query_shape_source": "QUERY_SHAPE_SOURCE", "query_shape_window_hours": "QUERY_SHAPE_WINDOW_HOURS",
+    "query_stats_max_summaries": "QUERY_STATS_MAX_SUMMARIES", "atlas_process_ids": "ATLAS_PROCESS_IDS",
+    "query_plan_requests": "QUERY_PLAN_REQUESTS", "profiler_enabled": "PROFILER_ENABLED",
+    "atlas_base_url": "ATLAS_BASE_URL", "ops_manager_base_url": "OPS_MANAGER_BASE_URL",
+    "ops_manager_host_ids": "OPS_MANAGER_HOST_IDS", "ops_manager_public_key": "OPS_MANAGER_PUBLIC_KEY",
+    "ops_manager_private_key": "OPS_MANAGER_PRIVATE_KEY", "observability_api_max_pages": "OBSERVABILITY_API_MAX_PAGES",
+})
+_BOOL_FIELDS = {"cluster_summary", "observability_enabled", "index_stats_enabled", "profiler_enabled"}
+_JSON_FIELDS = {"observability_sources": dict, "atlas_process_ids": dict, "ops_manager_host_ids": dict,
+                "query_plan_requests": list}
 _INT_FIELDS = {"http_timeout_seconds", "max_retries", "slow_ms", "expected_node_count",
                "report_max_tokens", "report_max_input_chars"}
+_INT_FIELDS.update({"mongodb_timeout_ms", "mongodb_max_time_ms", "observability_max_rows",
+                    "index_stats_max_collections", "query_shape_window_hours", "query_stats_max_summaries",
+                    "observability_api_max_pages"})
 _CREDENTIAL_FIELDS = {"atlas_public_key", "atlas_private_key"}
 
 
@@ -70,11 +89,15 @@ def _env_config() -> dict:
                 value = int(value)
             except ValueError as exc:
                 raise ValueError(f"{name} must be an integer") from exc
-        elif key == "cluster_summary":
+        elif key in _BOOL_FIELDS:
             if value.lower() not in ("true", "false", "1", "0"):
                 raise ValueError(f"{name} must be true or false")
             value = value.lower() in ("true", "1")
-        elif key == "log_names":
+        elif key in _JSON_FIELDS:
+            value = json.loads(value)
+            if not isinstance(value, _JSON_FIELDS[key]):
+                raise ValueError(f"{name} must be a JSON {_JSON_FIELDS[key].__name__}")
+        elif key in {"log_names", "observability_hosts"}:
             if value.startswith("["):
                 try:
                     value = json.loads(value)
@@ -167,9 +190,8 @@ def normalize_config(raw: dict, cloud: str) -> dict:
 def load_config() -> dict:
     cloud = detect_cloud()
     cfg = normalize_config(load_raw_config(cloud), cloud)
-    logger.info("Config loaded cloud=%s input_mode=%s storage=%s bucket=%s prefix=%s llm=%s cluster=%s",
-                cloud, cfg["input_mode"], cfg["storage_provider"], cfg["bucket"], cfg["prefix"],
-                cfg["llm_provider"], cfg["cluster_name"])
+    from .safe_logging import log_config
+    log_config(cfg)
     return cfg
 
 
@@ -250,12 +272,13 @@ def _get_single_store(config: dict):
 def get_store(config: dict):
     """Route supplied inputs separately from extracts and reports."""
     from .bucket_routing import SplitBucketStore
+    from .safe_logging import with_write_logging
     output = _get_single_store(config)
     input_bucket = config.get("input_bucket") or config["bucket"]
     if input_bucket == config["bucket"]:
-        return output  # Preserve the existing single-bucket contract.
+        return with_write_logging(output)  # Preserve routing and return values.
     inputs = _get_single_store({**config, "bucket": input_bucket})
-    return SplitBucketStore(inputs, output, config["prefix"])
+    return with_write_logging(SplitBucketStore(inputs, output, config["prefix"]))
 
 
 def get_llm(config: dict):
