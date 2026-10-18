@@ -101,6 +101,11 @@ if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
   prompt INDEX_STATS_ENABLED "Also collect direct MongoDB indexStats? (yes/no)" "no"
   INDEX_STATS_ENABLED=$(printf '%s' "$INDEX_STATS_ENABLED" | tr '[:upper:]' '[:lower:]')
   [[ "$INDEX_STATS_ENABLED" == yes || "$INDEX_STATS_ENABLED" == no ]] || die "Enter yes or no."
+  # The Python provider config expects the environment flag as true/false.
+  INDEX_STATS_ENABLED_BOOL=false
+  if [[ "$INDEX_STATS_ENABLED" == yes ]]; then
+    INDEX_STATS_ENABLED_BOOL=true
+  fi
   if [[ "$INDEX_STATS_ENABLED" == yes || "$QUERY_SHAPE_SOURCE" == mongodb ]]; then
     prompt MONGODB_URI_TEMPLATE "MongoDB URI template ({host} is replaced; input hidden is not supported)" ""
     [[ -n "$MONGODB_URI_TEMPLATE" ]] || die "A MongoDB URI template is required for direct MongoDB collection."
@@ -273,7 +278,7 @@ if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
   export MONGODB_LOG_DIAG_OBSERVABILITY_ENABLED=true
   export MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE="$QUERY_SHAPE_SOURCE"
   export MONGODB_LOG_DIAG_QUERY_SHAPE_WINDOW_HOURS=24
-  export MONGODB_LOG_DIAG_INDEX_STATS_ENABLED="$INDEX_STATS_ENABLED"
+  export MONGODB_LOG_DIAG_INDEX_STATS_ENABLED="$INDEX_STATS_ENABLED_BOOL"
   if [[ -n "$MONGODB_URI_TEMPLATE" ]]; then
     export MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE="$MONGODB_URI_TEMPLATE"
   fi
@@ -287,7 +292,7 @@ from agent import skills
 
 cfg = load_config()
 source = os.environ["MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE"]
-index_stats = os.environ["MONGODB_LOG_DIAG_INDEX_STATS_ENABLED"] == "yes"
+index_stats = os.environ["MONGODB_LOG_DIAG_INDEX_STATS_ENABLED"] == "true"
 if cfg["input_mode"] != "atlas_api":
     raise SystemExit("Live observability requires atlas_api mode in this sample")
 if source not in {"atlas_api", "mongodb", "bucket"}:
