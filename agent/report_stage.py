@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime, timezone
 
-from . import diffing, offline_cve
+from . import diffing, offline_cve, priority_rules
 from .common import Layout, logger, shift
 from .skills import diagnostic_skill_dir
 
@@ -16,7 +16,8 @@ def _read_skill_text(rel: str) -> str:
     return (diagnostic_skill_dir() / rel).read_text(encoding="utf-8")
 
 
-def build_system_prompt() -> str:
+def build_system_prompt(rules: dict | None = None) -> str:
+    rules = rules or priority_rules.load_rules()
     return "\n\n".join([
         "CVE and application-attribution safety rules OVERRIDE conflicting text in the base skill: "
         "The offline_driver_cves document is a limited reviewed snapshot, not a web lookup. A matching "
@@ -48,6 +49,7 @@ def build_system_prompt() -> str:
         "=== references/analysis-prompt.md ===\n" + _read_skill_text("references/analysis-prompt.md"),
         "=== references/extracted-signal-reference.md ===\n" + _read_skill_text("references/extracted-signal-reference.md"),
         "=== references/analysis-prompt.offline-cve-overlay.md ===\n" + _read_skill_text("references/analysis-prompt.offline-cve-overlay.md"),
+        priority_rules.render_prompt(rules),
     ])
 
 
@@ -96,7 +98,9 @@ def _validate_offline_cves(markdown: str, allowed: set[str]) -> None:
         raise ValueError("Report contains CVE IDs not in reviewed offline matches: " + ", ".join(sorted(extra)))
 
 
-def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name, max_chars) -> dict:
+def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name, max_chars,
+                rules: dict | None = None) -> dict:
+    rules = rules or priority_rules.load_rules()
     current, cur_key = _load_extract(store, layout, log_date, host_dir, log_name, "extractionOccurence.json")
     if current is None:
         raise FileNotFoundError(cur_key)
@@ -115,6 +119,7 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
                 "baselines_available": [d["label"] for d in diffs],
                 "baselines_missing": [l for l, _, _ in BASELINES if l not in {d["label"] for d in diffs}],
                 "comparisons": diffs}
+    decisions = priority_rules.evaluate(current, rules, diffs)
 
     def assemble(cur_payload, cur_name, base_payloads):
         docs = [_doc("current", {"date": log_date, "node": host_dir, "log": log_name, "file": cur_name},
@@ -126,6 +131,8 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
         if diffs:
             docs.append(_doc("precomputed_diff", {}, json.dumps(diff_doc, separators=(",", ":"))))
         docs.append(_doc("offline_driver_cves", {}, json.dumps(offline_cves, separators=(",", ":"))))
+        docs.append(_doc("priority_decisions", {"rules_version": decisions.get("rules_version")},
+                         json.dumps(decisions, separators=(",", ":"))))
         for label, key in (("index_stats", layout.index_stats(log_date, host_dir)),
                            ("query_stats", layout.query_stats(log_date, host_dir))):
             if store.exists(key):
@@ -140,13 +147,19 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
         short, _ = _load_extract(store, layout, log_date, host_dir, log_name, "extractionshort.json")
         current_file = "extractionshort.json"
         user = assemble(short or current, current_file, baselines)
-    if len(user) > max_chars:
-        current_file = "extractionshort.json (compacted)"
-        user = assemble(_compact(short or current), current_file,
-                        [(l, d, s, _compact(p)) for l, d, s, p in baselines])
+        if len(user) > max_chars:
+            current_file = "extractionshort.json (compacted)"
+            user = assemble(_compact(short or current), current_file,
+                            [(l, d, s, _compact(p)) for l, d, s, p in baselines])
     logger.info("Report input node=%s chars=%d current_file=%s baselines=%s",
                 host_dir, len(user), current_file, [b[0] for b in baselines])
     report_md = llm.generate(system_prompt, user)
+    report_md, removed_by_rules = priority_rules.enforce(report_md, decisions, rules)
+    if removed_by_rules:
+        logger.info("Priority rules removed %d finding/action line(s) from node report", removed_by_rules)
+    rule_warnings = priority_rules.audit(report_md, decisions, rules)
+    for warning in rule_warnings:
+        logger.warning("Priority rule mismatch node=%s: %s", host_dir, warning)
     from .report_shape_mapping import append_reported_shapes
     stats_key = layout.query_stats(log_date, host_dir)
     report_md = append_reported_shapes(
@@ -160,9 +173,14 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     if diffs:
         uploads["diff"] = store.put_text(layout.report(log_date, host_dir, log_name, "diff.json"),
                                          json.dumps(diff_doc, indent=2), "application/json")
+    uploads["priority_decisions"] = store.put_text(
+        layout.report(log_date, host_dir, log_name, "priority-decisions.json"),
+        json.dumps({**decisions, "audit_warnings": rule_warnings}, indent=2), "application/json")
     return {"node": host_dir, "log_name": log_name, "current_file": current_file,
             "baselines": [b[0] for b in baselines], "offline_driver_cves": offline_cves,
-            "uploads": uploads, "report_md": report_md}
+            "priority_rules_version": decisions.get("rules_version"),
+            "priority_rule_warnings": rule_warnings,
+            "uploads": uploads, "report_md": report_md, "priority_decisions": decisions}
 
 
 # Only include aggregated shape metrics; never pass query filters or literal values to the model.
@@ -170,6 +188,8 @@ _SHAPE_FIELDS = ("namespace", "ns", "database", "collection", "command", "queryS
                  "queryHash", "execCount", "avgWorkingMillis", "docsExaminedRatio", "docsExamined",
                  "docsReturned", "keysExamined", "bytesRead", "totalExecMicros")
 _METRIC_FIELDS = ("sum", "avg", "max", "total", "value")
+# Only these window fields are passed to the model (no endpoints or process IDs).
+_WINDOW_FIELDS = ("log_date", "timezone", "since", "until", "hours", "complete_day")
 
 
 def _safe_scalar(value):
@@ -228,6 +248,14 @@ def _metric_number(value):
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
 
 
+def _query_shape_window(data):
+    """Return the bounded collection window stored by the observability collector, if any."""
+    window = data.get("window") if isinstance(data, dict) else None
+    if not isinstance(window, dict):
+        return None
+    return {k: _safe_scalar(window[k]) for k in _WINDOW_FIELDS if k in window}
+
+
 def summarize_query_stats(store, layout, log_date, nodes, limit=15):
     output = []
     for host in sorted({host for host, _ in nodes}):
@@ -243,8 +271,12 @@ def summarize_query_stats(store, layout, log_date, nodes, limit=15):
             shapes.sort(key=lambda s: (_metric_number(s.get("docsExaminedRatio")),
                                        _metric_number(s.get("avgWorkingMillis")),
                                        _metric_number(s.get("execCount"))), reverse=True)
-            output.append({"node": host, "status": "available", "index_stats_available": index_available,
-                           "shapes_found": len(shapes), "top_shapes": shapes[:limit]})
+            entry = {"node": host, "status": "available", "index_stats_available": index_available,
+                     "shapes_found": len(shapes), "top_shapes": shapes[:limit]}
+            window = _query_shape_window(data)
+            if window:
+                entry["window"] = window
+            output.append(entry)
         except (ValueError, TypeError) as exc:
             output.append({"node": host, "status": "invalid_query_stats",
                            "index_stats_available": index_available, "error_type": type(exc).__name__})
@@ -276,7 +308,6 @@ def _strip_internal_content(markdown: str) -> tuple[str, int]:
     kept: list[str] = []
     removed = 0
     skip_heading_level: int | None = None
-
     for block in blocks:
         lines = block.splitlines()
         if not lines:
@@ -292,7 +323,6 @@ def _strip_internal_content(markdown: str) -> tuple[str, int]:
             skip_heading_level = len(first_heading.group(1))
             removed += 1
             continue
-
         # Preserve valid tables while removing only rows containing internal-only content.
         if len(lines) >= 2 and all(line.lstrip().startswith("|") for line in lines):
             table_lines = []
@@ -310,7 +340,6 @@ def _strip_internal_content(markdown: str) -> tuple[str, int]:
             elif table_lines:
                 removed += 1
             continue
-
         # Drop offending bullets independently so unrelated customer findings survive.
         if _LIST_ITEM_RE.match(lines[0]):
             items: list[list[str]] = []
@@ -329,7 +358,6 @@ def _strip_internal_content(markdown: str) -> tuple[str, int]:
             if safe_items:
                 kept.append("\n".join(safe_items))
             continue
-
         # Preserve supported customer facts in a paragraph while dropping only the
         # sentence that names an internal component or makes an internal-only claim.
         sentences = re.split(r"(?<=[.!?])\s+", block)
@@ -346,7 +374,6 @@ def _strip_internal_content(markdown: str) -> tuple[str, int]:
                 kept.append(" ".join(safe_sentences))
             continue
         kept.append(block)
-
     result = "\n\n".join(kept).strip()
     if not result:
         result = "No customer-facing findings could be substantiated from the supplied evidence."
@@ -370,8 +397,11 @@ CLUSTER_PROMPT = (
     "the source is not identified; do not speculate about internal systems. For each priority give impact, "
     "evidence (node/namespace/query hash/metrics), "
     "affected customer application if attributable, owner/action, and confidence; otherwise say "
-    "application attribution unknown. Query Shape Insights may use a recent lookback rather than the "
-    "log day: don't claim same-day timing without timestamps. Rank customer query shapes by work, "
+    "application attribution unknown. Query Shape Insights cover the same log day (project timezone) "
+    "as the logs, as stated in each node's window; if window.complete_day is false say the day is "
+    "partially covered, and if a node's status is not_collected say query-shape evidence is unavailable "
+    "for that node. Shape metrics are day aggregates: don't claim a time of day without timestamps. "
+    "Rank customer query shapes by work, "
     "latency, volume and documents examined per returned document. Treat high scan ratio as an index "
     "candidate, not proof of missing index; require explain and index inventory before asserting an "
     "index is missing or naming a key order. Change streams, $natural, oplog, admin, and "
@@ -379,7 +409,10 @@ CLUSTER_PROMPT = (
     "inconclusive, say 'No index gap verified from available evidence' and say what to collect. "
     "Use only supplied node reports and bounded query evidence; do not invent metrics or CVEs. "
     "Do not instruct customers to change vendor-managed platform components. State n-1/n-8 trends only if "
-    "present. Do not fill a quota of actions. Never expose credentials, IPs or query literals."
+    "present. Do not fill a quota of actions. Never expose credentials, IPs or query literals. "
+    "Apply the report priority rules below to every priority and action, using the merged "
+    "priority_decisions document; P3 watch items belong in a short final 'Watch list' section, not in "
+    "the executive summary risks."
 )
 
 
@@ -395,6 +428,7 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
     if len(nodes) != expected:
         logger.warning("Found %d node extracts for %s (expected %d)", len(nodes), log_date, expected)
     results, failed = [], []
+    rules = priority_rules.load_rules(config)
     if summary_only:
         if len(nodes) < 2:
             raise RuntimeError("Cluster summary requires at least two node extracts")
@@ -405,15 +439,18 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
                                "; run --stage report first")
         for host, name in nodes:
             key = layout.report(log_date, host, name, "report.md")
+            decisions_key = layout.report(log_date, host, name, "priority-decisions.json")
+            decisions = (json.loads(store.get_text(decisions_key))
+                         if store.exists(decisions_key) else None)
             results.append({"node": host, "log_name": name, "report_md": store.get_text(key),
-                            "uploads": {"report": store.uri(key)}})
+                            "uploads": {"report": store.uri(key)}, "priority_decisions": decisions})
     else:
         max_chars = int(config.get("report_max_input_chars", 600_000))
-        system_prompt = build_system_prompt()
+        system_prompt = build_system_prompt(rules)
         for host, name in nodes:
             try:
                 results.append(report_node(store, layout, llm, system_prompt, log_date,
-                                           host, name, max_chars))
+                                           host, name, max_chars, rules))
             except Exception as error:
                 logger.exception("Report failed for %s/%s", host, name)
                 failed.append({"node": host, "log_name": name, "error": str(error)[:1000]})
@@ -425,16 +462,23 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
                     summary_only)
         body = "\n\n".join(_doc("node_report", {"node": r["node"], "log": r["log_name"]},
                                 r["report_md"]) for r in results)
+        merged = priority_rules.merge_decisions([r.get("priority_decisions") for r in results])
+        cluster_prompt = CLUSTER_PROMPT + "\n\n" + priority_rules.render_prompt(rules)
         user = (f"Cluster `{config['cluster_name']}`, day {log_date}.\n\n"
                 + _doc("query_shape_insights", {"date": log_date}, json.dumps(evidence))
+                + "\n\n" + _doc("priority_decisions", {"scope": "cluster"},
+                                  json.dumps(merged, separators=(",", ":")))
                 + "\n\n" + body)
-        summary = llm.generate(CLUSTER_PROMPT, user)
+        summary = llm.generate(cluster_prompt, user)
         if not re.search(r"(?im)^#{1,2}\s*Executive summary\b", summary[:1200]):
             summary = llm.generate(
-                CLUSTER_PROMPT + " REQUIRE the heading ## Executive summary at the top. "
+                cluster_prompt + " REQUIRE the heading ## Executive summary at the top. "
                 "Keep all conclusions grounded in the same supplied evidence.", user)
-        if not re.search(r"(?im)^#{1,2}\s*Executive summary\b", summary[:1200]):
-            raise ValueError("Cluster summary omitted its required executive summary")
+            if not re.search(r"(?im)^#{1,2}\s*Executive summary\b", summary[:1200]):
+                raise ValueError("Cluster summary omitted its required executive summary")
+        summary, removed_by_rules = priority_rules.enforce(summary, merged, rules)
+        if removed_by_rules:
+            logger.info("Priority rules removed %d line(s) from cluster summary", removed_by_rules)
         summary, removed_internal = _strip_internal_content(summary)
         if removed_internal:
             logger.info("Removed %d internal-only content block(s) from cluster summary", removed_internal)
@@ -451,7 +495,9 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
                                        ("catalog_name", "catalog_version", "refreshed_at", "coverage_note")},
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "node_count": len(nodes), "expected_node_count": expected,
-        "reports": [{k: v for k, v in r.items() if k != "report_md"} for r in results],
+        "priority_rules_version": rules.get("version"),
+        "reports": [{k: v for k, v in r.items() if k not in {"report_md", "priority_decisions"}}
+                    for r in results],
         "cluster_summary": cluster_uri, "failed": failed,
     }
     store.put_text(layout.cluster_report(log_date, "manifest.json"),

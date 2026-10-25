@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 ARTIFACTS = {
     "query_stats": ("queryStats", "query-stats.json"),
@@ -16,10 +17,55 @@ ARTIFACTS = {
     "profiler": ("profiler", "profiler.json"),
 }
 
+# Atlas Query Shape Insights only serves summaries for the last 7 days.
+QUERY_SHAPE_RETENTION = timedelta(days=7)
+# Safety margin for clock skew / request latency at the oldest edge of retention.
+QUERY_SHAPE_RETENTION_MARGIN = timedelta(minutes=10)
+
+
+class QueryShapeWindowUnavailable(ValueError):
+    """The requested log day is outside Query Shape Insights retention, or has not started."""
+
 
 def artifact_key(layout, day, node, kind):
     directory, filename = ARTIFACTS[kind]
     return f"{layout.day(day)}/{node}/{directory}/{filename}"
+
+
+def log_day_window(log_date: str, timezone_name: str) -> tuple[datetime, datetime]:
+    """Return [local midnight, next local midnight) for ``log_date`` as UTC datetimes.
+
+    Same day boundaries as atlas_logs.day_window(), so query shapes, metrics and advisor
+    data cover exactly the same day as the downloaded logs. DST days are 23h or 25h.
+    """
+    zone = ZoneInfo(timezone_name or "UTC")
+    d = date.fromisoformat(log_date)
+    nxt = d + timedelta(days=1)
+    start = datetime(d.year, d.month, d.day, tzinfo=zone)
+    end = datetime(nxt.year, nxt.month, nxt.day, tzinfo=zone)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def query_shape_window(log_date: str, timezone_name: str, now: datetime | None = None,
+                       retention: timedelta = QUERY_SHAPE_RETENTION,
+                       margin: timedelta = QUERY_SHAPE_RETENTION_MARGIN) -> tuple[datetime, datetime, bool]:
+    """Return ``(since, until, complete_day)`` for the log day, bounded by API retention.
+
+    Raises QueryShapeWindowUnavailable when the day starts before the retention horizon
+    (it cannot be fully served) or has not started yet. For the current day ``until`` is
+    clamped to ``now`` and ``complete_day`` is False.
+    """
+    now = now or datetime.now(timezone.utc)
+    since, until = log_day_window(log_date, timezone_name)
+    oldest = now - retention + margin
+    if since < oldest:
+        raise QueryShapeWindowUnavailable(
+            f"log day {log_date} starts {since.isoformat()}, before the "
+            f"{retention.days}-day Query Shape Insights retention horizon ({oldest.isoformat()})")
+    if since >= now:
+        raise QueryShapeWindowUnavailable(f"log day {log_date} has not started yet")
+    complete_day = until <= now
+    return since, min(until, now), complete_day
 
 
 def timestamp(value):

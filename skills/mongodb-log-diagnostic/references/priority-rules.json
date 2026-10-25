@@ -1,0 +1,63 @@
+{
+  "version": "2026-10-25.1",
+  "description": "Report priority and placement rules. Applied per node to one log day (24h, project timezone). agent/priority_rules.py evaluates them deterministically, passes the decisions to the report model, and enforces suppressions on the generated Markdown.",
+  "excluded_namespace_prefixes": ["admin.", "config.", "local."],
+  "change_stream_allowed_namespaces": ["admin.$cmd.aggregate"],
+  "excluded_namespace_markers": ["__mdb_internal"],
+  "rules": {
+    "change_stream_collscan": {
+      "enabled": true,
+      "long_scan_duration_ms_gte": 60000,
+      "long_scan_docs_examined_gte": 1000000,
+      "long_priority": "P3",
+      "guidance": [
+        "A change-stream getMore with plan COLLSCAN reads the oplog. This is expected behaviour and cannot be improved with an index: never recommend an index for it.",
+        "It can still cost CPU and I/O, especially after a restart, failover or consumer outage, when cursors resume from an old resume token and scan a large oplog range.",
+        "List it in the findings table and action plan only for a very long scan (max duration >= {long_scan_duration_ms_gte:,} ms or max documents examined >= {long_scan_docs_examined_gte:,}), as {long_priority}. Otherwise describe it in one or two sentences in Query and latency analysis only.",
+        "For a listed long scan, say whether it coincides with restart, election or failover events in the extracted timeline. Possible checks: consumer lag and resume behaviour, number of concurrent change-stream cursors, early $match filtering and fullDocument lookup cost (these reduce downstream work but do not remove the oplog scan). Validate by comparing change-stream scan duration after the next restart."
+      ]
+    },
+    "slow_low_volume": {
+      "enabled": true,
+      "count_lt": 1000,
+      "total_duration_ms_lt": 3600000,
+      "priority": "P3",
+      "guidance": [
+        "A slow-operation group (change streams excluded) with fewer than {count_lt:,} occurrences in the log day AND an estimated total slow time below {total_duration_ms_lt:,} ms ({total_duration_hours:g} h) is {priority}: probably not a critical index gap.",
+        "Still list it in the findings table and the action plan: a new feature or a growing workload can make it significant later.",
+        "Estimated total slow time = duration_ms.avg x count, because the extraction has no per-group duration total. Say it is an estimate.",
+        "When priority_decisions marks the group new or increased versus n-1/n-8, state it in the row as a watch item.",
+        "Groups at or above either threshold are not capped by this rule; prioritize them from the evidence."
+      ]
+    },
+    "auth_failures": {
+      "enabled": true,
+      "types": {
+        "authentication": {
+          "label": "Failed to authenticate",
+          "message_patterns": ["\\bauthentication failed\\b", "\\bfailed to authenticate\\b", "\\bAuthenticationFailed\\b"],
+          "error_code_names": ["AuthenticationFailed"],
+          "error_codes": ["18"],
+          "report_keywords": "authenticat"
+        },
+        "authorization": {
+          "label": "Authorization failures",
+          "message_patterns": ["\\bauthori[sz]ation failures?\\b", "\\bchecking authori[sz]ation failed\\b", "\\bnot authori[sz]ed\\b", "\\bunauthori[sz]ed\\b"],
+          "error_code_names": ["Unauthorized"],
+          "error_codes": ["13"],
+          "report_keywords": "authori[sz]|unauthori[sz]"
+        }
+      },
+      "bands": [
+        {"lt": 100, "placement": "appendix_only"},
+        {"lt": 1000, "priority": "P3", "placement": "issues_and_actions"},
+        {"lt": 5000, "priority": "P2", "placement": "issues_and_actions"},
+        {"priority": "P1", "placement": "issues_and_actions"}
+      ],
+      "guidance": [
+        "Count each type separately for the log day on this node by summing the matching error_scan groups.",
+        "Do not recommend raising timeouts or pool sizes. Possible checks: failing users, mechanisms and databases from the redacted samples, recent credential or role changes, misconfigured clients. Validate with the next day's count."
+      ]
+    }
+  }
+}
