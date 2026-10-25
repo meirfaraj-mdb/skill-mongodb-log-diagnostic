@@ -49,66 +49,55 @@ def _discover_atlas_nodes(config: dict) -> list[dict]:
     return nodes
 
 
-def _bucket_query_shape_receipts(store, layout: Layout, log_date: str) -> list[dict]:
-    """Return already-uploaded query-shape files without accessing MongoDB or Atlas."""
-    marker = "/queryStats/query-stats.json"
-    day = layout.day(log_date) + "/"
-    nodes = []
-    for key in store.list_keys(day):
-        if key.startswith(day) and key.endswith(marker):
-            host_dir = key[len(day):].split("/", 1)[0]
-            nodes.append({"host": host_dir, "queryStats": "reused_existing_bucket", "uri": store.uri(key)})
-    return nodes
+def collect_nodes(config, log_date, store, nodes):
+    """One snapshot per kind/node; existing_bucket is strictly read-only."""
+    from .observability_contract import ARTIFACTS, artifact_key, resolve_source
+    layout = Layout.from_config(config)
+    collector = None
+    results = []
+    for info in nodes:
+        host, host_dir = info["host"], info["host_dir"]
+        receipt = {"host": host, "host_dir": host_dir, "artifacts": {}, "errors": []}
+        for kind in ARTIFACTS:
+            try:
+                source = resolve_source(config, kind)
+                key = artifact_key(layout, log_date, host_dir, kind)
+                if source == "bucket":
+                    receipt["artifacts"][kind] = {"status": "available" if store.exists(key) else "not_present",
+                                                     "source": "bucket", "uri": store.uri(key)}
+                elif source == "disabled":
+                    receipt["artifacts"][kind] = {"status": "disabled"}
+                else:
+                    collector = collector or skills.observability()
+                    data = collector.collect(config, host, info.get("process_id"), kind, source)
+                    receipt["artifacts"][kind] = {"status": "collected", "source": source,
+                        "uri": store.put_text(key, json.dumps(data, default=str, indent=2), "application/json")}
+            except Exception as exc:
+                # Raw driver/API messages can contain credentials and query literals.
+                logger.warning("Observability failed node=%s kind=%s error_type=%s", host_dir, kind, type(exc).__name__)
+                receipt["errors"].append({"kind": kind, "error_type": type(exc).__name__})
+        results.append(receipt)
+    errors = any(item["errors"] for item in results)
+    return {"status": "partial" if errors else "reused_existing_bucket" if config.get("input_mode") == "existing_bucket" else "completed",
+            "nodes": results, "log_date": log_date,
+            "collection_time_note": "Live API windows are rolling at collection time, not necessarily the log day."}
 
 
 def run(config: dict, log_date: str, store=None) -> dict:
     from .providers import get_store
-
     store = store or get_store(config)
     layout = Layout.from_config(config)
-
-    # Never contact Atlas or MongoDB in bucket-only mode.
     if config.get("input_mode") == "existing_bucket":
-        nodes = _bucket_query_shape_receipts(store, layout, log_date)
-        return {
-            "status": "reused_existing_bucket" if nodes else "no_existing_query_shapes",
-            "reason": "Bucket-only mode never accesses MongoDB or Atlas",
-            "nodes": nodes,
-        }
-    if not config.get("observability_enabled", False):
+        nodes = _discover_bucket_nodes(store, layout, log_date)
+    elif not config.get("observability_enabled", False):
         return {"status": "disabled", "nodes": []}
-
-    # Atlas is the source of truth for Atlas/direct-MongoDB observability. This
-    # permits observability before downloading logs and removes hostname prompts.
-    nodes = _discover_atlas_nodes(config)
-    collector = skills.observability()
-    source = collector.resolve_query_shape_source(config)
-    results = []
-
-    # Sequential on purpose: a node's collection/upload completes before next.
-    for node_info in nodes:
-        host, host_dir = node_info["host"], node_info["host_dir"]
-        node = {"host": host, "host_dir": host_dir, "query_shape_source": source, "uploads": {}, "errors": []}
-        if config.get("index_stats_enabled", True):
-            try:
-                data = collector.collect_index_stats(config, host)
-                node["uploads"]["indexStats"] = store.put_text(
-                    layout.index_stats(log_date, host_dir), json.dumps(data, default=str, indent=2), "application/json"
-                )
-            except Exception as exc:
-                logger.exception("indexStats failed host=%s", host)
-                node["errors"].append({"indexStats": str(exc)[:1000]})
-        if source == "bucket":
-            key = layout.query_stats(log_date, host_dir)
-            node["queryStats"] = "reused_existing_bucket" if store.exists(key) else "not_present_in_bucket"
-        elif source != "disabled":
-            try:
-                data = collector.collect_query_shapes(config, host, node_info.get("process_id"))
-                node["uploads"]["queryStats"] = store.put_text(
-                    layout.query_stats(log_date, host_dir), json.dumps(data, default=str, indent=2), "application/json"
-                )
-            except Exception as exc:
-                logger.exception("queryStats failed host=%s", host)
-                node["errors"].append({"queryStats": str(exc)[:1000]})
-        results.append(node)
-    return {"status": "completed", "query_shape_source": source, "nodes": results}
+    elif config.get("observability_hosts"):
+        from urllib.parse import quote
+        nodes = [{"host": host, "host_dir": quote(host, safe="._-"),
+                  "process_id": config.get("atlas_process_ids", {}).get(host)}
+                 for host in config["observability_hosts"]]
+    elif config.get("deployment_type", "atlas") == "atlas":
+        nodes = _discover_atlas_nodes(config)
+    else:
+        raise ValueError("Set MONGODB_LOG_DIAG_OBSERVABILITY_HOSTS for non-Atlas deployments")
+    return collect_nodes(config, log_date, store, nodes)

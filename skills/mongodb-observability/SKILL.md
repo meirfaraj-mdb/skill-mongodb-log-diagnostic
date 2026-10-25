@@ -1,41 +1,24 @@
 # MongoDB Observability Collection Skill
 
-Collect optional, read-only diagnostics and upload them through the shared pipeline. Each node is completed before the next node starts.
+Collect bounded, read-only per-node diagnostics: query statistics, index definitions and access stats, collection storage/latency snapshots, configured queryPlanner explains, monitoring measurements and advisor candidates. Optional profiler collection only reads existing profiler records.
 
-## Outputs
+Use `agent.observability_stage` or `scripts/prepare_observability.py`. See `OBSERVABILITY_USAGE.md` in the repository root for environment settings, artifact schemas and usage.
 
-```text
-<prefix>/<date>/<node>/indexStats/index-stats.json
-<prefix>/<date>/<node>/queryStats/query-stats.json
-```
+## Source rules
 
-`indexStats` is collected directly from each node because `$indexStats` counters are node-local.
+* `existing_bucket`: inventory all artifact types; never call Atlas, MongoDB or Ops Manager.
+* Query stats: bucket, direct MongoDB or Atlas Query Shape Insights. Ops Manager query stats API is unsupported.
+* Index definitions/stats, collection stats and explain plans: bucket or direct MongoDB. Node-local commands require direct node connections.
+* Metrics and advisor: bucket, Atlas API or Ops Manager API. Unsupported version, endpoint or permission failures are reported as partial collection, not silently replaced.
 
-## Query-shape sources
+## Temporal and safety rules
 
-Set `query_shape_source` to one of:
-
-| Source | When to use it | Behavior |
-|---|---|---|
-| `atlas_api` | Atlas deployment | Calls the documented Atlas Query Shape Insights summary endpoint for a rolling previous 24-hour UTC window. The endpoint is built automatically from `group_id` and `cluster_name`, then filtered per node with its Atlas-discovered `processIds`. |
-| `mongodb` | Ops Manager/self-managed or when direct access is preferred | Runs the read-only `$queryStats` aggregation against each configured node. It records a snapshot plus the requested 24-hour window. |
-| `bucket` | A query-shape JSON was already uploaded | Makes no Atlas or MongoDB call; preserves/reuses `<node>/queryStats/query-stats.json`. |
-| `auto` | Default | Uses `atlas_api` for `deployment_type: atlas`; otherwise uses `mongodb`. |
-| `disabled` | Skip query shapes | Does not collect or replace query-shape data. |
-
-In `input_mode: existing_bucket`, this skill never opens a MongoDB connection or calls Atlas. It only reports whether existing per-node query-shape files are present; reports consume those files automatically.
-
-## Configuration
-
-```json
-{
-  "observability_enabled": true,
-  "deployment_type": "atlas",
-  "mongodb_uri_template": "mongodb://diagnostic-reader:...@{host}:27017/?tls=true",
-  "query_shape_source": "atlas_api",
-  "query_shape_window_hours": 24,
-  "query_stats_max_summaries": 100
-}
-```
-
-The direct MongoDB account needs read-only permissions sufficient for `listDatabases`, `listCollections`, `$indexStats`, and `$queryStats`. Never place the URI in outputs. Atlas Query Shape Insights uses the existing Atlas project API key; `atlas_query_stats_url` remains an optional override for an organization-approved proxy/API endpoint; it is not required.
+* API lookbacks default to the latest 24 hours at collection time, not the partition/log date.
+* `$queryStats` is cumulative per retained entry; `$indexStats` is cumulative since its own reset. Neither is inherently a rolling 24h series.
+* Capture timestamped comparable daily snapshots for deltas; reject counter/reset discontinuities.
+* Collection size/reusable space is a current snapshot; growth needs a prior comparable snapshot. Reusable storage is not proof that compaction is required.
+* Hidden age requires verified transition metadata, not index-counter age. Never delete indexes automatically.
+* Keep exact hash schemes distinct. Rank workload queries by total execution time, average latency and volume; profiler counts are sampled observations.
+* Compare advisor candidates against existing keys/options and matching query plans. No index gap is established from a slow operation alone.
+* Never log credentials, client IPs or raw query literals. Explain only explicitly supplied find requests with queryPlanner verbosity and timeouts. Do not enable profiler, execute write commands, install indexes or change server settings.
+* Each kind's failure is independent; preserve successful kinds and return partial status. Collection caps and timeouts are configurable.

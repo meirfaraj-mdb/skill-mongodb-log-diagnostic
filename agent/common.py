@@ -47,6 +47,10 @@ class Layout:
     def cluster_report(self, log_date: str, filename: str) -> str:
         return f"{self.day(log_date)}/cluster/reports/{filename}"
 
+    def observability(self, log_date: str, host_dir: str, kind: str) -> str:
+        from .observability_contract import artifact_key
+        return artifact_key(self, log_date, host_dir, kind)
+
     def index_stats(self, log_date: str, host_dir: str) -> str:
         return f"{self.day(log_date)}/{host_dir}/indexStats/index-stats.json"
 
