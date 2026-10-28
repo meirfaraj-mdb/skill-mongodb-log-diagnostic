@@ -10,7 +10,6 @@ from . import skills
 from .common import logger
 from agent.env_bool import parse_bool_env
 
-
 CLOUD_DEFAULTS = {
     "aws": {"storage_provider": "s3", "llm_provider": "bedrock"},
     "gcp": {"storage_provider": "gcs", "llm_provider": "vertex"},
@@ -67,6 +66,7 @@ _ENV_FIELDS.update({
     "ops_manager_host_ids": "OPS_MANAGER_HOST_IDS", "ops_manager_public_key": "OPS_MANAGER_PUBLIC_KEY",
     "ops_manager_private_key": "OPS_MANAGER_PRIVATE_KEY", "observability_api_max_pages": "OBSERVABILITY_API_MAX_PAGES",
     "metrics_granularity": "METRICS_GRANULARITY", "metrics_graphs_enabled": "METRICS_GRAPHS_ENABLED",
+    "metrics_graph_groups": "METRICS_GRAPH_GROUPS", "metrics_graph_config": "METRICS_GRAPH_CONFIG",
 })
 _BOOL_FIELDS = {"cluster_summary", "observability_enabled", "index_stats_enabled", "profiler_enabled",
                 "metrics_graphs_enabled"}
