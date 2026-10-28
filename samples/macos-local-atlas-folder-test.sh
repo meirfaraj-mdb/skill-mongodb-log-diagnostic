@@ -7,9 +7,26 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 note() { printf '\n==> %s\n' "$*"; }
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
+# Normalize a yes/no answer in place (accepts yes/no, y/n, true/false; any case).
+yes_no() {
+  local v; v="$(printf '%s' "${!1}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  case "$v" in
+    yes|y|true) printf -v "$1" yes ;;
+    no|n|false) printf -v "$1" no ;;
+    *) die "$2: enter yes or no (got '${!1}')." ;;
+  esac
+}
+# providers.py accepts only true/false for boolean MONGODB_LOG_DIAG_* settings.
+yes_no_to_bool() { if [[ "$1" == yes ]]; then printf true; else printf false; fi; }
 prompt() { local var="$1" label="$2" default="${3:-}" value; if [[ "$var" != LOG_DATE ]] && declare -f sample_default >/dev/null; then default="$(sample_default "$var" "$default")"; fi; read -r -p "$label${default:+ [$default]}: " value; printf -v "$var" '%s' "${value:-$default}"; }
 [[ "$(uname -s)" == Darwin ]] || die "This script is for macOS."
 command -v python3 >/dev/null || die "python3 is required."
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || die "python3 >= 3.9 is required (zoneinfo)."
+# Stage-specific settings must come only from this script, not a stale shell
+# environment (e.g. INDEX_STATS_ENABLED=yes would break every stage's config load).
+unset MONGODB_LOG_DIAG_OBSERVABILITY_ENABLED MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE \
+  MONGODB_LOG_DIAG_QUERY_SHAPE_WINDOW_HOURS MONGODB_LOG_DIAG_INDEX_STATS_ENABLED \
+  MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE
 
 source "$PROJECT_ROOT/samples/local-atlas-storage.sh"
 # Prompt to restore missing skill files from the repository before collecting credentials.
@@ -18,7 +35,8 @@ if [[ ! -f skills/mongodb-atlas-logs/scripts/atlas_logs.py ||
       ! -f skills/mongodb-log-diagnostic/scripts/ftdc_decoder.py ||
       ! -f skills/mongodb-log-diagnostic/scripts/driver_compatibility.py ]]; then
   read -r -p "Skill files missing. Restore both skills from GitHub now? (yes/no) [no]: " restore_skills
-  if [[ "$(printf '%s' "${restore_skills:-no}" | tr '[:upper:]' '[:lower:]')" == yes ]]; then
+  restore_skills="${restore_skills:-no}"; yes_no restore_skills "Restore skills"
+  if [[ "$restore_skills" == yes ]]; then
     "$PROJECT_ROOT/samples/restore-vendored-skills.sh"
   fi
 fi
@@ -38,7 +56,8 @@ case "$STORAGE_PROVIDER" in
 esac
 if [[ -n "$storage_module" && ! -f "$storage_module" ]]; then
   read -r -p "Storage skill missing ($storage_module). Restore skills from GitHub now? (yes/no) [no]: " restore_storage
-  if [[ "$(printf '%s' "${restore_storage:-no}" | tr '[:upper:]' '[:lower:]')" == yes ]]; then
+  restore_storage="${restore_storage:-no}"; yes_no restore_storage "Restore storage skill"
+  if [[ "$restore_storage" == yes ]]; then
     "$PROJECT_ROOT/samples/restore-vendored-skills.sh"
   fi
   [[ -f "$storage_module" ]] || die "Missing vendored storage file: $storage_module"
@@ -48,7 +67,7 @@ prompt TIMEZONE "Timezone used for yesterday" "Asia/Jerusalem"
 # Plan all dates once in the selected timezone, oldest first. 1 means yesterday.
 if ! DATE_PLAN="$(LOG_DATE_INPUT="$LOG_DATE" LOG_TIMEZONE="$TIMEZONE" python3 - <<'PYDATES'
 from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import os
 import re
 
@@ -67,7 +86,7 @@ try:
             raise ValueError("Enter YYYY-MM-DD or a positive day count")
         days = [date.fromisoformat(value)]
     print("\n".join(map(str, days)))
-except (ValueError, OverflowError) as exc:
+except (ValueError, OverflowError, ZoneInfoNotFoundError) as exc:
     raise SystemExit(f"Invalid date, count, or timezone: {exc}")
 PYDATES
 )"; then
@@ -90,8 +109,7 @@ read -r -s -p "Atlas API private key (input hidden): " ATLAS_PRIVATE_KEY; printf
 [[ -n "$CLUSTER_NAME" && -n "$GROUP_ID" && -n "$ATLAS_PUBLIC_KEY" && -n "$ATLAS_PRIVATE_KEY" ]] || die "Atlas values are required."
 prompt LOG_NAMES "Log names (comma-separated: auto,mongodb,mongos)" "auto"
 prompt ENABLE_OBSERVABILITY "Collect observability for each selected day? (yes/no)" "no"
-ENABLE_OBSERVABILITY=$(printf '%s' "$ENABLE_OBSERVABILITY" | tr '[:upper:]' '[:lower:]')
-[[ "$ENABLE_OBSERVABILITY" == yes || "$ENABLE_OBSERVABILITY" == no ]] || die "Enter yes or no."
+yes_no ENABLE_OBSERVABILITY "Collect observability"
 OBS_HOSTS=""; QUERY_SHAPE_SOURCE="disabled"; INDEX_STATS_ENABLED="no"; MONGODB_URI_TEMPLATE=""
 if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
   [[ -f skills/mongodb-observability/scripts/observability.py ]] || die "Missing observability skill. Run samples/restore-vendored-skills.sh"
@@ -99,8 +117,7 @@ if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
   prompt QUERY_SHAPE_SOURCE "Query-shape source (atlas_api/mongodb/bucket)" "atlas_api"
   [[ "$QUERY_SHAPE_SOURCE" == atlas_api || "$QUERY_SHAPE_SOURCE" == mongodb || "$QUERY_SHAPE_SOURCE" == bucket ]] || die "Use atlas_api, mongodb, or bucket."
   prompt INDEX_STATS_ENABLED "Also collect direct MongoDB indexStats? (yes/no)" "no"
-  INDEX_STATS_ENABLED=$(printf '%s' "$INDEX_STATS_ENABLED" | tr '[:upper:]' '[:lower:]')
-  [[ "$INDEX_STATS_ENABLED" == yes || "$INDEX_STATS_ENABLED" == no ]] || die "Enter yes or no."
+  yes_no INDEX_STATS_ENABLED "Collect indexStats"
   if [[ "$INDEX_STATS_ENABLED" == yes || "$QUERY_SHAPE_SOURCE" == mongodb ]]; then
     prompt MONGODB_URI_TEMPLATE "MongoDB URI template ({host} is replaced; input hidden is not supported)" ""
     [[ -n "$MONGODB_URI_TEMPLATE" ]] || die "A MongoDB URI template is required for direct MongoDB collection."
@@ -122,7 +139,7 @@ case "$REPORT_PROVIDER" in
     fi
     prompt BEDROCK_MODEL_ID "Bedrock model or inference-profile ID" "eu.anthropic.claude-sonnet-5"
     if [[ "$STORAGE_PROVIDER" == s3 ]]; then
-      AWS_PROFILE_NAME="$STORAGE_AWS_PROFILE"
+      AWS_PROFILE_NAME="${STORAGE_AWS_PROFILE:-}"
     else
       prompt AWS_PROFILE_NAME "AWS profile (blank uses default credentials)" ""
     fi
@@ -130,7 +147,7 @@ case "$REPORT_PROVIDER" in
   vertex)
     note "Vertex AI configuration"
     if [[ "$STORAGE_PROVIDER" == gcs ]]; then
-      GCP_PROJECT="$STORAGE_GCP_PROJECT"
+      GCP_PROJECT="${STORAGE_GCP_PROJECT:-}"
     else
       prompt GCP_PROJECT "GCP project ID" ""
     fi
@@ -225,8 +242,8 @@ export MONGODB_LOG_DIAG_GROUP_ID="$GROUP_ID"
 export MONGODB_LOG_DIAG_API_VERSION=2025-03-12
 export MONGODB_LOG_DIAG_LOG_NAMES="$LOG_NAMES"
 export MONGODB_LOG_DIAG_SLOW_MS=1000
-if [[ -n "$STORAGE_AWS_REGION" ]]; then export MONGODB_LOG_DIAG_AWS_REGION="$STORAGE_AWS_REGION"; fi
-if [[ -n "$STORAGE_GCP_PROJECT" ]]; then export MONGODB_LOG_DIAG_GCP_PROJECT="$STORAGE_GCP_PROJECT"; fi
+if [[ -n "${STORAGE_AWS_REGION:-}" ]]; then export MONGODB_LOG_DIAG_AWS_REGION="$STORAGE_AWS_REGION"; fi
+if [[ -n "${STORAGE_GCP_PROJECT:-}" ]]; then export MONGODB_LOG_DIAG_GCP_PROJECT="$STORAGE_GCP_PROJECT"; fi
 if [[ "$REPORT_PROVIDER" != none ]]; then
   export MONGODB_LOG_DIAG_LLM_PROVIDER="$REPORT_PROVIDER"
   case "$REPORT_PROVIDER" in
@@ -262,22 +279,23 @@ PYCODE
 show_atlas_storage_target
 for CURRENT_DATE in "${LOG_DATES[@]}"; do
   note "Processing $CURRENT_DATE"
-note "Downloading from Atlas into the selected bucket"
-python -m agent.handler --stage download --log-date "$CURRENT_DATE"
-note "Extracting one node/log at a time"
-python -m agent.handler --stage extract --log-date "$CURRENT_DATE"
-if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
-  note "Collecting observability one node at a time"
-  # The unchanged provider loads general settings and keys-only Atlas credentials.
-  # These stage-specific choices are local to this invocation, not put in the secret.
-  export MONGODB_LOG_DIAG_OBSERVABILITY_ENABLED=true
-  export MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE="$QUERY_SHAPE_SOURCE"
-  export MONGODB_LOG_DIAG_QUERY_SHAPE_WINDOW_HOURS=24
-  export MONGODB_LOG_DIAG_INDEX_STATS_ENABLED="$INDEX_STATS_ENABLED"
-  if [[ -n "$MONGODB_URI_TEMPLATE" ]]; then
-    export MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE="$MONGODB_URI_TEMPLATE"
-  fi
-  python - "$CURRENT_DATE" <<'PYCODE'
+  note "Downloading from Atlas into the selected bucket"
+  python -m agent.handler --stage download --log-date "$CURRENT_DATE"
+  note "Extracting one node/log at a time"
+  python -m agent.handler --stage extract --log-date "$CURRENT_DATE"
+  if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
+    note "Collecting observability one node at a time"
+    # The unchanged provider loads general settings and keys-only Atlas credentials.
+    # These stage-specific choices are local to this invocation, not put in the secret.
+    export MONGODB_LOG_DIAG_OBSERVABILITY_ENABLED=true
+    export MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE="$QUERY_SHAPE_SOURCE"
+    export MONGODB_LOG_DIAG_QUERY_SHAPE_WINDOW_HOURS=24
+    # providers.py requires true/false here; the prompt answer is yes/no.
+    export MONGODB_LOG_DIAG_INDEX_STATS_ENABLED="$(yes_no_to_bool "$INDEX_STATS_ENABLED")"
+    if [[ -n "$MONGODB_URI_TEMPLATE" ]]; then
+      export MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE="$MONGODB_URI_TEMPLATE"
+    fi
+    python - "$CURRENT_DATE" <<'PYCODE'
 import json
 import os
 import sys
@@ -287,7 +305,7 @@ from agent import skills
 
 cfg = load_config()
 source = os.environ["MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE"]
-index_stats = os.environ["MONGODB_LOG_DIAG_INDEX_STATS_ENABLED"] == "yes"
+index_stats = os.environ["MONGODB_LOG_DIAG_INDEX_STATS_ENABLED"] == "true"
 if cfg["input_mode"] != "atlas_api":
     raise SystemExit("Live observability requires atlas_api mode in this sample")
 if source not in {"atlas_api", "mongodb", "bucket"}:
@@ -312,10 +330,10 @@ print(json.dumps({"status": result.get("status"), "nodes": len(nodes), "nodes_wi
 if result.get("status") != "completed" or failed:
     raise SystemExit("Observability did not complete successfully; inspect stage logs")
 PYCODE
-  unset MONGODB_LOG_DIAG_OBSERVABILITY_ENABLED MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE \
-    MONGODB_LOG_DIAG_QUERY_SHAPE_WINDOW_HOURS MONGODB_LOG_DIAG_INDEX_STATS_ENABLED \
-    MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE
-fi
+    unset MONGODB_LOG_DIAG_OBSERVABILITY_ENABLED MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE \
+      MONGODB_LOG_DIAG_QUERY_SHAPE_WINDOW_HOURS MONGODB_LOG_DIAG_INDEX_STATS_ENABLED \
+      MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE
+  fi
 done
 if [[ "$REPORT_PROVIDER" != none ]]; then
   note "Generating $REPORT_PROVIDER reports into the selected bucket"

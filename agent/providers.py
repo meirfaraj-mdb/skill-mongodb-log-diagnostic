@@ -8,6 +8,8 @@ from pathlib import Path
 
 from . import skills
 from .common import logger
+from agent.env_bool import parse_bool_env
+
 
 CLOUD_DEFAULTS = {
     "aws": {"storage_provider": "s3", "llm_provider": "bedrock"},
@@ -90,9 +92,7 @@ def _env_config() -> dict:
             except ValueError as exc:
                 raise ValueError(f"{name} must be an integer") from exc
         elif key in _BOOL_FIELDS:
-            if value.lower() not in ("true", "false", "1", "0"):
-                raise ValueError(f"{name} must be true or false")
-            value = value.lower() in ("true", "1")
+            value  = parse_bool_env(name, default=True)
         elif key in _JSON_FIELDS:
             value = json.loads(value)
             if not isinstance(value, _JSON_FIELDS[key]):
