@@ -405,8 +405,11 @@ def _collect_measurements(config, host, base, source, start, end, basis="request
         window_meta["requested_granularity"] = requested_granularity
         window_meta["granularity_note"] = granularity_note
     disks, disk_errors = ([], [])
-    if investigate and source == "atlas_api":
-        disks, disk_errors = _collect_disk_measurements(config, base, window, source)
+    if source == "atlas_api":
+        from agent.resource_investigation import DISK_METRICS
+        disk_names = list(dict.fromkeys(plan.get("disk", []) + (DISK_METRICS if investigate else [])))
+        if disk_names:
+            disks, disk_errors = _collect_disk_measurements(config, base, window, source, disk_names)
     return _envelope(source + "_metrics", host, basis, pages, truncated=truncated,
                      window=window_meta, disk_measurements=disks, disk_errors=disk_errors,
                      measurement_plan={k: plan[k] for k in ("requested", "unsupported", "aliases")},
@@ -419,35 +422,75 @@ def _investigation_enabled(config):
     return value if isinstance(value, bool) else str(value).strip().lower() not in {"0", "false", "no", "off"}
 
 
-def _collect_disk_measurements(config, base, window, source):
-    """Per-partition disk measurements (DISK_QUEUE_DEPTH, IOPS, latency) for the disk-pressure rule.
+def _collect_disk_measurements(config, base, window, source, names_wanted):
+    """Per-partition disk measurements (avg + max DISK_QUEUE_DEPTH, IOPS, latency).
 
     ``GET .../processes/{processId}/disks`` lists the partitions, then
     ``GET .../disks/{partitionName}/measurements`` is called with the same window/granularity.
-    Failures are recorded, never raised: disk data is optional evidence.
+    Documented ``m`` values go in batches of at most 10. ``MAX_DISK_QUEUE_DEPTH`` (Atlas UI
+    "Max Disk Queue Depth", not in the documented ``m`` list) is requested on its own; if Atlas
+    rejects it, the partition is requested once without ``m`` (all measurements) and only the
+    MAX_* queue series is kept.  Failures are recorded, never raised: disk data is optional.
     """
-    from agent.resource_investigation import DISK_METRICS
+    from urllib.error import HTTPError
+    from agent.metrics_catalog import ATLAS_DISK_MEASUREMENTS, MAX_M_PER_REQUEST
     out, errors = [], []
     try:
         listing, _cut = _api_pages(config, base + "/disks", source)
     except Exception as exc:
         return out, [{"step": "list_disks", "error_type": type(exc).__name__,
                       "status": getattr(exc, "code", None)}]
-    names = []
+    partitions = []
     for page in listing:
         for item in (page.get("results") or []) if isinstance(page, dict) else []:
             name = item.get("partitionName") if isinstance(item, dict) else None
-            if isinstance(name, str) and name not in names:
-                names.append(name)
-    for name in names[:4]:
-        url = (base + "/disks/" + quote(name, safe="") + "/measurements?"
-               + urlencode(window + [("m", m) for m in DISK_METRICS]))
-        try:
-            got, _cut = _api_pages(config, url, source)
+            if isinstance(name, str) and name not in partitions:
+                partitions.append(name)
+    documented = [n for n in names_wanted if n in ATLAS_DISK_MEASUREMENTS]
+    extra = [n for n in names_wanted if n not in ATLAS_DISK_MEASUREMENTS]
+    batches = [documented[i:i + MAX_M_PER_REQUEST] for i in range(0, len(documented), MAX_M_PER_REQUEST)]
+
+    def fetch(prefix, params):
+        return _api_pages(config, prefix + urlencode(window + params), source)[0]
+
+    for name in partitions[:4]:
+        prefix = base + "/disks/" + quote(name, safe="") + "/measurements?"
+        got, failed = [], []
+        for batch in batches:
+            try:
+                got.extend(fetch(prefix, [("m", m) for m in batch]))
+            except Exception as exc:
+                failed.append({"step": "disk_measurements", "partitionName": name, "metrics": batch,
+                               "error_type": type(exc).__name__, "status": getattr(exc, "code", None)})
+        for metric in extra:
+            try:
+                got.extend(fetch(prefix, [("m", metric)]))
+                continue
+            except HTTPError as exc:
+                if exc.code != 400:
+                    failed.append({"step": "disk_measurements", "partitionName": name, "metrics": [metric],
+                                   "error_type": type(exc).__name__, "status": exc.code})
+                    continue
+            except Exception as exc:
+                failed.append({"step": "disk_measurements", "partitionName": name, "metrics": [metric],
+                               "error_type": type(exc).__name__, "status": getattr(exc, "code", None)})
+                continue
+            try:  # fallback: no m -> every measurement of the partition, keep only this one
+                pages = fetch(prefix, [])
+                kept = [{**pg, "measurements": [m for m in pg.get("measurements", [])
+                                                if isinstance(m, dict) and m.get("name") == metric]}
+                        for pg in pages if isinstance(pg, dict)]
+                if any(pg["measurements"] for pg in kept):
+                    got.extend(kept)
+                else:
+                    failed.append({"step": "disk_measurements", "partitionName": name, "metrics": [metric],
+                                   "error_type": "NotReturned", "status": None})
+            except Exception as exc:
+                failed.append({"step": "disk_measurements", "partitionName": name, "metrics": [metric],
+                               "error_type": type(exc).__name__, "status": getattr(exc, "code", None)})
+        if got:
             out.append({"partitionName": name, "data": got})
-        except Exception as exc:
-            errors.append({"step": "disk_measurements", "partitionName": name,
-                           "error_type": type(exc).__name__, "status": getattr(exc, "code", None)})
+        errors.extend(failed)
     return out, errors
 
 

@@ -45,10 +45,30 @@ def _ts(value):
     return result if result.tzinfo else result.replace(tzinfo=timezone.utc)
 
 
+def _measurement_sources(metrics_payload):
+    """Yield (suffix, measurement) for process data and per-partition disk data.
+
+    Disk measurements (``disk_measurements``) keep their metric name when there is one partition;
+    with several partitions the partition name is appended so their series are not merged.
+    """
+    if not isinstance(metrics_payload, dict) or "data" not in metrics_payload:
+        for item in _walk_measurements(metrics_payload):
+            yield "", item
+        return
+    for item in _walk_measurements(metrics_payload.get("data")):
+        yield "", item
+    disks = [d for d in (metrics_payload.get("disk_measurements") or []) if isinstance(d, dict)]
+    for disk in disks:
+        suffix = f" [{disk.get('partitionName')}]" if len(disks) > 1 else ""
+        for item in _walk_measurements(disk.get("data")):
+            yield suffix, item
+
+
 def load_series(metrics_payload) -> dict:
     """``{api_name: {"units": str, "points": [(datetime, float), ...]}}`` (nulls dropped, merged)."""
     series: dict[str, dict] = {}
-    for item in _walk_measurements(metrics_payload):
+    for suffix, item in _measurement_sources(metrics_payload):
+        item = dict(item, name=item["name"] + suffix)
         entry = series.setdefault(item["name"], {"units": item.get("units") or "SCALAR", "points": {}})
         for point in item["dataPoints"]:
             if not isinstance(point, dict):
@@ -77,6 +97,9 @@ def plan_panels(series: dict, config: dict | None = None) -> tuple[list[dict], l
             found = _lookup(series, name)
             if found and found["points"]:
                 lines.append({"name": name, "units": found["units"], "points": found["points"]})
+            # per-partition disk series ("NAME [partition]") when the node has several partitions
+            for key in sorted(k for k in series if k.startswith(name + " [") and series[k]["points"]):
+                lines.append({"name": key, "units": series[key]["units"], "points": series[key]["points"]})
         if any(v for line in lines for _, v in line["points"]):
             panels.append({"group": group, "lines": lines})
         else:

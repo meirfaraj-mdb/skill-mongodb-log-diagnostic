@@ -172,5 +172,23 @@ class ReportIntegrationTests(unittest.TestCase):
         self.assertEqual(self.rs._without_embedded_images(md), "# R\n\n[embedded image omitted: graph]\n")
 
 
+class AvgVersusMaxTests(unittest.TestCase):
+    def test_cpu_rule_uses_average_not_max(self):
+        pl = payload([50] * 6)
+        pl["data"][0]["measurements"].append(measurement("MAX_SYSTEM_NORMALIZED_CPU_USER", "PERCENT", [99] * 6))
+        out = ri.analyze(pl, {}, {})
+        self.assertEqual(out["cpu"]["status"], "not_triggered")
+        self.assertEqual(out["cpu"]["max_series_max_percent"], 99)
+
+    def test_disk_rule_uses_average_not_max(self):
+        pl = payload([10] * 6, disk=[1, 2, 1, 2, 1, 2])
+        pl["disk_measurements"][0]["data"][0]["measurements"].append(
+            measurement("MAX_DISK_QUEUE_DEPTH", "SCALAR", [40] * 6))
+        part = ri.analyze(pl, {}, {})["disk"]["partitions"][0]
+        self.assertFalse(part["pressure"])
+        self.assertEqual(part["max_series_max_queue_depth"], 40)
+        self.assertIn("average", part["evaluated_on"])
+
+
 if __name__ == "__main__":
     unittest.main()

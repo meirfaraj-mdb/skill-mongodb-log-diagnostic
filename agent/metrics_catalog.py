@@ -145,6 +145,10 @@ GROUP_DEFINITIONS: dict[str, list[str]] = {
     "SWAP": [
         'SWAP_USAGE_USED', 'SWAP_USAGE_FREE', 'MAX_SWAP_USAGE_USED', 'MAX_SWAP_USAGE_FREE',
     ],
+    # Disk-partition measurements (GET .../processes/{id}/disks/{partition}/measurements).
+    "DISK_QUEUE_DEPTH": [
+        'DISK_QUEUE_DEPTH', 'MAX_DISK_QUEUE_DEPTH',
+    ],
 }
 
 DEFAULT_SELECTED_GROUPS: list[str] = [
@@ -152,6 +156,8 @@ DEFAULT_SELECTED_GROUPS: list[str] = [
     'NETWORK', 'OPCOUNTERS_PRIMARY', 'OPERATIONS', 'OP_EXECUTION_TIMES', 'OPLOG',
     'QUERY_EXECUTION', 'READ_WRITE_TICKETS', 'OPERATION_THROTTLING', 'QUERY_SPILL_SORT',
     'FTS_PROCESS', 'SYSTEM_NETWORK', 'SYSTEM_MEMORY',
+    # Needed by the high-resource-usage investigation and graphed with both avg and max series.
+    'NORMALIZED_SYSTEM_CPU', 'MAX_NORMALIZED_SYSTEM_CPU', 'DISK_QUEUE_DEPTH',
 ]
 
 DEFAULT_GRAPH_CONFIG: dict = {
@@ -232,6 +238,26 @@ ATLAS_PROCESS_MEASUREMENTS: frozenset[str] = frozenset({
 })
 
 
+# Documented ``m`` values of GET .../processes/{processId}/disks/{partitionName}/measurements.
+ATLAS_DISK_MEASUREMENTS: frozenset[str] = frozenset({
+    'DISK_PARTITION_IOPS_READ', 'MAX_DISK_PARTITION_IOPS_READ', 'DISK_PARTITION_IOPS_WRITE',
+    'MAX_DISK_PARTITION_IOPS_WRITE', 'DISK_PARTITION_IOPS_TOTAL', 'MAX_DISK_PARTITION_IOPS_TOTAL',
+    'DISK_PARTITION_LATENCY_READ', 'MAX_DISK_PARTITION_LATENCY_READ', 'DISK_PARTITION_LATENCY_WRITE',
+    'MAX_DISK_PARTITION_LATENCY_WRITE', 'DISK_PARTITION_SPACE_FREE', 'MAX_DISK_PARTITION_SPACE_FREE',
+    'DISK_PARTITION_SPACE_USED', 'MAX_DISK_PARTITION_SPACE_USED', 'DISK_PARTITION_SPACE_PERCENT_FREE',
+    'MAX_DISK_PARTITION_SPACE_PERCENT_FREE', 'DISK_PARTITION_SPACE_PERCENT_USED',
+    'MAX_DISK_PARTITION_SPACE_PERCENT_USED', 'DISK_PARTITION_THROUGHPUT_READ',
+    'DISK_PARTITION_THROUGHPUT_WRITE', 'DISK_QUEUE_DEPTH',
+})
+# Disk measurements shown by the Atlas UI ("Max Disk Queue Depth") but absent from the documented
+# ``m`` list: requested on their own, with a no-``m`` fallback, so they can never invalidate a batch.
+ATLAS_DISK_UNDOCUMENTED: frozenset[str] = frozenset({'MAX_DISK_QUEUE_DEPTH'})
+
+
+def is_disk_measurement(name: str) -> bool:
+    return name in ATLAS_DISK_MEASUREMENTS or name in ATLAS_DISK_UNDOCUMENTED
+
+
 def graph_config(config: dict | None = None) -> dict:
     """Return the effective ``{group_of_metrics, metrics}`` graph configuration.
 
@@ -261,19 +287,24 @@ def plan_measurement_requests(config: dict | None = None, extra: list[str] | Non
     """Plan the ``m`` values needed for the selected groups (plus ``extra`` names, e.g. the
     measurements needed by the high-resource-usage investigation).
 
-    Returns ``{"batches": [[m, ...], ...], "requested": [...], "unsupported": [...],
+    Returns ``{"batches": [[m, ...], ...], "requested": [...], "disk": [...], "unsupported": [...],
     "aliases": {template: api}}``; every batch has at most ``MAX_M_PER_REQUEST`` names.
+    ``disk`` lists the disk-partition measurements (requested per partition, not per process).
     """
-    requested, unsupported, aliases = [], [], {}
+    requested, disk, unsupported, aliases = [], [], [], {}
     wanted = [n for _group, names in selected_groups(config) for n in names] + list(extra or [])
     for name in wanted:
         target = api_name(name)
         if target != name:
             aliases[name] = target
-        if target not in ATLAS_PROCESS_MEASUREMENTS:
+        if is_disk_measurement(target):
+            if target not in disk:
+                disk.append(target)
+        elif target not in ATLAS_PROCESS_MEASUREMENTS:
             if name not in unsupported:
                 unsupported.append(name)
         elif target not in requested:
             requested.append(target)
     batches = [requested[i:i + MAX_M_PER_REQUEST] for i in range(0, len(requested), MAX_M_PER_REQUEST)]
-    return {"batches": batches, "requested": requested, "unsupported": unsupported, "aliases": aliases}
+    return {"batches": batches, "requested": requested, "disk": disk, "unsupported": unsupported,
+            "aliases": aliases}

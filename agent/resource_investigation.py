@@ -11,6 +11,9 @@ A - CPU     normalized system CPU (sum of SYSTEM_NORMALIZED_CPU_* except GUEST, 
 B - Memory  system memory used > 75% (used / (used + available)); context from connections
             (~1 MB each), open cursors, global lock queue and errors in the same window.
 C - Disk    DISK_QUEUE_DEPTH > 10 on at least ``disk_min_points`` samples (pressure).
+
+Every rule uses the average series; MAX_* series (MAX_SYSTEM_NORMALIZED_CPU_*,
+MAX_DISK_QUEUE_DEPTH) are only reported as context.
 """
 from __future__ import annotations
 
@@ -29,12 +32,14 @@ CPU_CONTEXT = ["PROCESS_NORMALIZED_CPU_USER", "PROCESS_NORMALIZED_CPU_KERNEL", "
                "TICKETS_AVAILABLE_READS", "TICKETS_AVAILABLE_WRITE"]
 DISK_CONTEXT_PROCESS = ["GLOBAL_LOCK_CURRENT_QUEUE_TOTAL", "CACHE_DIRTY_BYTES", "SYSTEM_NORMALIZED_CPU_IOWAIT",
                         "EXTRA_INFO_PAGE_FAULTS", "TICKETS_AVAILABLE_READS", "TICKETS_AVAILABLE_WRITE"]
+# MAX_* series are reported as context only; every rule is evaluated on the average series.
+MAX_CPU_COMPONENTS = ["MAX_" + n for n in CPU_COMPONENTS]
 # Extra process measurements requested (besides the graph groups) so the rules can be evaluated.
 INVESTIGATION_METRICS = list(dict.fromkeys(
-    CPU_COMPONENTS + ["SYSTEM_MEMORY_USED", "SYSTEM_MEMORY_AVAILABLE", "SYSTEM_MEMORY_FREE"]
+    CPU_COMPONENTS + MAX_CPU_COMPONENTS + ["SYSTEM_MEMORY_USED", "SYSTEM_MEMORY_AVAILABLE", "SYSTEM_MEMORY_FREE"]
     + CPU_CONTEXT + MEMORY_CONTEXT + DISK_CONTEXT_PROCESS))
-DISK_METRICS = ["DISK_QUEUE_DEPTH", "DISK_PARTITION_IOPS_TOTAL", "DISK_PARTITION_LATENCY_READ",
-                "DISK_PARTITION_LATENCY_WRITE"]
+DISK_METRICS = ["DISK_QUEUE_DEPTH", "MAX_DISK_QUEUE_DEPTH", "DISK_PARTITION_IOPS_TOTAL",
+                "DISK_PARTITION_LATENCY_READ", "DISK_PARTITION_LATENCY_WRITE"]
 DEFAULT_THRESHOLDS = {"cpu_peak_percent": 90.0, "cpu_sustained_percent": 70.0, "cpu_sustained_minutes": 20,
                       "memory_percent": 75.0, "disk_queue_depth": 10.0, "disk_min_points": 3,
                       "connection_memory_mb": 1.0, "correlation_margin_minutes": 5, "top_groups": 10}
@@ -238,9 +243,9 @@ def correlate(extract, start, end, top=10):
 
 
 # ----------------------------------------------------------------------------- rules
-def _cpu_total(series):
+def _cpu_total(series, components=None):
     total: dict = {}
-    for name in CPU_COMPONENTS:
+    for name in components or CPU_COMPONENTS:
         for when, value in ((series.get(name) or {}).get("points") or {}).items():
             total[when] = total.get(when, 0.0) + value
     return total
@@ -287,9 +292,16 @@ def analyze(metrics_payload, extract, config=None) -> dict:
             ep = _episode(r, step, tz_name, "normalized_system_cpu")
             if ep["duration_minutes"] > th["cpu_sustained_minutes"]:
                 sustained.append(finish(ep, CPU_CONTEXT))
+        cpu_max = _cpu_total(series, MAX_CPU_COMPONENTS)
+        for ep in peaks + sustained:
+            s0, e0 = _ts(ep["start_utc"]), _ts(ep["end_utc"])
+            vals = [v for t, v in cpu_max.items() if s0 <= t <= e0]
+            ep["max_series_peak_percent"] = round(max(vals), 2) if vals else None
         result["cpu"] = {"status": "triggered" if peaks or sustained else "not_triggered",
+                         "evaluated_on": "average (SYSTEM_NORMALIZED_CPU_*)",
                          "max_percent": round(max(cpu.values()), 2),
                          "max_at_utc": max(cpu, key=cpu.get).isoformat(),
+                         "max_series_max_percent": round(max(cpu_max.values()), 2) if cpu_max else None,
                          "peak_episodes_over_%g" % th["cpu_peak_percent"]: peaks,
                          "sustained_episodes_over_%g_for_%gmin" % (th["cpu_sustained_percent"],
                                                                    th["cpu_sustained_minutes"]): sustained}
@@ -329,15 +341,19 @@ def analyze(metrics_payload, extract, config=None) -> dict:
         if not queue:
             continue
         over = [t for t, v in queue.items() if v > th["disk_queue_depth"]]
-        entry = {"partition": disk.get("partitionName"), "max_queue_depth": round(max(queue.values()), 2),
-                 "max_at_utc": max(queue, key=queue.get).isoformat(), "samples_over_threshold": len(over),
+        qmax = (s.get("MAX_DISK_QUEUE_DEPTH") or {}).get("points") or {}
+        entry = {"partition": disk.get("partitionName"), "evaluated_on": "average (DISK_QUEUE_DEPTH)",
+                 "max_queue_depth": round(max(queue.values()), 2),
+                 "max_at_utc": max(queue, key=queue.get).isoformat(),
+                 "max_series_max_queue_depth": round(max(qmax.values()), 2) if qmax else None,
+                 "samples_over_threshold": len(over),
                  "pressure": len(over) >= int(th["disk_min_points"]), "episodes": []}
         if entry["pressure"]:
             merged = {**series, **{k: v for k, v in s.items()}}
             for r in _runs(queue, lambda v: v > th["disk_queue_depth"], step):
                 ep = _episode(r, step, tz_name, "disk_queue_depth", unit="")
                 start, end = ep["_start"], ep["_end"]
-                ctx = {n: round(v, 2) for n in DISK_METRICS[1:] + DISK_CONTEXT_PROCESS
+                ctx = {n: round(v, 2) for n in [m for m in DISK_METRICS if m != "DISK_QUEUE_DEPTH"] + DISK_CONTEXT_PROCESS
                        if (v := _window_max(merged, n, start, end)) is not None}
                 ep = finish(ep, [])
                 ep["context_max_in_window"] = ctx
@@ -461,7 +477,9 @@ def render_markdown(analysis) -> str:
             continue
         if key == "disk":
             for part in sec["partitions"]:
-                out.append(f"- Partition `{part['partition']}`: max queue depth {part['max_queue_depth']}, "
+                mx = part.get("max_series_max_queue_depth")
+                out.append(f"- Partition `{part['partition']}`: max avg queue depth {part['max_queue_depth']}"
+                           + (f" (max series peak {mx})" if mx is not None else "") + ", "
                            f"{part['samples_over_threshold']} sample(s) over {th['disk_queue_depth']:g} — "
                            + ("**pressure**" if part["pressure"] else "no pressure"))
                 for ep in part["episodes"]:
@@ -469,7 +487,9 @@ def render_markdown(analysis) -> str:
                     out.extend("  " + x for x in _fmt_corr(ep["correlated"]))
             out.append("")
             continue
-        out.append(f"Max {sec['max_percent']}% at {sec['max_at_utc'][:16]} UTC — "
+        mx = sec.get("max_series_max_percent")
+        out.append(f"Max {sec['max_percent']}% (average series) at {sec['max_at_utc'][:16]} UTC"
+                   + (f", max series peak {mx}%" if mx is not None else "") + " — "
                    + ("**threshold exceeded**" if sec["status"] == "triggered" else "threshold not reached") + ".")
         out.append("")
         for label, episodes in sec.items():

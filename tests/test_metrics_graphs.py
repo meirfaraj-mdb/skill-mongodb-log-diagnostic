@@ -26,7 +26,9 @@ spec.loader.exec_module(collector)
 USER_SELECTION = ["CACHE", "CONNECTIONS_AND_CURSORS", "STORAGE", "DOCUMENT_ACTIVITY", "PAGE_FAULTS", "MEMORY",
                   "NETWORK", "OPCOUNTERS_PRIMARY", "OPERATIONS", "OP_EXECUTION_TIMES", "OPLOG", "QUERY_EXECUTION",
                   "READ_WRITE_TICKETS", "OPERATION_THROTTLING", "QUERY_SPILL_SORT", "FTS_PROCESS",
-                  "SYSTEM_NETWORK", "SYSTEM_MEMORY"]
+                  "SYSTEM_NETWORK", "SYSTEM_MEMORY",
+                  # added for the high-resource-usage investigation (avg + max series graphed)
+                  "NORMALIZED_SYSTEM_CPU", "MAX_NORMALIZED_SYSTEM_CPU", "DISK_QUEUE_DEPTH"]
 
 
 def measurement(name, units, values, start="2026-10-27T00:00:00Z"):
@@ -204,6 +206,86 @@ class GraphAndAppendixTests(unittest.TestCase):
             measurement("CONNECTIONS", "SCALAR", [None, None])]}]}
         md2 = report_stage.report_node(store, layout, llm, "sys", "2026-10-27", "node", "mongodb", 600000)["report_md"]
         self.assertNotIn(METRICS_HEADING, md2)
+
+
+class CpuAndDiskQueueTests(unittest.TestCase):
+    cfg = {"group_id": "g", "api_version": "2025-03-12"}
+
+    def test_normalized_system_cpu_avg_and_max_requested(self):
+        plan = catalog.plan_measurement_requests()
+        for name in ("SYSTEM_NORMALIZED_CPU_USER", "SYSTEM_NORMALIZED_CPU_IOWAIT",
+                     "MAX_SYSTEM_NORMALIZED_CPU_USER", "MAX_SYSTEM_NORMALIZED_CPU_STEAL"):
+            self.assertIn(name, plan["requested"])
+        # disk-partition metrics are never sent to the process measurements endpoint
+        self.assertEqual(plan["disk"], ["DISK_QUEUE_DEPTH", "MAX_DISK_QUEUE_DEPTH"])
+        self.assertNotIn("DISK_QUEUE_DEPTH", plan["requested"])
+
+    def _disk_api(self, reject_max=False):
+        calls = []
+
+        def fake(config, url, source):
+            calls.append(url)
+            path, query = urlsplit(url).path, parse_qs(urlsplit(url).query)
+            if path.endswith("/disks"):
+                return [{"results": [{"partitionName": "data"}]}], False
+            if "/disks/" in path:
+                names = query.get("m")
+                if names == ["MAX_DISK_QUEUE_DEPTH"] and reject_max:
+                    raise HTTPError(url, 400, "bad", {}, io.BytesIO(b""))
+                if names is None:  # no-m fallback returns everything
+                    return [{"measurements": [measurement("DISK_QUEUE_DEPTH", "SCALAR", [1, 2]),
+                                              measurement("MAX_DISK_QUEUE_DEPTH", "SCALAR", [5, 9])]}], False
+                return [{"measurements": [measurement(n, "SCALAR", [1, 2]) for n in names]}], False
+            return [{"measurements": []}], False
+        return fake, calls
+
+    def test_disk_queue_avg_and_max_collected_per_partition(self):
+        fake, calls = self._disk_api()
+        with patch.object(collector, "_api_pages", side_effect=fake):
+            result = collector.collect_api(self.cfg, "node", "node:27017", "metrics", "atlas_api")
+        disk_calls = [parse_qs(urlsplit(u).query).get("m") for u in calls if "/disks/data/measurements" in u]
+        self.assertIn(["MAX_DISK_QUEUE_DEPTH"], disk_calls)  # undocumented name sent alone
+        self.assertTrue(any(m and "DISK_QUEUE_DEPTH" in m for m in disk_calls))
+        names = {m["name"] for pg in result["disk_measurements"][0]["data"] for m in pg["measurements"]}
+        self.assertTrue({"DISK_QUEUE_DEPTH", "MAX_DISK_QUEUE_DEPTH"} <= names)
+        self.assertEqual(result["disk_errors"], [])
+
+    def test_disk_queue_collected_even_without_investigation(self):
+        fake, calls = self._disk_api()
+        with patch.object(collector, "_api_pages", side_effect=fake):
+            result = collector.collect_api(dict(self.cfg, resource_investigation_enabled=False),
+                                           "node", "node:27017", "metrics", "atlas_api")
+        self.assertEqual(len(result["disk_measurements"]), 1)
+
+    def test_max_disk_queue_rejected_falls_back_to_all_measurements(self):
+        fake, calls = self._disk_api(reject_max=True)
+        with patch.object(collector, "_api_pages", side_effect=fake):
+            result = collector.collect_api(self.cfg, "node", "node:27017", "metrics", "atlas_api")
+        kept = [m for pg in result["disk_measurements"][0]["data"] for m in pg["measurements"]
+                if m["name"] == "MAX_DISK_QUEUE_DEPTH"]
+        self.assertEqual([p["value"] for p in kept[0]["dataPoints"]], [5, 9])
+        self.assertEqual(result["disk_errors"], [])
+
+    def test_graph_panels_for_cpu_and_disk_queue(self):
+        payload = {"data": [{"measurements": [
+                       measurement("SYSTEM_NORMALIZED_CPU_USER", "PERCENT", [40, 60]),
+                       measurement("MAX_SYSTEM_NORMALIZED_CPU_USER", "PERCENT", [70, 95])]}],
+                   "disk_measurements": [{"partitionName": "data", "data": [{"measurements": [
+                       measurement("DISK_QUEUE_DEPTH", "SCALAR", [2, 12]),
+                       measurement("MAX_DISK_QUEUE_DEPTH", "SCALAR", [8, 30])]}]}]}
+        panels, _empty = graphs.plan_panels(graphs.load_series(payload))
+        by = {p["group"]: [l["name"] for l in p["lines"]] for p in panels}
+        self.assertEqual(by["NORMALIZED_SYSTEM_CPU"], ["SYSTEM_NORMALIZED_CPU_USER"])
+        self.assertEqual(by["MAX_NORMALIZED_SYSTEM_CPU"], ["MAX_SYSTEM_NORMALIZED_CPU_USER"])
+        self.assertEqual(by["DISK_QUEUE_DEPTH"], ["DISK_QUEUE_DEPTH", "MAX_DISK_QUEUE_DEPTH"])
+
+    def test_several_partitions_kept_separate_in_graph(self):
+        payload = {"data": [], "disk_measurements": [
+            {"partitionName": p, "data": [{"measurements": [measurement("DISK_QUEUE_DEPTH", "SCALAR", [1, v])]}]}
+            for p, v in (("data", 3), ("journal", 7))]}
+        panels, _ = graphs.plan_panels(graphs.load_series(payload))
+        lines = next(p for p in panels if p["group"] == "DISK_QUEUE_DEPTH")["lines"]
+        self.assertEqual([l["name"] for l in lines], ["DISK_QUEUE_DEPTH [data]", "DISK_QUEUE_DEPTH [journal]"])
 
 
 if __name__ == "__main__":
