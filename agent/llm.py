@@ -27,8 +27,12 @@ class BedrockLLM:
             client = boto3.client(
                 "bedrock-runtime",
                 region_name=config.get("bedrock_region") or os.environ.get("BEDROCK_REGION") or "eu-west-1",
-                config=Config(read_timeout=900, connect_timeout=30,
-                              retries={"max_attempts": 4, "mode": "adaptive"}),
+                # Streaming keeps bytes flowing, so a shorter read timeout is safe; fewer
+                # retries stop a stuck request from silently blocking for an hour or more.
+                config=Config(read_timeout=int(config.get("bedrock_read_timeout", 300)),
+                              connect_timeout=30,
+                              retries={"max_attempts": int(config.get("bedrock_max_attempts", 2)),
+                                       "mode": "standard"}),
             )
         self.client = client
 
@@ -38,18 +42,44 @@ class BedrockLLM:
             config["temperature"] = 0.1
         return config
 
+    def _call(self, system_prompt: str, messages: list, turn: int = 0) -> tuple[str, str | None]:
+        """One Bedrock request, streamed when the client supports it; logged before and after."""
+        chars = sum(len(c.get("text", "")) for m in messages for c in m["content"])
+        started = time.monotonic()
+        logger.info("Bedrock request starting turn=%d model=%s input_chars=%d max_tokens=%d",
+                    turn, self.model_id, chars, self.max_tokens)
+        kwargs = dict(modelId=self.model_id, system=[{"text": system_prompt}],
+                      messages=messages, inferenceConfig=self._inference_config())
+        try:
+            if not hasattr(self.client, "converse_stream"):  # test stubs / minimal clients
+                resp = self.client.converse(**kwargs)
+                text = "".join(c.get("text", "") for c in resp["output"]["message"]["content"])
+                stop, usage = resp.get("stopReason"), resp.get("usage")
+            else:
+                chunks, stop, usage = [], None, None
+                for event in self.client.converse_stream(**kwargs)["stream"]:
+                    if "contentBlockDelta" in event:
+                        chunks.append(event["contentBlockDelta"].get("delta", {}).get("text", ""))
+                    elif "messageStop" in event:
+                        stop = event["messageStop"].get("stopReason")
+                    elif "metadata" in event:
+                        usage = event["metadata"].get("usage")
+                text = "".join(chunks)
+        except Exception as exc:
+            logger.error("Bedrock request failed turn=%d model=%s input_chars=%d elapsed=%.1fs error_type=%s",
+                         turn, self.model_id, chars, time.monotonic() - started, type(exc).__name__)
+            raise
+        logger.info("Bedrock request done turn=%d elapsed=%.1fs stop=%s usage=%s",
+                    turn, time.monotonic() - started, stop, usage)
+        return text, stop
+
     def generate(self, system_prompt: str, user_content: str) -> str:
         messages = [{"role": "user", "content": [{"text": user_content}]}]
         parts = []
         for turn in range(self.max_continuations + 1):
-            resp = self.client.converse(
-                modelId=self.model_id, system=[{"text": system_prompt}],
-                messages=messages, inferenceConfig=self._inference_config(),
-            )
-            text = "".join(c.get("text", "") for c in resp["output"]["message"]["content"])
+            text, stop = self._call(system_prompt, messages, turn)
             parts.append(text)
-            logger.info("Bedrock turn=%d stop=%s usage=%s", turn, resp.get("stopReason"), resp.get("usage"))
-            if resp.get("stopReason") != "max_tokens":
+            if stop != "max_tokens":
                 break
             messages.extend([
                 {"role": "assistant", "content": [{"text": text}]},

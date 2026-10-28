@@ -117,7 +117,7 @@ class Tests(unittest.TestCase):
         self.assertIn('## Index analysis',rendered); self.assertIn('## Top 10',rendered)
 
     def test_partial_failure_keeps_other_artifacts_and_no_secrets(self):
-        def collect(config,host,pid,kind,source):
+        def collect(config,host,pid,kind,source,log_date=None):
             if kind=='metrics':raise RuntimeError('mongodb://user:password@host')
             return {'kind':kind}
         skills.observability=lambda:types.SimpleNamespace(collect=collect)

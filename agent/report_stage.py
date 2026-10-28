@@ -190,6 +190,15 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
         current_file = "extractionshort.json (compacted)"
         user = assemble(_compact(short or current), current_file,
                         [(l, d, s, _compact(p)) for l, d, s, p in baselines])
+    if len(user) > max_chars and baselines:
+        logger.warning("Report input node=%s still %d chars after compaction (limit %d); dropping baselines",
+                       host_dir, len(user), max_chars)
+        current_file = "extractionshort.json (compacted, baselines dropped)"
+        baselines = []
+        user = assemble(_compact(short or current), current_file, [])
+    if len(user) > max_chars:
+        raise RuntimeError(f"Report input {len(user)} chars exceeds REPORT_MAX_INPUT_CHARS={max_chars} "
+                           f"after compaction; reduce inputs for {host_dir}")
     logger.info("Report input node=%s chars=%d current_file=%s baselines=%s",
                 host_dir, len(user), current_file, [b[0] for b in baselines])
     report_md = llm.generate(system_prompt, user)
