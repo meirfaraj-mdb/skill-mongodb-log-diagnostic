@@ -9,3 +9,13 @@ The loader accepts `MONGODB_LOG_DIAG_OBSERVABILITY_ENABLED`, `DEPLOYMENT_TYPE`, 
 Source keys: query_stats, index_definitions, index_stats, coll_stats, query_plans, metrics, advisor, profiler. Bucket mode overrides all source selections. Live source selections are validated against each kind's capability matrix. No Ops Manager query statistics API is implemented.
 
 Historical producer snapshots must identify collection time and counter reset/entry timestamps. Missing metadata disables historical claims rather than creating false 24-hour evidence.
+
+## Per-node metric graphs (report APPENDIX 2)
+
+* `MONGODB_LOG_DIAG_METRICS_GRANULARITY`: `PT1M`, `PT5M` (default), `PT1H` or `P1D` for the 24h measurements window.
+* `MONGODB_LOG_DIAG_METRICS_GRAPHS_ENABLED`: true/false (default true). Adds APPENDIX 2 to every node report.
+* `MONGODB_LOG_DIAG_METRICS_GRAPH_GROUPS`: JSON list of group names to graph; defaults to the 18 groups in `agent/metrics_catalog.py` (`DEFAULT_SELECTED_GROUPS`).
+* `MONGODB_LOG_DIAG_METRICS_GRAPH_CONFIG`: optional JSON object with the slowInvest `cluster.per_node.graph` shape: `{"group_of_metrics": {"GROUP": {"list_of_metrics": [...]}}, "metrics": ["GROUP", ...]}`. Entries are merged over the built-in groups.
+
+Only measurements needed by the selected groups are requested (repeated `m` parameters, at most 10 per call). Names are validated against the documented Atlas `m` values; template aliases are mapped (`FTS_PROCESS_RESIDENT_MEMORY`→`FTS_MEMORY_RESIDENT`, `FTS_PROCESS_VIRTUAL_MEMORY`→`FTS_MEMORY_VIRTUAL`, `FTS_DISK_USAGE`→`FTS_DISK_UTILIZATION`) and names without an API equivalent are listed in the appendix instead of being requested. A batch rejected with HTTP 400 is retried per metric. Graphs are stored next to `report.md` as `metrics-appendix.png` and `metrics-appendix.svg`.
+

@@ -1,5 +1,8 @@
 """Append evidence-bound, literal-free shape forms for hashes cited in a node report.
 
+The forms are emitted as APPENDIX 1 of a closing ``## APPENDIX`` section; APPENDIX 2 (node
+metric graphs) is appended by ``append_metrics_appendix``.
+
 A log query_hash is NOT a Query Shape Insights queryShapeHash. Never join them
 by prefix or by namespace alone. This module intentionally performs no I/O.
 """
@@ -9,7 +12,10 @@ import json
 import re
 
 _HASH = re.compile(r"(?<![a-fA-F0-9])(?:[a-fA-F0-9]{64}|[a-fA-F0-9]{8})(?![a-fA-F0-9])")
-_HEADING = "## Reported query hashes and redacted query forms"
+APPENDIX_HEADING = "## APPENDIX"
+_HEADING = "### APPENDIX 1 — Reported query hashes and redacted query forms"
+METRICS_HEADING = "### APPENDIX 2 — Node metrics graphs"
+_APPENDIX_RE = re.compile(r"(?m)^## APPENDIX[ \t]*$")
 _MAX_ITEMS = 60
 
 
@@ -88,7 +94,7 @@ def append_reported_shapes(report_md: str, extraction: dict, query_stats_json=No
             log_rows.append((hash_value.upper(), str(group.get("namespace") or "unknown"), group.get("sample_query_shape")))
     insight_rows = [(hash_value, form) for hash_value, form in _node_stats(query_stats_json).items()
                     if hash_value in mentioned]
-    lines = ["", _HEADING, "",
+    lines = ["", APPENDIX_HEADING, "", _HEADING, "",
              "Hashes are included only if cited in this node report and found in this node's supplied evidence. "
              "Log `query_hash` and Query Shape Insights `queryShapeHash` are different identifiers; "
              "no relationship is assumed. Values below are replaced with `?`; use representative "
@@ -98,7 +104,7 @@ def append_reported_shapes(report_md: str, extraction: dict, query_stats_json=No
     for h, ns, form in sorted(set((h, ns, json.dumps(form, sort_keys=True, default=str)) for h, ns, form in log_rows))[:_MAX_ITEMS]:
         # Only structured extracted shapes are emitted; strings may contain unredacted literals.
         parsed = json.loads(form)
-        lines.extend([f"### Log query hash `{h}` — `{ns.replace('`', '')[:120]}`", ""])
+        lines.extend([f"#### Log query hash `{h}` — `{ns.replace('`', '')[:120]}`", ""])
         parsed = _json_shape(parsed)
         if parsed is not None:
             rendered = json.dumps(_structure(parsed), sort_keys=True, indent=2)
@@ -108,10 +114,21 @@ def append_reported_shapes(report_md: str, extraction: dict, query_stats_json=No
             lines.extend(["Redacted structural form unavailable in the supplied extraction.", ""])
     for h, form in sorted(insight_rows)[:_MAX_ITEMS]:
         rendered = json.dumps(_structure(form), sort_keys=True, indent=2)
-        lines.extend([f"### Query Shape Insights `queryShapeHash` `{h}`", ""])
+        lines.extend([f"#### Query Shape Insights `queryShapeHash` `{h}`", ""])
         lines.extend(["```json", rendered, "```", ""] if len(rendered) <= 6000 else
                      ["Redacted structural form exceeds the display limit.", ""])
     if log_rows and not insight_rows:
         lines.extend(["No cited 64-character Query Shape Insights `queryShapeHash` could be resolved "
                       "from this node's query-statistics file; do not relabel the 8-character log hashes.", ""])
     return report_md.rstrip() + "\n" + "\n".join(lines).rstrip() + "\n"
+
+
+def append_metrics_appendix(report_md: str, body_md: str) -> str:
+    """Append APPENDIX 2 (one-page node metric graphs) after APPENDIX 1; idempotent."""
+    if METRICS_HEADING in report_md:
+        return report_md
+    lines = [report_md.rstrip(), ""]
+    if not _APPENDIX_RE.search(report_md):
+        lines.extend([APPENDIX_HEADING, ""])
+    lines.extend([METRICS_HEADING, "", body_md.strip()])
+    return "\n".join(lines).rstrip() + "\n"

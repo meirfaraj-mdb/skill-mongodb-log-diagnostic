@@ -156,7 +156,7 @@ class Tests(unittest.TestCase):
         with patch.object(collector,'_api_pages',return_value=([{'measurements':[]}],False)) as api:
             value=collector.collect_api(cfg,'node','node:27017','metrics','atlas_api')
             self.assertIn('/processes/node%3A27017/measurements?',api.call_args.args[1])
-            self.assertIn('granularity=PT1H',api.call_args.args[1]); self.assertEqual(value['window']['hours'],24)
+            self.assertIn('granularity=PT5M',api.call_args.args[1]); self.assertIn('&m=',api.call_args.args[1]); self.assertEqual(value['window']['hours'],24)
             collector.collect_api(cfg,'node',None,'advisor','ops_manager')
             self.assertIn('/hosts/host-id/performanceAdvisor/suggestedIndexes?',api.call_args.args[1])
 

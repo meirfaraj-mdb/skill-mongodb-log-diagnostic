@@ -10,6 +10,7 @@ Use `agent.observability_stage` or `scripts/prepare_observability.py`. See `OBSE
 * Query stats: bucket, direct MongoDB or Atlas Query Shape Insights. Ops Manager query stats API is unsupported.
 * Index definitions/stats, collection stats and explain plans: bucket or direct MongoDB. Node-local commands require direct node connections.
 * Metrics and advisor: bucket, Atlas API or Ops Manager API. Unsupported version, endpoint or permission failures are reported as partial collection, not silently replaced.
+* Atlas metrics request only the measurements of the configured graph groups (`agent/metrics_catalog.py`), validated against the documented `m` values and batched by 10. Node reports end with `## APPENDIX`: APPENDIX 1 = reported query hashes/redacted forms, APPENDIX 2 = all selected metric groups on one A4 page.
 
 ## Temporal and safety rules
 

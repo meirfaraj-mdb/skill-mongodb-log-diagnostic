@@ -2,3 +2,5 @@
 boto3>=1.34
 
 pymongo>=4.6
+# Per-node metric graphs (report APPENDIX 2); optional - reports note when it is missing.
+matplotlib>=3.8

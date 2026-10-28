@@ -3,11 +3,6 @@
 Atlas Query Shape Insights uses the documented Atlas Admin API v2 endpoint:
 GET /groups/{groupId}/clusters/{clusterName}/queryShapeInsights/summaries.
 The endpoint is cluster-scoped; a per-node result is obtained with ``processIds``.
-
-API windows (query shapes, metrics, advisor) are aligned to the log day in the
-configured project timezone, the same day boundaries used to download the logs.
-Query Shape Insights only serves the last 7 days; older log days are rejected with
-QueryShapeWindowUnavailable instead of silently returning another day's data.
 """
 from __future__ import annotations
 
@@ -60,17 +55,9 @@ def _process_id(host: str, port: int | str | None) -> str:
     return f"{host}:{port or 27017}"
 
 
-def _timezone_name(config: dict) -> str:
-    return config.get("timezone") or "UTC"
+def collect_query_shapes(config: dict, host: str | None = None, process_id: str | None = None) -> dict:
+    """Fetch the requested rolling window of Atlas query-shape summaries.
 
-
-def collect_query_shapes(config: dict, host: str | None = None, process_id: str | None = None,
-                         log_date: str | None = None, now: datetime | None = None) -> dict:
-    """Fetch Atlas query-shape summaries for exactly the log day (project timezone).
-
-    ``log_date`` (YYYY-MM-DD) is required. The day must lie within the 7-day Query Shape
-    Insights retention, otherwise QueryShapeWindowUnavailable is raised. For the current
-    day the window ends at ``now`` and ``window.complete_day`` is False.
     ``process_id`` is normally derived from Atlas process discovery by the caller.
     Omit it only when a cluster-wide snapshot is explicitly wanted.
     """
@@ -78,10 +65,10 @@ def collect_query_shapes(config: dict, host: str | None = None, process_id: str 
         raise ValueError("group_id and cluster_name are required for Atlas query-shape collection")
     if not config.get("atlas_public_key") or not config.get("atlas_private_key"):
         raise ValueError("Atlas API credentials are required for Atlas query-shape collection")
-    if not log_date:
-        raise ValueError("log_date is required: query shapes must be aligned to the log day")
-    tz_name = _timezone_name(config)
-    since, until, complete_day = query_shape_window(log_date, tz_name, now)
+
+    window_hours = int(config.get("query_shape_window_hours", 24))
+    until = datetime.now(timezone.utc)
+    since = until - timedelta(hours=window_hours)
     params: list[tuple[str, str]] = [
         ("since", str(int(since.timestamp() * 1000))),
         ("until", str(int(until.timestamp() * 1000))),
@@ -92,6 +79,7 @@ def collect_query_shapes(config: dict, host: str | None = None, process_id: str 
         params.append(("processIds", requested_process_id))
     for command in config.get("query_shape_commands", []):
         params.append(("commands", str(command)))
+
     url = atlas_query_shape_url(config) + "?" + urlencode(params, doseq=True)
     api_version = config.get("api_version", "2025-03-12")
     request = Request(url, headers={
@@ -105,17 +93,14 @@ def collect_query_shapes(config: dict, host: str | None = None, process_id: str 
         "endpoint": atlas_query_shape_url(config),
         "host": host,
         "processId": requested_process_id,
-        "window": {"log_date": log_date, "timezone": tz_name,
-                   "since": since.isoformat(), "until": until.isoformat(),
-                   "hours": round((until - since).total_seconds() / 3600, 2),
-                   "complete_day": complete_day},
+        "window": {"since": since.isoformat(), "until": until.isoformat(), "hours": window_hours},
         "retrievedAt": datetime.now(timezone.utc).isoformat(),
         "data": payload,
     }
 
 
 # Collector v2: imports are from the bundled application, not external services.
-from agent.observability_contract import log_day_window, query_shape_window, sanitize, timestamp
+from agent.observability_contract import sanitize, timestamp
 
 
 def _envelope(source, host, basis, data, **extra):
@@ -207,7 +192,7 @@ def collect_mongodb(config, host, kind):
                 since = datetime.now(timezone.utc) - timedelta(hours=24)
                 try:
                     rows, capped = _bounded(db["system.profile"].find({"ts": {"$gte": since}}).sort("ts", -1)
-                                            .limit(row_limit + 1).max_time_ms(max_time), row_limit)
+                                           .limit(row_limit + 1).max_time_ms(max_time), row_limit)
                     collections.append({"database": database, "records": rows, "truncated": capped})
                 except Exception as exc:
                     errors.append({"database": database, "error_type": type(exc).__name__})
@@ -243,7 +228,7 @@ def collect_query_plans(config, host):
                 if "projection" in item:
                     command["projection"] = item["projection"]
                 plan = client[database].command({"explain": command, "verbosity": "queryPlanner",
-                                                 "maxTimeMS": int(config.get("mongodb_max_time_ms", 30000))})
+                                                "maxTimeMS": int(config.get("mongodb_max_time_ms", 30000))})
                 plans.append({"namespace": namespace, "queryShapeHash": item.get("queryShapeHash"),
                               "queryHash": item.get("queryHash"), "plan": plan})
             except Exception as exc:
@@ -284,18 +269,14 @@ def _api_pages(config, url, source):
     return pages, True
 
 
-def collect_api(config, host, process_id, kind, source, log_date=None, now=None):
-    if not log_date:
-        raise ValueError("log_date is required: API windows must be aligned to the log day")
+def collect_api(config, host, process_id, kind, source):
     if kind == "query_stats":
         if source != "atlas_api":
             raise ValueError("Ops Manager query statistics API is unsupported")
-        result = collect_query_shapes(config, host, process_id, log_date=log_date, now=now)
+        result = collect_query_shapes(config, host, process_id)
         result["schema_version"] = 2
-        result["temporal_basis"] = "log_day_window"
-        result["limitations"] = ["Aligned to the log day in the configured project timezone; "
-                                 "partial when window.complete_day is false. Top summaries only "
-                                 "(nSummaries <= 100); sampling depends on the API."]
+        result["temporal_basis"] = "requested_api_window"
+        result["limitations"] = ["Requested 24h window; availability, sampling and summary limits depend on the API."]
         return sanitize(result)
     if kind not in {"metrics", "advisor"}:
         raise ValueError("Unsupported API kind")
@@ -309,29 +290,76 @@ def collect_api(config, host, process_id, kind, source, log_date=None, now=None)
         if not base_url or not target_id:
             raise ValueError("Ops Manager base URL and explicit host-ID mapping are required")
         base = f"{base_url}/groups/{group}/hosts/{quote(target_id, safe='')}"
-    tz_name = _timezone_name(config)
-    now = now or datetime.now(timezone.utc)
-    start, day_end = log_day_window(log_date, tz_name)
-    if start >= now:
-        raise ValueError(f"log day {log_date} has not started yet")
-    end = min(day_end, now)
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(hours=24)
     if kind == "metrics":
-        params = {"start": start.isoformat(), "end": end.isoformat(), "granularity": "PT1H"}
-        url = base + "/measurements?" + urlencode(params)
+        return _collect_measurements(config, host, base, source, start, end)
     else:
-        params = {"since": int(start.timestamp() * 1000),
-                  "duration": int((end - start).total_seconds() * 1000)}
+        params = {"since": int(start.timestamp() * 1000), "duration": 86400000}
         url = base + "/performanceAdvisor/suggestedIndexes?" + urlencode(params)
     pages, truncated = _api_pages(config, url, source)
-    return _envelope(source + "_" + kind, host, "log_day_window", pages, truncated=truncated,
-                     window={"log_date": log_date, "timezone": tz_name,
-                             "since": start.isoformat(), "until": end.isoformat(),
-                             "hours": round((end - start).total_seconds() / 3600, 2),
-                             "complete_day": day_end <= now},
+    return _envelope(source + "_" + kind, host, "requested_api_window", pages, truncated=truncated,
+                     window={"since": start.isoformat(), "until": end.isoformat(), "hours": 24},
                      limitations=["API support, permissions and retention depend on deployment version/tier; unsupported responses are reported, not replaced with fabricated data."])
 
 
-def collect(config, host, process_id, kind, source, log_date=None):
+METRIC_GRANULARITIES = {"PT1M", "PT5M", "PT1H", "P1D"}
+
+
+def _iso_z(value):
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _collect_measurements(config, host, base, source, start, end):
+    """Request only the measurements needed by the configured per-node graph groups.
+
+    Atlas accepts at most 10 repeated ``m`` values per request and rejects the whole request
+    when any value is invalid, so names are validated against the documented list and sent in
+    batches.  A rejected batch (HTTP 400) is retried one metric at a time so one metric that is
+    unavailable on this process/tier does not discard the others.
+    """
+    from urllib.error import HTTPError
+    from agent.metrics_catalog import plan_measurement_requests
+
+    granularity = str(config.get("metrics_granularity") or "PT5M").upper()
+    if granularity not in METRIC_GRANULARITIES:
+        raise ValueError("metrics_granularity must be one of " + ", ".join(sorted(METRIC_GRANULARITIES)))
+    window = [("start", _iso_z(start)), ("end", _iso_z(end)), ("granularity", granularity)]
+    plan = plan_measurement_requests(config) if source == "atlas_api" else {
+        "batches": [[]], "requested": [], "unsupported": [], "aliases": {}}
+    pages, errors, truncated = [], [], False
+
+    def fetch(names):
+        url = base + "/measurements?" + urlencode(window + [("m", name) for name in names])
+        return _api_pages(config, url, source)
+
+    for batch in plan["batches"]:
+        try:
+            got, cut = fetch(batch)
+            pages.extend(got)
+            truncated = truncated or cut
+        except HTTPError as exc:
+            if exc.code != 400 or len(batch) <= 1:
+                errors.append({"metrics": batch, "status": exc.code, "error_type": type(exc).__name__})
+                continue
+            for name in batch:
+                try:
+                    got, cut = fetch([name])
+                    pages.extend(got)
+                    truncated = truncated or cut
+                except HTTPError as single:
+                    errors.append({"metrics": [name], "status": single.code, "error_type": type(single).__name__})
+    if errors and not pages:
+        raise RuntimeError("All measurement requests failed")
+    return _envelope(source + "_metrics", host, "requested_api_window", pages, truncated=truncated,
+                     window={"since": start.isoformat(), "until": end.isoformat(), "hours": 24,
+                             "granularity": granularity},
+                     measurement_plan={k: plan[k] for k in ("requested", "unsupported", "aliases")},
+                     errors=errors,
+                     limitations=["API support, permissions and retention depend on deployment version/tier; unsupported responses are reported, not replaced with fabricated data."])
+
+
+def collect(config, host, process_id, kind, source):
     if source == "mongodb":
         return collect_mongodb(config, host, kind)
-    return collect_api(config, host, process_id, kind, source, log_date=log_date)
+    return collect_api(config, host, process_id, kind, source)
