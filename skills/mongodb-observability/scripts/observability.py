@@ -367,7 +367,12 @@ def _collect_measurements(config, host, base, source, start, end, basis="request
         granularity_note = (f"{requested_granularity} data is not retained for a window starting "
                             f"{start.isoformat()}; used PT1H instead")
     window = [("start", _iso_z(start)), ("end", _iso_z(end)), ("granularity", granularity)]
-    plan = plan_measurement_requests(config) if source == "atlas_api" else {
+    investigate = _investigation_enabled(config)
+    extra = []
+    if investigate:
+        from agent.resource_investigation import INVESTIGATION_METRICS
+        extra = INVESTIGATION_METRICS
+    plan = plan_measurement_requests(config, extra=extra) if source == "atlas_api" else {
         "batches": [[]], "requested": [], "unsupported": [], "aliases": {}}
     pages, errors, truncated = [], [], False
 
@@ -399,11 +404,51 @@ def _collect_measurements(config, host, base, source, start, end, basis="request
     if granularity_note:
         window_meta["requested_granularity"] = requested_granularity
         window_meta["granularity_note"] = granularity_note
+    disks, disk_errors = ([], [])
+    if investigate and source == "atlas_api":
+        disks, disk_errors = _collect_disk_measurements(config, base, window, source)
     return _envelope(source + "_metrics", host, basis, pages, truncated=truncated,
-                     window=window_meta,
+                     window=window_meta, disk_measurements=disks, disk_errors=disk_errors,
                      measurement_plan={k: plan[k] for k in ("requested", "unsupported", "aliases")},
                      errors=errors,
                      limitations=["API support, permissions and retention depend on deployment version/tier; unsupported responses are reported, not replaced with fabricated data."])
+
+
+def _investigation_enabled(config):
+    value = config.get("resource_investigation_enabled", True)
+    return value if isinstance(value, bool) else str(value).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _collect_disk_measurements(config, base, window, source):
+    """Per-partition disk measurements (DISK_QUEUE_DEPTH, IOPS, latency) for the disk-pressure rule.
+
+    ``GET .../processes/{processId}/disks`` lists the partitions, then
+    ``GET .../disks/{partitionName}/measurements`` is called with the same window/granularity.
+    Failures are recorded, never raised: disk data is optional evidence.
+    """
+    from agent.resource_investigation import DISK_METRICS
+    out, errors = [], []
+    try:
+        listing, _cut = _api_pages(config, base + "/disks", source)
+    except Exception as exc:
+        return out, [{"step": "list_disks", "error_type": type(exc).__name__,
+                      "status": getattr(exc, "code", None)}]
+    names = []
+    for page in listing:
+        for item in (page.get("results") or []) if isinstance(page, dict) else []:
+            name = item.get("partitionName") if isinstance(item, dict) else None
+            if isinstance(name, str) and name not in names:
+                names.append(name)
+    for name in names[:4]:
+        url = (base + "/disks/" + quote(name, safe="") + "/measurements?"
+               + urlencode(window + [("m", m) for m in DISK_METRICS]))
+        try:
+            got, _cut = _api_pages(config, url, source)
+            out.append({"partitionName": name, "data": got})
+        except Exception as exc:
+            errors.append({"step": "disk_measurements", "partitionName": name,
+                           "error_type": type(exc).__name__, "status": getattr(exc, "code", None)})
+    return out, errors
 
 
 def collect(config, host, process_id, kind, source, log_date=None, now=None):

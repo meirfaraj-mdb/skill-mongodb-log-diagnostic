@@ -257,22 +257,23 @@ def api_name(name: str) -> str:
     return MEASUREMENT_ALIASES.get(name, name)
 
 
-def plan_measurement_requests(config: dict | None = None) -> dict:
-    """Plan the ``m`` values needed for the selected groups.
+def plan_measurement_requests(config: dict | None = None, extra: list[str] | None = None) -> dict:
+    """Plan the ``m`` values needed for the selected groups (plus ``extra`` names, e.g. the
+    measurements needed by the high-resource-usage investigation).
 
     Returns ``{"batches": [[m, ...], ...], "requested": [...], "unsupported": [...],
     "aliases": {template: api}}``; every batch has at most ``MAX_M_PER_REQUEST`` names.
     """
     requested, unsupported, aliases = [], [], {}
-    for _group, names in selected_groups(config):
-        for name in names:
-            target = api_name(name)
-            if target != name:
-                aliases[name] = target
-            if target not in ATLAS_PROCESS_MEASUREMENTS:
-                if name not in unsupported:
-                    unsupported.append(name)
-            elif target not in requested:
-                requested.append(target)
+    wanted = [n for _group, names in selected_groups(config) for n in names] + list(extra or [])
+    for name in wanted:
+        target = api_name(name)
+        if target != name:
+            aliases[name] = target
+        if target not in ATLAS_PROCESS_MEASUREMENTS:
+            if name not in unsupported:
+                unsupported.append(name)
+        elif target not in requested:
+            requested.append(target)
     batches = [requested[i:i + MAX_M_PER_REQUEST] for i in range(0, len(requested), MAX_M_PER_REQUEST)]
     return {"batches": batches, "requested": requested, "unsupported": unsupported, "aliases": aliases}

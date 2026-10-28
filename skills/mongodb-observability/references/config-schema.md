@@ -13,9 +13,22 @@ Historical producer snapshots must identify collection time and counter reset/en
 ## Per-node metric graphs (report APPENDIX 2)
 
 * `MONGODB_LOG_DIAG_METRICS_GRANULARITY`: `PT1M`, `PT5M` (default), `PT1H` or `P1D` for the 24h measurements window.
-* `MONGODB_LOG_DIAG_METRICS_GRAPHS_ENABLED`: true/false (default true). Adds APPENDIX 2 to every node report.
+* `MONGODB_LOG_DIAG_METRICS_GRAPHS_ENABLED`: true/false (default true). Adds APPENDIX 2 to a node report only when that node's metrics file has data points; the graph is embedded in `report.md` as a base64 PNG (`data:image/png;base64,...`).
 * `MONGODB_LOG_DIAG_METRICS_GRAPH_GROUPS`: JSON list of group names to graph; defaults to the 18 groups in `agent/metrics_catalog.py` (`DEFAULT_SELECTED_GROUPS`).
 * `MONGODB_LOG_DIAG_METRICS_GRAPH_CONFIG`: optional JSON object with the slowInvest `cluster.per_node.graph` shape: `{"group_of_metrics": {"GROUP": {"list_of_metrics": [...]}}, "metrics": ["GROUP", ...]}`. Entries are merged over the built-in groups.
 
-Only measurements needed by the selected groups are requested (repeated `m` parameters, at most 10 per call). Names are validated against the documented Atlas `m` values; template aliases are mapped (`FTS_PROCESS_RESIDENT_MEMORY`→`FTS_MEMORY_RESIDENT`, `FTS_PROCESS_VIRTUAL_MEMORY`→`FTS_MEMORY_VIRTUAL`, `FTS_DISK_USAGE`→`FTS_DISK_UTILIZATION`) and names without an API equivalent are listed in the appendix instead of being requested. A batch rejected with HTTP 400 is retried per metric. Graphs are stored next to `report.md` as `metrics-appendix.png` and `metrics-appendix.svg`.
+Only measurements needed by the selected groups are requested (repeated `m` parameters, at most 10 per call). Names are validated against the documented Atlas `m` values; template aliases are mapped (`FTS_PROCESS_RESIDENT_MEMORY`→`FTS_MEMORY_RESIDENT`, `FTS_PROCESS_VIRTUAL_MEMORY`→`FTS_MEMORY_VIRTUAL`, `FTS_DISK_USAGE`→`FTS_DISK_UTILIZATION`) and names without an API equivalent are listed in the appendix instead of being requested. A batch rejected with HTTP 400 is retried per metric. Graphs are embedded in `report.md` as a base64 PNG (no separate image file); the embedded image is replaced by a placeholder before node reports are sent to the cluster-summary model.
+
+### High resource usage investigation
+
+When a node has metrics, its report gets a `## High resource usage investigation` section and the whole report is based on `extractionOccurence.json` (never `extractionshort.json`). If the input is too large, occurrences outside the high-resource episode windows are trimmed first (episode occurrences are always kept). Rules (`agent/resource_investigation.py`):
+
+* A — CPU: normalized system CPU (sum of `SYSTEM_NORMALIZED_CPU_*` except GUEST) > 90%, or > 70% for more than 20 minutes.
+* B — Memory: `SYSTEM_MEMORY_USED / (USED + AVAILABLE)` > 75%; context from connections (~1 MB each), open cursors, global lock queue, errors and slow operations in the window.
+* C — Disk: `DISK_QUEUE_DEPTH` > 10 on at least 3 samples (per partition, from `/processes/{id}/disks/{partition}/measurements`).
+
+Each triggered episode is correlated (±5 min) with slow-operation and error occurrences of the extract. The deterministic result is written as `resource-investigation.json` next to `report.md` and, if the model omits the section, rendered as a fallback.
+
+* `MONGODB_LOG_DIAG_RESOURCE_INVESTIGATION_ENABLED`: true/false (default true). Also requests the extra CPU/memory/connection/cursor/queue measurements and the disk-partition measurements.
+* `MONGODB_LOG_DIAG_RESOURCE_THRESHOLDS`: optional JSON overriding `cpu_peak_percent` (90), `cpu_sustained_percent` (70), `cpu_sustained_minutes` (20), `memory_percent` (75), `disk_queue_depth` (10), `disk_min_points` (3), `connection_memory_mb` (1), `correlation_margin_minutes` (5), `top_groups` (10).
 

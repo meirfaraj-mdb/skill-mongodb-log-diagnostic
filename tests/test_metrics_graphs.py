@@ -86,12 +86,17 @@ class CollectorTests(unittest.TestCase):
     cfg = {"group_id": "g", "api_version": "2025-03-12"}
 
     def test_measurement_urls_carry_selected_m_and_window(self):
+        from agent.resource_investigation import INVESTIGATION_METRICS
         with patch.object(collector, "_api_pages", return_value=([{"measurements": []}], False)) as api:
             result = collector.collect_api(self.cfg, "node", "node:27017", "metrics", "atlas_api")
-        plan = catalog.plan_measurement_requests()
-        self.assertEqual(api.call_count, len(plan["batches"]))
+        plan = catalog.plan_measurement_requests(extra=INVESTIGATION_METRICS)
+        # measurement batches + one disk-partition listing (no partitions returned -> no disk calls)
+        self.assertEqual(api.call_count, len(plan["batches"]) + 1)
+        self.assertTrue(api.call_args_list[-1].args[1].endswith("/processes/node%3A27017/disks"))
+        self.assertIn("SYSTEM_NORMALIZED_CPU_USER", plan["requested"])
+        self.assertIn("SYSTEM_MEMORY_AVAILABLE", plan["requested"])
         seen = []
-        for call in api.call_args_list:
+        for call in api.call_args_list[:-1]:
             url = call.args[1]
             self.assertIn("/processes/node%3A27017/measurements?", url)
             query = parse_qs(urlsplit(url).query)
@@ -109,7 +114,7 @@ class CollectorTests(unittest.TestCase):
             if len(names) > 1 or names == ["CONNECTIONS"]:
                 raise HTTPError(url, 400, "bad", {}, io.BytesIO(b""))
             return [{"measurements": [{"name": names[0], "dataPoints": []}]}], False
-        cfg = dict(self.cfg, metrics_graph_groups=["CONNECTIONS_AND_CURSORS"])
+        cfg = dict(self.cfg, metrics_graph_groups=["CONNECTIONS_AND_CURSORS"], resource_investigation_enabled=False)
         with patch.object(collector, "_api_pages", side_effect=fake):
             result = collector.collect_api(cfg, "node", "node:27017", "metrics", "atlas_api")
         self.assertEqual(len(result["data"]), 2)
@@ -171,13 +176,14 @@ class GraphAndAppendixTests(unittest.TestCase):
         result = report_stage.report_node(store, layout, llm, "sys", "2026-10-27", "node", "mongodb", 600000)
         md = result["report_md"]
         self.assertLess(md.index(_HEADING), md.index(METRICS_HEADING))
-        self.assertIn("![Per-node metric graphs: CACHE, CONNECTIONS_AND_CURSORS, FTS_PROCESS](metrics-appendix.png)", md)
+        prefix = "![Per-node metric graphs: CACHE, CONNECTIONS_AND_CURSORS, FTS_PROCESS](data:image/png;base64,"
+        self.assertIn(prefix, md)
         self.assertIn("not offered by the measurements API", md)
-        png_key = layout.report("2026-10-27", "node", "mongodb", "metrics-appendix.png")
-        data, ctype = store.binary[png_key]
-        self.assertEqual(ctype, "image/png")
+        import base64
+        import re
+        data = base64.b64decode(re.search(r"data:image/png;base64,([A-Za-z0-9+/=]+)\)", md).group(1))
         self.assertTrue(data.startswith(b"\x89PNG"))
-        self.assertIn("metrics_graph", result["uploads"])
+        self.assertEqual(store.binary, {})  # embedded, no separate image upload
         # Exactly one page: A4 portrait aspect ratio.
         import struct
         width, height = struct.unpack(">II", data[16:24])
@@ -191,10 +197,12 @@ class GraphAndAppendixTests(unittest.TestCase):
         store = Store({layout.extract("2026-10-27", "node", "mongodb", "extractionOccurence.json"): {}})
         llm = types.SimpleNamespace(generate=lambda system, user: "# Report")
         md = report_stage.report_node(store, layout, llm, "sys", "2026-10-27", "node", "mongodb", 600000)["report_md"]
-        self.assertIn(METRICS_HEADING, md)
-        self.assertIn("No per-node metrics file was supplied", md)
-        md2 = report_stage.report_node(store, layout, llm, "sys", "2026-10-27", "node", "mongodb", 600000,
-                                       config={"metrics_graphs_enabled": False})["report_md"]
+        self.assertNotIn(METRICS_HEADING, md)  # APPENDIX 2 only when metrics are present
+        self.assertNotIn("High resource usage investigation", md)
+        # metrics file present but without any data point -> still no APPENDIX 2
+        store.items[layout.observability("2026-10-27", "node", "metrics")] = {"data": [{"measurements": [
+            measurement("CONNECTIONS", "SCALAR", [None, None])]}]}
+        md2 = report_stage.report_node(store, layout, llm, "sys", "2026-10-27", "node", "mongodb", 600000)["report_md"]
         self.assertNotIn(METRICS_HEADING, md2)
 
 

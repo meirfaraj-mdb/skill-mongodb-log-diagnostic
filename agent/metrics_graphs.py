@@ -207,14 +207,16 @@ def appendix_markdown(png_name, panels, empty, payload, svg_name=None, unavailab
     plan = payload.get("measurement_plan", {}) if isinstance(payload, dict) else {}
     lines = []
     if window:
+        basis = (f"log day {window['log_date']} ({window.get('timezone', 'UTC')})" if window.get("log_date")
+                 else "rolling API window at collection time; may differ from the log day")
         lines.append(f"Window (UTC): {window.get('since', '?')} to {window.get('until', '?')}, "
-                     f"granularity {window.get('granularity', 'n/a')}. This is the rolling API window "
-                     "at collection time and may differ from the log day.")
+                     f"granularity {window.get('granularity', 'n/a')} — {basis}.")
         lines.append("")
     if unavailable_reason:
         lines.append(f"Metric graphs unavailable: {unavailable_reason}.")
     else:
         alt = "Per-node metric graphs: " + ", ".join(p["group"] for p in panels)
+        # png_name may be a file name or a ``data:image/png;base64,...`` URI (embedded image).
         lines.append(f"![{alt}]({png_name})")
         if svg_name:
             lines.extend(["", f"Vector version: [{svg_name}]({svg_name})"])

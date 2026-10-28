@@ -96,49 +96,68 @@ def _validate_offline_cves(markdown: str, allowed: set[str]) -> None:
         raise ValueError("Report contains CVE IDs not in reviewed offline matches: " + ", ".join(sorted(extra)))
 
 
-def _metrics_appendix(store, layout, log_date: str, host_dir: str, log_name: str) -> tuple[str, dict]:
-    """Render this node's stored metrics.json as one A4 page and return (markdown body, uploads).
-
-    Failures never fail the report: the appendix states why the graph is unavailable.
-    """
-    from . import metrics_graphs
-
+def _load_metrics(store, layout, log_date: str, host_dir: str):
+    """Return the node's metrics.json payload, or None when absent/unparsable/without data points."""
+    from .resource_investigation import metrics_present
     key = layout.observability(log_date, host_dir, "metrics")
     if not store.exists(key):
-        return ("No per-node metrics file was supplied for this node "
-                "(enable observability metrics collection to populate this appendix)."), {}
+        return None
     try:
         payload = json.loads(store.get_text(key))
     except (TypeError, ValueError):
-        return "The per-node metrics file could not be parsed; no graph was drawn.", {}
+        logger.warning("Metrics file unparsable node=%s; APPENDIX 2 and resource investigation skipped", host_dir)
+        return None
+    return payload if metrics_present(payload) else None
+
+
+def _metrics_appendix(payload: dict, host_dir: str) -> str | None:
+    """Render the metrics as one A4 page embedded in the Markdown as a base64 PNG data URI.
+
+    Returns None when no selected group has data (APPENDIX 2 is then omitted). Rendering
+    failures never fail the report: the appendix states why the graph is unavailable.
+    """
+    import base64
+    import tempfile
+    from pathlib import Path
+    from . import metrics_graphs
+
     panels, empty = metrics_graphs.plan_panels(metrics_graphs.load_series(payload))
     if not panels:
-        return metrics_graphs.appendix_markdown(None, [], empty, payload,
-                                                unavailable_reason="no selected metric group has data"), {}
-    png_name, svg_name = "metrics-appendix.png", "metrics-appendix.svg"
+        return None
     window = payload.get("window", {}) if isinstance(payload, dict) else {}
     subtitle = " · ".join(x for x in (
         f"{str(window.get('since', ''))[:16].replace('T', ' ')} → {str(window.get('until', ''))[:16].replace('T', ' ')} UTC"
         if window else "", f"granularity {window['granularity']}" if window.get("granularity") else "",
         "solid = left axis, dashed = right axis") if x)
-    uploads = {}
     try:
-        import tempfile
-        from pathlib import Path
         with tempfile.TemporaryDirectory(prefix="metrics-graph-") as tmp:
-            png, svg = str(Path(tmp) / png_name), str(Path(tmp) / svg_name)
-            metrics_graphs.render_one_page(panels, f"Node {host_dir} — metrics", png, svg, subtitle=subtitle)
-            uploads["metrics_graph"] = store.upload(png, layout.report(log_date, host_dir, log_name, png_name), "image/png")
-            uploads["metrics_graph_svg"] = store.upload(svg, layout.report(log_date, host_dir, log_name, svg_name),
-                                                        "image/svg+xml")
+            png = str(Path(tmp) / "metrics-appendix.png")
+            metrics_graphs.render_one_page(panels, f"Node {host_dir} — metrics", png, None, subtitle=subtitle)
+            data_uri = "data:image/png;base64," + base64.b64encode(Path(png).read_bytes()).decode("ascii")
     except ImportError:
         return metrics_graphs.appendix_markdown(None, panels, empty, payload,
-                                                unavailable_reason="matplotlib is not installed in this runtime"), {}
+                                                unavailable_reason="matplotlib is not installed in this runtime")
     except Exception as exc:  # never let a graph break the report
         logger.warning("Metrics graph failed node=%s error_type=%s", host_dir, type(exc).__name__)
         return metrics_graphs.appendix_markdown(None, panels, empty, payload,
-                                                unavailable_reason="graph rendering or upload failed"), {}
-    return metrics_graphs.appendix_markdown(png_name, panels, empty, payload, svg_name), uploads
+                                                unavailable_reason="graph rendering failed")
+    return metrics_graphs.appendix_markdown(data_uri, panels, empty, payload)
+
+
+RESOURCE_INSTRUCTIONS = (
+    "Per-node metrics are supplied. Include a section titled exactly `## High resource usage investigation` "
+    "(before any appendix) with subsections `### A — CPU`, `### B — Memory`, `### C — Disk`. Base it on the "
+    "`resource_investigation` document (deterministic rule results; thresholds inside) and on the "
+    "occurrence_timestamps of `current` (extractionOccurence.json, UTC). Rules: A) normalized system CPU > 90%, "
+    "or > 70% for more than 20 minutes; B) system memory used > 75% — explain using connections (about 1 MB "
+    "each), open cursors, global lock/operation queue, and errors/slow operations at the same time; C) disk "
+    "pressure when DISK_QUEUE_DEPTH > 10 on several samples. For each triggered rule give the episode window "
+    "(UTC and project timezone), the peak, then the plausible causes ranked by evidence (namespace, log "
+    "query hash, plan summary, occurrences in the window, duration/cpuNanos/docsExamined/storage bytes read, "
+    "co-occurring errors) with confidence. Call causes plausible, never confirmed. If no occurrence falls in "
+    "the window say 'source not identified from the available evidence'. For a rule not triggered write one "
+    "line with the observed maximum; for status no_data say it was not evaluated and why."
+)
 
 
 def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name, max_chars,
@@ -147,6 +166,13 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     if current is None:
         raise FileNotFoundError(cur_key)
     current_file = "extractionOccurence.json"
+    config = config or {}
+    from . import resource_investigation as ri
+    metrics_payload = _load_metrics(store, layout, log_date, host_dir)
+    analysis = None
+    if metrics_payload is not None and config.get("resource_investigation_enabled", True):
+        analysis = ri.analyze(metrics_payload, current, config)
+        logger.info("Resource investigation node=%s triggered=%s", host_dir, analysis["triggered"])
     offline_cves = offline_cve.check(current)
     baselines, diffs = [], []
     for label, offset, desc in BASELINES:
@@ -172,6 +198,9 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
         if diffs:
             docs.append(_doc("precomputed_diff", {}, json.dumps(diff_doc, separators=(",", ":"))))
         docs.append(_doc("offline_driver_cves", {}, json.dumps(offline_cves, separators=(",", ":"))))
+        if analysis is not None:
+            docs.append(_doc("resource_investigation", {"node": host_dir},
+                             json.dumps(analysis, separators=(",", ":"), default=str)))
         for label, key in (("index_stats", layout.index_stats(log_date, host_dir)),
                            ("query_stats", layout.query_stats(log_date, host_dir))):
             if store.exists(key):
@@ -179,49 +208,85 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
         header = (f"Generate the MongoDB Log Diagnostic report for node `{host_dir}` ({log_name} log), "
                   f"log day {log_date} (Atlas project timezone day). Baselines supplied: "
                   f"{', '.join(d['label'] for d in diffs) or 'none -- omit historical-comparison claims'}.")
+        if analysis is not None:
+            header += "\n\n" + RESOURCE_INSTRUCTIONS
         return header + "\n\n" + "\n\n".join(docs)
 
     user = assemble(current, current_file, baselines)
-    if len(user) > max_chars:
-        short, _ = _load_extract(store, layout, log_date, host_dir, log_name, "extractionshort.json")
-        current_file = "extractionshort.json"
-        user = assemble(short or current, current_file, baselines)
-    if len(user) > max_chars:
-        current_file = "extractionshort.json (compacted)"
-        user = assemble(_compact(short or current), current_file,
-                        [(l, d, s, _compact(p)) for l, d, s, p in baselines])
-    if len(user) > max_chars and baselines:
-        logger.warning("Report input node=%s still %d chars after compaction (limit %d); dropping baselines",
-                       host_dir, len(user), max_chars)
-        current_file = "extractionshort.json (compacted, baselines dropped)"
-        baselines = []
-        user = assemble(_compact(short or current), current_file, [])
+    if analysis is not None:
+        # Metrics present: the whole report stays on the occurrence extract (never extractionshort.json).
+        # Shrink by trimming occurrences outside the high-resource episode windows first.
+        windows = ri.episode_windows(analysis)
+        for keep in (200, 50, 10, 0):
+            if len(user) <= max_chars:
+                break
+            current_file = f"extractionOccurence.json (occurrences outside resource episodes capped at {keep}/group)"
+            reduced = ri.trim_occurrences(current, windows, keep)
+            user = assemble(reduced, current_file, baselines)
+        if len(user) > max_chars:
+            current_file = "extractionOccurence.json (episode occurrences only, groups capped at 60)"
+            reduced = ri.trim_occurrences(current, windows, 0, max_groups=60)
+            user = assemble(reduced, current_file, baselines)
+        if len(user) > max_chars and baselines:
+            baselines = [(l, d, s_, _compact(p)) for l, d, s_, p in baselines]
+            user = assemble(reduced, current_file, baselines)
+        if len(user) > max_chars and baselines:
+            logger.warning("Report input node=%s still %d chars (limit %d); dropping baselines",
+                           host_dir, len(user), max_chars)
+            baselines = []
+            user = assemble(reduced, current_file + ", baselines dropped", [])
+    else:
+        if len(user) > max_chars:
+            short, _ = _load_extract(store, layout, log_date, host_dir, log_name, "extractionshort.json")
+            current_file = "extractionshort.json"
+            user = assemble(short or current, current_file, baselines)
+        if len(user) > max_chars:
+            current_file = "extractionshort.json (compacted)"
+            user = assemble(_compact(short or current), current_file,
+                            [(l, d, s_, _compact(p)) for l, d, s_, p in baselines])
+        if len(user) > max_chars and baselines:
+            logger.warning("Report input node=%s still %d chars after compaction (limit %d); dropping baselines",
+                           host_dir, len(user), max_chars)
+            current_file = "extractionshort.json (compacted, baselines dropped)"
+            baselines = []
+            user = assemble(_compact(short or current), current_file, [])
     if len(user) > max_chars:
         raise RuntimeError(f"Report input {len(user)} chars exceeds REPORT_MAX_INPUT_CHARS={max_chars} "
-                           f"after compaction; reduce inputs for {host_dir}")
+                           f"after reduction; reduce inputs for {host_dir}")
     logger.info("Report input node=%s chars=%d current_file=%s baselines=%s",
                 host_dir, len(user), current_file, [b[0] for b in baselines])
     report_md = llm.generate(system_prompt, user)
+    if analysis is not None and not ri.SECTION_RE.search(report_md):
+        logger.warning("Model omitted the resource investigation section node=%s; adding deterministic fallback",
+                       host_dir)
+        report_md = report_md.rstrip() + "\n\n" + ri.render_markdown(analysis)
     from .report_shape_mapping import append_reported_shapes
     stats_key = layout.query_stats(log_date, host_dir)
     report_md = append_reported_shapes(
         report_md, current, store.get_text(stats_key) if store.exists(stats_key) else None)
-    graph_uploads = {}
-    if (config or {}).get("metrics_graphs_enabled", True):
-        from .report_shape_mapping import append_metrics_appendix
-        metrics_md, graph_uploads = _metrics_appendix(store, layout, log_date, host_dir, log_name)
-        report_md = append_metrics_appendix(report_md, metrics_md)
     report_md, removed_internal = _strip_internal_content(report_md)
     if removed_internal:
         logger.info("Removed %d internal-only content block(s) from node report", removed_internal)
+    # APPENDIX 2 only when metrics exist; added after the internal-content filter so the
+    # embedded base64 image is never altered.
+    if metrics_payload is not None and config.get("metrics_graphs_enabled", True):
+        from .report_shape_mapping import append_metrics_appendix
+        metrics_md = _metrics_appendix(metrics_payload, host_dir)
+        if metrics_md:
+            report_md = append_metrics_appendix(report_md, metrics_md)
     _validate_offline_cves(report_md, {m["cve"] for m in offline_cves["matches"]})
     uploads = {"report": store.put_text(layout.report(log_date, host_dir, log_name, "report.md"),
-                                        report_md, "text/markdown; charset=utf-8"), **graph_uploads}
+                                        report_md, "text/markdown; charset=utf-8")}
+    if analysis is not None:
+        uploads["resource_investigation"] = store.put_text(
+            layout.report(log_date, host_dir, log_name, "resource-investigation.json"),
+            json.dumps(analysis, indent=2, default=str), "application/json")
     if diffs:
         uploads["diff"] = store.put_text(layout.report(log_date, host_dir, log_name, "diff.json"),
                                          json.dumps(diff_doc, indent=2), "application/json")
     return {"node": host_dir, "log_name": log_name, "current_file": current_file,
             "baselines": [b[0] for b in baselines], "offline_driver_cves": offline_cves,
+            "resource_investigation": analysis["triggered"] if analysis is not None else None,
             "uploads": uploads, "report_md": report_md}
 
 
@@ -413,6 +478,14 @@ def _strip_internal_content(markdown: str) -> tuple[str, int]:
     return result + "\n", removed
 
 
+_DATA_URI_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(data:image/[a-z+]+;base64,[A-Za-z0-9+/=]+\)")
+
+
+def _without_embedded_images(markdown: str) -> str:
+    """Replace base64-embedded images (APPENDIX 2) by a placeholder before sending a report to a model."""
+    return _DATA_URI_IMAGE_RE.sub(lambda m: f"[embedded image omitted: {m.group(1)[:120]}]", markdown)
+
+
 def _validate_customer_summary(text: str) -> None:
     if re.search(r"\bCVE-\d{4}-\d{4,}\b", text, re.I):
         raise ValueError("Cluster summary contains a CVE without customer-use verification")
@@ -484,7 +557,7 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
                     len(nodes), [(x["node"], x["status"], x.get("shapes_found")) for x in evidence],
                     summary_only)
         body = "\n\n".join(_doc("node_report", {"node": r["node"], "log": r["log_name"]},
-                                r["report_md"]) for r in results)
+                                _without_embedded_images(r["report_md"])) for r in results)
         user = (f"Cluster `{config['cluster_name']}`, day {log_date}.\n\n"
                 + _doc("query_shape_insights", {"date": log_date}, json.dumps(evidence))
                 + "\n\n" + body)
