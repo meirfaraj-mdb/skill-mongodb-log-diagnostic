@@ -105,3 +105,30 @@ A co-located `SHARD_MONGOS` is written to `<hostname>_<port>`.
 - **No redaction:** unlike the Python collectors, these samples save the API answers as-is. Advisor sample queries, Query Shape Insights and logs can contain literal values, so review the output before sharing it.
 - The caller's IP must be on the API key's or service account's **API access list**. For service accounts the list is checked when the token is used, not when it is created.
 - The `.cmd` versions are kept minimal: JSON is assembled with `echo`/`type`, and values containing `%`, `^`, `&` or `!` in keys or paths need escaping.
+
+## Running a mongosh script alone (07/08/11)
+
+The `.js` files work without `run.sh`/`run.cmd`. Their settings are optional:
+
+| Setting | Default when not provided |
+|---|---|
+| `MDIAG_HOST` | The connected node (`hello.me`, else the connection host), without the port |
+| `MDIAG_DIR` | **None: the JSON is printed to the shell** instead of written to a file |
+| `MDIAG_WT_DETAILS` (11) | `false`: keeps only reusable and total file bytes |
+
+```bash
+# print to the shell (redirect to save)
+mongosh "mongodb://host:27017/?directConnection=true" -u diag_reader --quiet \
+  --file 11_mongosh_coll_stats/coll_stats.js > coll-stats.json
+# write into the bucket layout: <dir>/collStats/coll-stats.json
+mongosh "mongodb://host:27017/?directConnection=true" -u diag_reader --quiet \
+  --eval "var MDIAG_DIR='./staging/2026-10-31/host'; load('11_mongosh_coll_stats/coll_stats.js')"
+```
+
+- `08` prints **two JSON lines**: line 1 is `index-stats.json`, line 2 is `index-definitions.json`.
+- The JSON is also printed to the shell if the shell cannot write files (no `require`, e.g. the legacy `mongo` shell), even when `MDIAG_DIR` is set.
+
+## Troubleshooting
+
+- **`process is not defined` (07/08/11):** older samples read their settings from `process.env`, which some mongosh setups don't provide. Update the folder. The scripts now take `MDIAG_HOST`/`MDIAG_DIR`/`MDIAG_WT_DETAILS` from `--eval` (see above), and none of them is required.
+- **Nothing written, JSON on screen:** `MDIAG_DIR` wasn't set, or the shell can't write files. Use mongosh 2.x, or redirect the output to a file.
