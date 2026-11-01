@@ -10,11 +10,11 @@ They write the same layout and envelope (`schema_version: 2`) as the Python coll
 ```
 <MDIAG_OUT>/<YYYY-MM-DD>/<host_dir>/{mongodb/<log>.gz, metrics/metrics.json, advisor/advisor.json,
                                      queryStats/query-stats.json, indexStats/index-stats.json,
-                                     indexDefinitions/index-definitions.json}
+                                     indexDefinitions/index-definitions.json, collStats/coll-stats.json}
 <MDIAG_OUT>/<YYYY-MM-DD>/cluster/{manifests/processes.json, queryStats/query-stats.json, advisor/cluster-advisor.json}
 ```
 
-`07` and `08` read database commands (`$queryStats`, `$indexStats`). There is no HTTP API for these, so they use `mongosh` (still no Python).
+`07`, `08` and `11` read database commands (`$queryStats`, `$indexStats`, `$collStats`). There is no HTTP API for these, so they use `mongosh` (still no Python).
 
 ## Features and rights needed
 
@@ -28,12 +28,13 @@ They write the same layout and envelope (`schema_version: 2`) as the Python coll
 | `06_cluster_advisor` | Drop-index suggestions + schema advice | `GET /clusters/{C}/performanceAdvisor/dropIndexSuggestions`, `/schemaAdvice` | `cluster/advisor/cluster-advisor.json` | Atlas: **Project Read Only** |
 | `07_mongosh_query_stats` | `$queryStats` (top 1000 by exec time). Skips nodes that already have shapes. | `mongosh` → `admin.aggregate([{$queryStats:{}}])` | `<host>/queryStats/query-stats.json` | DB user: **`queryStatsRead`** (+ `queryStatsReadTransformed` if you use `transformIdentifiers`). Built-in **`clusterMonitor`** has both. |
 | `08_mongosh_index_stats` | `$indexStats` + `getIndexes` for every user collection (never reads documents) | `mongosh` → `listDatabases`, `listCollections`, `listIndexes`, `$indexStats` | `<host>/indexStats/index-stats.json`, `<host>/indexDefinitions/index-definitions.json` | DB user: `listDatabases`, `listCollections`, `listIndexes`, `indexStats` (**`clusterMonitor`**, or the `diagObservability` custom role below) |
+| `11_mongosh_coll_stats` | `$collStats` (storage, latency, query-exec counters) for every non-system collection (skips `admin`/`local`/`config`, `system.*`, views; never reads documents) | `mongosh` → `listDatabases`, `listCollections`, `aggregate([{$collStats:{storageStats,latencyStats,count,queryExecStats}}])` | `<host>/collStats/coll-stats.json` | DB user: `listDatabases` (cluster) + `listCollections`, `collStats` on the user databases (**`clusterMonitor`**, or `diagObservability`) |
 | `09_opsmanager_metrics` | Ops Manager host + disk measurements (`--list` saves the hosts and their hostIds) | `GET /api/public/v1.0/groups/{G}/hosts/{hostId}/measurements`, `/disks/{part}/measurements` | `<host>/metrics/metrics.json` | Ops Manager: **Project Read Only** |
 | `10_opsmanager_advisor` | Ops Manager suggested indexes | `GET /api/public/v1.0/groups/{G}/hosts/{hostId}/performanceAdvisor/suggestedIndexes` | `<host>/advisor/advisor.json` | Ops Manager: **Project Read Only**. Field values need **Project Data Access Read Only** (or Read/Write, Admin, Project Owner). Ops Manager has no query-stats API: use `07`. |
 
 **Smallest single Atlas key for 01–06:** **Project Data Access Read Only**. It covers Read Only, logs, unredacted advisor values and Query Shape Insights. If you don't want the key to have data access, use **Project Read Only + Project Observability Viewer + Project Cluster Log Viewer** (advisor sample values will then be redacted).
 
-**Database user for 07/08 (least privilege)**: the same custom role as the main manual README:
+**Database user for 07/08/11 (least privilege)**: the same custom role as the main manual README:
 
 ```js
 db.getSiblingDB("admin").createRole({ role: "diagObservability", roles: [], privileges: [
@@ -54,6 +55,8 @@ cd curl
 ./02_download_logs/run.sh; ./03_process_metrics/run.sh; ./04_performance_advisor/run.sh
 ./05_query_shape_insights/run.sh; ./06_cluster_advisor/run.sh
 MDIAG_USER=diag_reader ./07_mongosh_query_stats/run.sh     # password is prompted per node
+MDIAG_USER=diag_reader ./08_mongosh_index_stats/run.sh
+MDIAG_USER=diag_reader ./11_mongosh_coll_stats/run.sh      # MDIAG_WT_DETAILS=1 keeps full WiredTiger blobs
 
 # Ops Manager
 export OM_BASE_URL=https://opsmanager.example.net:8443 OM_GROUP_ID=... OM_PUBLIC_KEY=... OM_PRIVATE_KEY=...
@@ -83,10 +86,11 @@ curl\03_process_metrics\run.cmd
 | `MDIAG_GRANULARITY`, `MDIAG_PARTITION` | Metrics granularity (`PT5M`), disk partition (`data`) |
 | `MDIAG_HOST_FILTER` | Regex filter for `hosts.generated.txt` (01) |
 | `MDIAG_REFRESH=1` | Re-collect query stats even if shapes are already present (05, 07) |
+| `MDIAG_WT_DETAILS=1` | Keep the full `storageStats.wiredTiger` / `indexDetails` blobs (11); default keeps only reusable and total file bytes |
 | `MDIAG_USER`, `MDIAG_AUTH_DB`, `MDIAG_MONGOSH_OPTS` | mongosh user, auth db (`admin`), extra options (e.g. `--tls --tlsCAFile ca.pem`) |
 
 Hosts file (see `hosts.example.txt`):
-- Atlas, and mongosh (07/08): `processId(hostname:port) [typeName] [host_dir]`.
+- Atlas, and mongosh (07/08/11): `processId(hostname:port) [typeName] [host_dir]`.
 - Ops Manager (09/10): `hostId hostname:port [host_dir]`.
 
 A co-located `SHARD_MONGOS` is written to `<hostname>_<port>`.
