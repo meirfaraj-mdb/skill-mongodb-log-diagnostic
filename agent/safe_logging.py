@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from .common import logger
 
-_SCALARS = frozenset('cloud input_mode storage_provider llm_provider timezone slow_ms expected_node_count report_max_tokens report_max_input_chars cluster_summary http_timeout_seconds max_retries bedrock_region vertex_location aws_region observability_enabled deployment_type mongodb_timeout_ms mongodb_max_time_ms observability_max_rows index_stats_enabled index_stats_max_collections query_shape_source query_shape_window_hours query_stats_max_summaries profiler_enabled observability_api_max_pages'.split())
+_SCALARS = frozenset('cloud input_mode storage_provider llm_provider timezone slow_ms expected_node_count report_max_tokens report_max_input_chars cluster_summary http_timeout_seconds max_retries bedrock_region vertex_location aws_region observability_enabled deployment_type mongodb_timeout_ms mongodb_max_time_ms observability_max_rows index_stats_enabled index_stats_max_collections query_shape_source query_shape_window_hours query_stats_max_summaries profiler_enabled observability_api_max_pages advisor_appendix_enabled trend_increase_pct trend_min_abs_increase trend_ratio_threshold'.split())
 _LOCATORS = frozenset('bucket input_bucket prefix group_id cluster_name bedrock_model_id vertex_model vertex_project gcp_project'.split())
 _SOURCES = {'bucket', 'mongodb', 'atlas_api', 'ops_manager', 'disabled'}
 

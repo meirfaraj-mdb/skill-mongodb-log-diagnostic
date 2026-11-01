@@ -149,11 +149,11 @@ class GraphAndAppendixTests(unittest.TestCase):
         self.assertEqual(fts["lines"][0]["name"], "FTS_PROCESS_RESIDENT_MEMORY")
 
     def test_appendix_order_and_idempotence(self):
-        """APPENDIX 1 = metrics graphs, APPENDIX 2 = query forms, whatever the call order."""
+        """APPENDIX 1 = metrics graphs, APPENDIX 3 = query forms, whatever the call order."""
         extraction = {"slow": {"operations": [{"query_hash": "ABCDEF12", "namespace": "db.c",
                                                 "sample_query_shape": {"x": 1}}]}}
         self.assertIn("APPENDIX 1", METRICS_HEADING)
-        self.assertIn("APPENDIX 2", _HEADING)
+        self.assertIn("APPENDIX 3", _HEADING)
         shapes_first = append_metrics_appendix(
             append_reported_shapes("# Report\n\nSlow hash ABCDEF12 found.\n", extraction), "graph body")
         metrics_first = append_reported_shapes(

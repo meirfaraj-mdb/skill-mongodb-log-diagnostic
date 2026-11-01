@@ -69,9 +69,12 @@ _ENV_FIELDS.update({
     "metrics_graph_groups": "METRICS_GRAPH_GROUPS", "metrics_graph_config": "METRICS_GRAPH_CONFIG",
     "resource_investigation_enabled": "RESOURCE_INVESTIGATION_ENABLED",
     "resource_thresholds": "RESOURCE_THRESHOLDS",
+    "advisor_appendix_enabled": "ADVISOR_APPENDIX_ENABLED",
+    "trend_increase_pct": "TREND_INCREASE_PCT", "trend_min_abs_increase": "TREND_MIN_ABS_INCREASE",
+    "trend_ratio_threshold": "TREND_RATIO_THRESHOLD",
 })
 _BOOL_FIELDS = {"cluster_summary", "observability_enabled", "index_stats_enabled", "profiler_enabled",
-                "metrics_graphs_enabled", "resource_investigation_enabled"}
+                "metrics_graphs_enabled", "resource_investigation_enabled", "advisor_appendix_enabled"}
 _JSON_FIELDS = {"observability_sources": dict, "atlas_process_ids": dict, "ops_manager_host_ids": dict,
                 "query_plan_requests": list, "metrics_graph_groups": list, "metrics_graph_config": dict,
                 "resource_thresholds": dict}
@@ -79,7 +82,8 @@ _INT_FIELDS = {"http_timeout_seconds", "max_retries", "slow_ms", "expected_node_
                "report_max_tokens", "report_max_input_chars"}
 _INT_FIELDS.update({"mongodb_timeout_ms", "mongodb_max_time_ms", "observability_max_rows",
                     "index_stats_max_collections", "query_shape_window_hours", "query_stats_max_summaries",
-                    "observability_api_max_pages"})
+                    "observability_api_max_pages", "trend_increase_pct", "trend_min_abs_increase",
+                    "trend_ratio_threshold"})
 _CREDENTIAL_FIELDS = {"atlas_public_key", "atlas_private_key"}
 
 

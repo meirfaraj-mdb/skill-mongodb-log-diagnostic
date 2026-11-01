@@ -1,11 +1,12 @@
 """Append evidence-bound, literal-free shape forms for hashes cited in a node report.
 
-A node report ends with one ``## APPENDIX`` section:
+A node report ends with one ``## APPENDIX`` section, always in this order:
 
 * APPENDIX 1 — node metrics graphs (``append_metrics_appendix``), only when metrics exist;
-* APPENDIX 2 — reported query hashes and redacted query forms (``append_reported_shapes``).
+* APPENDIX 2 — Performance Advisor (``append_advisor_appendix``), only when advisor data exists;
+* APPENDIX 3 — reported query hashes and redacted query forms (``append_reported_shapes``).
 
-Both functions may be called in any order: each inserts its block at its fixed position and is
+The functions may be called in any order: each inserts its block at its fixed position and is
 idempotent. Lists of placeholder values (``$in: ["?", "?", ...]``) are rendered as a single
 ``"? (N values)"`` string; the count is a lower bound (``≥N``) when the source shape was truncated.
 
@@ -20,8 +21,11 @@ import re
 _HASH = re.compile(r"(?<![a-fA-F0-9])(?:[a-fA-F0-9]{64}|[a-fA-F0-9]{8})(?![a-fA-F0-9])")
 APPENDIX_HEADING = "## APPENDIX"
 METRICS_HEADING = "### APPENDIX 1 — Node metrics graphs"
-_HEADING = "### APPENDIX 2 — Reported query hashes and redacted query forms"
+ADVISOR_HEADING = "### APPENDIX 2 — Performance Advisor"
+_HEADING = "### APPENDIX 3 — Reported query hashes and redacted query forms"
 SHAPES_HEADING = _HEADING
+# Fixed order of the sub-appendices inside ``## APPENDIX``.
+_ORDER = (METRICS_HEADING, ADVISOR_HEADING, SHAPES_HEADING)
 _APPENDIX_RE = re.compile(r"(?m)^## APPENDIX[ \t]*$")
 _DATA_URI = re.compile(r"data:[a-z]+/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+")
 _MAX_ITEMS = 60
@@ -152,30 +156,58 @@ def append_reported_shapes(report_md: str, extraction: dict, query_stats_json=No
     if log_rows and not insight_rows:
         lines.extend(["No cited 64-character Query Shape Insights `queryShapeHash` could be resolved "
                       "from this node's query-statistics file; do not relabel the 8-character log hashes.", ""])
-    return _insert_block(report_md, "\n".join(lines).rstrip(), after=METRICS_HEADING)
+    return _insert_ordered(report_md, SHAPES_HEADING, "\n".join(lines).rstrip())
 
 
 def append_metrics_appendix(report_md: str, body_md: str) -> str:
-    """Insert APPENDIX 1 (one-page node metric graphs) before APPENDIX 2; idempotent."""
+    """Insert APPENDIX 1 (one-page node metric graphs) first in the APPENDIX section; idempotent."""
     if METRICS_HEADING in report_md:
         return report_md
-    return _insert_block(report_md, METRICS_HEADING + "\n\n" + body_md.strip(), before=_HEADING)
+    return _insert_ordered(report_md, METRICS_HEADING, METRICS_HEADING + "\n\n" + body_md.strip())
 
 
-def _insert_block(report_md: str, block: str, before: str | None = None, after: str | None = None) -> str:
+def append_advisor_appendix(report_md: str, body_md: str) -> str:
+    """Insert APPENDIX 2 (Performance Advisor) between metrics and query forms; idempotent."""
+    if ADVISOR_HEADING in report_md:
+        return report_md
+    return _insert_ordered(report_md, ADVISOR_HEADING, ADVISOR_HEADING + "\n\n" + body_md.strip())
+
+
+def _insert_ordered(report_md: str, heading: str, block: str) -> str:
+    """Place ``block`` (starting with ``heading``) at its fixed position in ``_ORDER``.
+
+    Inserted ahead of the first later sub-appendix already present; otherwise after the last
+    earlier one (at the next ``### APPENDIX`` heading or the end of the section).
+    """
+    rank = _ORDER.index(heading)
+    match = _APPENDIX_RE.search(report_md)
+    if match:
+        tail = report_md[match.end():]
+        later = [tail.index(h) for h in _ORDER[rank + 1:] if h in tail]
+        if later:
+            return _insert_block(report_md, block, before_pos=min(later))
+        earlier = [h for h in _ORDER[:rank] if h in tail]
+        if earlier:
+            return _insert_block(report_md, block, after=max(earlier, key=tail.index))
+    return _insert_block(report_md, block)
+
+
+def _insert_block(report_md: str, block: str, before: str | None = None, after: str | None = None,
+                  before_pos: int | None = None) -> str:
     """Place ``block`` inside the single ``## APPENDIX`` section (created if missing).
 
-    ``before``: insert ahead of that sub-heading when present; ``after``: insert after the block
-    that starts with that sub-heading (i.e. at the next ``### APPENDIX`` heading or the end).
+    ``before``/``before_pos``: insert ahead of that sub-heading (or offset in the section) when
+    present; ``after``: insert after the block that starts with that sub-heading (i.e. at the next
+    ``### APPENDIX`` heading or the end).
     """
     match = _APPENDIX_RE.search(report_md)
     if not match:
         return report_md.rstrip() + "\n\n" + APPENDIX_HEADING + "\n\n" + block.strip() + "\n"
     head, tail = report_md[:match.end()], report_md[match.end():]
-    position = None
-    if before and before in tail:
+    position = before_pos
+    if position is None and before and before in tail:
         position = tail.index(before)
-    elif after and after in tail:
+    elif position is None and after and after in tail:
         start = tail.index(after) + len(after)
         nxt = re.search(r"(?m)^### APPENDIX ", tail[start:])
         position = start + nxt.start() if nxt else None

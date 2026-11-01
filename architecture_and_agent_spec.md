@@ -325,7 +325,11 @@ The ADK orchestration layer uses its own model, set by `MONGODB_LOG_DIAG_ADK_MOD
 | `MONGODB_LOG_DIAG_SLOW_MS` | Slow-operation threshold (ms) | `1000` |
 | `MONGODB_LOG_DIAG_EXPECTED_NODE_COUNT` | Expected nodes; used to flag missing nodes | `3` |
 | `MONGODB_LOG_DIAG_REPORT_MAX_TOKENS` | Max report output tokens | `16000` |
-| `MONGODB_LOG_DIAG_REPORT_MAX_INPUT_CHARS` | Max characters sent to the model | `600000` |
+| `MONGODB_LOG_DIAG_REPORT_MAX_INPUT_CHARS` | Max characters sent to the model per node report. Unset: `60000`, or `90000` when the node has metrics and the resource investigation runs | unset |
+| `MONGODB_LOG_DIAG_ADVISOR_APPENDIX_ENABLED` | Add the Performance Advisor appendix (APPENDIX 2) when the node has advisor data | `true` |
+| `MONGODB_LOG_DIAG_TREND_INCREASE_PCT` | Cluster-summary trend section: flag a problem at or above this increase vs n-1 or n-8 | `200` |
+| `MONGODB_LOG_DIAG_TREND_MIN_ABS_INCREASE` | Trend section: minimum extra occurrences for an increase (new items are always listed) | `5` |
+| `MONGODB_LOG_DIAG_TREND_RATIO_THRESHOLD` | Trend section: docs examined/returned at or above which a query is poorly indexed | `100` |
 | `MONGODB_LOG_DIAG_CLUSTER_SUMMARY` | Generate the cluster-wide report | `true` |
 
 ### 14.7 Gateway TLS (managed Agent Engine)

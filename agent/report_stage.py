@@ -10,6 +10,21 @@ from .common import Layout, logger, shift
 from .skills import diagnostic_skill_dir
 
 BASELINES = (("n-1", -1, "yesterday"), ("n-8", -7, "one week ago"))
+# Model input budget when MONGODB_LOG_DIAG_REPORT_MAX_INPUT_CHARS / report_max_input_chars is not set.
+DEFAULT_MAX_INPUT_CHARS = 60_000
+DEFAULT_MAX_INPUT_CHARS_RESOURCE = 90_000  # resource investigation runs for the node
+
+
+def resolve_max_input_chars(configured, resource_investigation: bool) -> int:
+    """Explicit positive setting wins; otherwise 90k with resource investigation, 60k without."""
+    if configured is not None and str(configured).strip():
+        try:
+            value = int(configured)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("report_max_input_chars must be an integer") from exc
+        if value > 0:
+            return value
+    return DEFAULT_MAX_INPUT_CHARS_RESOURCE if resource_investigation else DEFAULT_MAX_INPUT_CHARS
 
 
 def _read_skill_text(rel: str) -> str:
@@ -165,6 +180,44 @@ def _metrics_appendix(payload: dict, host_dir: str) -> str | None:
     return metrics_graphs.appendix_markdown(data_uri, panels, empty, payload)
 
 
+def _advisor_appendix(store, layout, log_date: str, host_dir: str) -> str | None:
+    """APPENDIX 2 body from the node's advisor/advisor.json; None when absent, unparsable or empty."""
+    from . import advisor_appendix
+    key = layout.observability(log_date, host_dir, "advisor")
+    if not store.exists(key):
+        return None
+    try:
+        payload = json.loads(store.get_text(key))
+    except (TypeError, ValueError):
+        logger.warning("Advisor file unparsable node=%s; APPENDIX 2 (Performance Advisor) skipped", host_dir)
+        return None
+    index_definitions = None
+    idx_key = layout.observability(log_date, host_dir, "index_definitions")
+    if store.exists(idx_key):
+        try:
+            index_definitions = json.loads(store.get_text(idx_key))
+        except (TypeError, ValueError):
+            index_definitions = None
+    body = advisor_appendix.render(payload, index_definitions)
+    if body is None:
+        logger.info("Advisor file has no customer suggestion/shape node=%s; APPENDIX 2 omitted", host_dir)
+    return body
+
+
+def _add_appendices(report_md: str, store, layout, log_date: str, host_dir: str, metrics_payload, config) -> str:
+    """APPENDIX 1 (metrics) and APPENDIX 2 (advisor), each only when its data exists."""
+    from .report_shape_mapping import append_advisor_appendix, append_metrics_appendix
+    if metrics_payload is not None and config.get("metrics_graphs_enabled", True):
+        metrics_md = _metrics_appendix(metrics_payload, host_dir)
+        if metrics_md:
+            report_md = append_metrics_appendix(report_md, metrics_md)
+    if config.get("advisor_appendix_enabled", True):
+        advisor_md = _advisor_appendix(store, layout, log_date, host_dir)
+        if advisor_md:
+            report_md = append_advisor_appendix(report_md, advisor_md)
+    return report_md
+
+
 RESOURCE_INSTRUCTIONS = (
     "Per-node metrics are supplied. Include a section titled exactly `## High resource usage investigation` "
     "(before any appendix) with subsections `### A — CPU`, `### B — Memory`, `### C — Disk`. Base it on the "
@@ -195,6 +248,11 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     if metrics_payload is not None and config.get("resource_investigation_enabled", True):
         analysis = ri.analyze(metrics_payload, current, config)
         logger.info("Resource investigation node=%s triggered=%s", host_dir, analysis["triggered"])
+    configured_max = max_chars
+    max_chars = resolve_max_input_chars(configured_max, analysis is not None)
+    logger.info("Report input limit node=%s max_chars=%d (%s)", host_dir, max_chars,
+                "configured" if max_chars == configured_max else
+                "default with resource investigation" if analysis is not None else "default")
     offline_cves = offline_cve.check(current)
     baselines, diffs = [], []
     for label, offset, desc in BASELINES:
@@ -275,7 +333,7 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
             baselines = []
             user = assemble(_compact(short or current), current_file, [])
     if len(user) > max_chars:
-        # Raw index/query stats are unbounded; APPENDIX 2 still maps hashes from the stored file.
+        # Raw index/query stats are unbounded; APPENDIX 3 still maps hashes from the stored file.
         logger.warning("Report input node=%s still %d chars (limit %d); dropping raw index_stats/query_stats",
                        host_dir, len(user), max_chars)
         raw_docs["enabled"] = False
@@ -322,13 +380,10 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     report_md, removed_internal = _strip_internal_content(report_md)
     if removed_internal:
         logger.info("Removed %d internal-only content block(s) from node report", removed_internal)
-    # APPENDIX 1 (metrics graphs) only when metrics exist; inserted ahead of APPENDIX 2 (query forms),
-    # after the internal-content filter so the embedded base64 image is never altered.
-    if metrics_payload is not None and config.get("metrics_graphs_enabled", True):
-        from .report_shape_mapping import append_metrics_appendix
-        metrics_md = _metrics_appendix(metrics_payload, host_dir)
-        if metrics_md:
-            report_md = append_metrics_appendix(report_md, metrics_md)
+    # APPENDIX 1 (metrics graphs) and APPENDIX 2 (Performance Advisor) only when their data exist;
+    # placed ahead of APPENDIX 3 (query forms), after the internal-content filter so the embedded
+    # base64 image is never altered (the advisor renderer already omits system namespaces).
+    report_md = _add_appendices(report_md, store, layout, log_date, host_dir, metrics_payload, config)
     report_md, removed_cves = _redact_unvetted_cves(report_md, {m["cve"] for m in offline_cves["matches"]})
     if removed_cves:
         logger.warning("Removed %d CVE ID(s) not in the reviewed offline matches node=%s: %s",
@@ -342,7 +397,7 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     if diffs:
         uploads["diff"] = store.put_text(layout.report(log_date, host_dir, log_name, "diff.json"),
                                          json.dumps(diff_doc, indent=2), "application/json")
-    return {"node": host_dir, "log_name": log_name, "current_file": current_file,
+    return {"node": host_dir, "log_name": log_name, "current_file": current_file, "max_input_chars": max_chars,
             "baselines": [b[0] for b in baselines], "offline_driver_cves": offline_cves,
             "resource_investigation": analysis["triggered"] if analysis is not None else None,
             "uploads": uploads, "report_md": report_md}
@@ -573,6 +628,35 @@ CLUSTER_PROMPT = (
     "present. Do not fill a quota of actions. Never expose credentials, IPs or query literals."
 )
 
+TREND_INSTRUCTIONS = (
+    "A `trend_alerts` document lists, deterministically, problems that are new versus BOTH n-1 and n-8 or "
+    "at least +{pct:g}% above n-1 or n-8: unindexed (COLLSCAN) or poorly indexed queries, in-memory sorts, "
+    "error groups and aggregate signals. The pipeline inserts the section `## New or sharply increasing "
+    "issues (vs n-1 and n-8)` with the exact table right after your executive summary: do not write that "
+    "section or repeat its table. Mention the most important new or increasing items in the executive "
+    "summary and the priorities with their exact numbers; call them changes versus the baselines, not "
+    "proven causes, and keep index wording as candidates to validate."
+)
+
+
+def _trend_alerts(store, layout, log_date: str, nodes, config) -> dict | None:
+    """Per-node comparison with n-1 and n-8 (only nodes with both baselines are compared)."""
+    from . import trend_alerts
+    per_node = []
+    for host, name in nodes:
+        current, _ = _load_extract(store, layout, log_date, host, name, "extractionshort.json")
+        if current is None:
+            current, _ = _load_extract(store, layout, log_date, host, name, "extractionOccurence.json")
+        if current is None:
+            continue
+        baselines = {}
+        for label, offset, _desc in BASELINES:
+            bdate = shift(log_date, offset)
+            payload, _ = _load_extract(store, layout, bdate, host, name, "extractionshort.json")
+            baselines[label] = (bdate, payload)
+        per_node.append(trend_alerts.node_alerts(host, name, current, baselines, config))
+    return trend_alerts.cluster_alerts(per_node, config) if per_node else None
+
 
 def write_fallback_report(store, layout, log_date, host_dir, log_name, error, config=None) -> dict:
     """Always leave one report per node: deterministic content when the model-based report failed."""
@@ -599,11 +683,7 @@ def write_fallback_report(store, layout, log_date, host_dir, log_name, error, co
             stats_key = layout.query_stats(log_date, host_dir)
             report_md = append_reported_shapes(
                 report_md, current, store.get_text(stats_key) if store.exists(stats_key) else None)
-        if metrics_payload is not None and config.get("metrics_graphs_enabled", True):
-            from .report_shape_mapping import append_metrics_appendix
-            metrics_md = _metrics_appendix(metrics_payload, host_dir)
-            if metrics_md:
-                report_md = append_metrics_appendix(report_md, metrics_md)
+        report_md = _add_appendices(report_md, store, layout, log_date, host_dir, metrics_payload, config)
     except Exception as exc:
         logger.warning("Fallback appendix failed node=%s error_type=%s", host_dir, type(exc).__name__)
     uri = store.put_text(layout.report(log_date, host_dir, log_name, "report.md"),
@@ -643,7 +723,8 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
             results.append({"node": host, "log_name": name, "report_md": store.get_text(key),
                             "uploads": {"report": store.uri(key)}})
     else:
-        max_chars = int(config.get("report_max_input_chars", 600_000))
+        # None -> per-node default: 60k chars, 90k when resource investigation runs for the node.
+        max_chars = config.get("report_max_input_chars")
         system_prompt = build_system_prompt()
         for host, name in nodes:
             try:
@@ -656,7 +737,7 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
                     results.append(write_fallback_report(store, layout, log_date, host, name, error, config))
                 except Exception:
                     logger.exception("Fallback report failed for %s/%s", host, name)
-    cluster_uri = None
+    cluster_uri, trend_uri = None, None
     if results and config.get("cluster_summary", True) and len(results) > 1:
         evidence = summarize_query_stats(store, layout, log_date, nodes)
         logger.info("Cluster summary inputs nodes=%d query_stats=%s summary_only=%s",
@@ -664,16 +745,35 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
                     summary_only)
         body = "\n\n".join(_doc("node_report", {"node": r["node"], "log": r["log_name"]},
                                 _without_embedded_images(r["report_md"])) for r in results)
+        from . import trend_alerts
+        alerts, trend_md = None, None
+        try:
+            alerts = _trend_alerts(store, layout, log_date, [(r["node"], r["log_name"]) for r in results], config)
+            trend_md = trend_alerts.render_markdown(alerts) if alerts else None
+        except Exception as exc:  # trends must never block the cluster summary
+            logger.warning("Trend comparison failed error_type=%s", type(exc).__name__)
+        if alerts:
+            trend_uri = store.put_text(layout.cluster_report(log_date, "trend-alerts.json"),
+                                       json.dumps(alerts, indent=2, default=str), "application/json")
+            logger.info("Trend alerts status=%s nodes_compared=%s items=%d uri=%s", alerts["status"],
+                        alerts["nodes_compared"], sum(len(n.get("items", [])) for n in alerts["nodes"]), trend_uri)
+        system = CLUSTER_PROMPT
         user = (f"Cluster `{config['cluster_name']}`, day {log_date}.\n\n"
-                + _doc("query_shape_insights", {"date": log_date}, json.dumps(evidence))
-                + "\n\n" + body)
-        summary = llm.generate(CLUSTER_PROMPT, user)
+                + _doc("query_shape_insights", {"date": log_date}, json.dumps(evidence)))
+        if trend_md:
+            system += " " + TREND_INSTRUCTIONS.format(pct=alerts["thresholds"]["increase_pct"])
+            user += "\n\n" + _doc("trend_alerts", {"date": log_date, "baselines": "n-1,n-8"},
+                                  json.dumps(trend_alerts.model_view(alerts), default=str))
+        user += "\n\n" + body
+        summary = llm.generate(system, user)
         if not re.search(r"(?im)^#{1,2}\s*Executive summary\b", summary[:1200]):
             summary = llm.generate(
-                CLUSTER_PROMPT + " REQUIRE the heading ## Executive summary at the top. "
+                system + " REQUIRE the heading ## Executive summary at the top. "
                 "Keep all conclusions grounded in the same supplied evidence.", user)
         if not re.search(r"(?im)^#{1,2}\s*Executive summary\b", summary[:1200]):
             raise ValueError("Cluster summary omitted its required executive summary")
+        if trend_md:
+            summary = trend_alerts.place_section(summary, trend_md)
         summary, removed_internal = _strip_internal_content(summary)
         if removed_internal:
             logger.info("Removed %d internal-only content block(s) from cluster summary", removed_internal)
@@ -692,6 +792,7 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
         "node_count": len(nodes), "expected_node_count": expected,
         "reports": [{k: v for k, v in r.items() if k != "report_md"} for r in results],
         "cluster_summary": cluster_uri, "failed": failed,
+        "trend_alerts": trend_uri,
     }
     store.put_text(layout.cluster_report(log_date, "manifest.json"),
                    json.dumps(manifest, indent=2), "application/json")
