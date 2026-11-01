@@ -89,11 +89,32 @@ def discover_nodes(store, layout: Layout, log_date: str) -> list[tuple[str, str]
     return sorted(nodes)
 
 
+def hosts_without_extract(store, layout: Layout, log_date: str, nodes) -> list[str]:
+    """Node folders present for the day (raw logs / observability) that have no occurrence extract."""
+    day = layout.day(log_date) + "/"
+    with_extract = {h for h, _ in nodes}
+    hosts = {k[len(day):].split("/")[0] for k in store.list_keys(day) if "/" in k[len(day):]}
+    return sorted(h for h in hosts - with_extract if h != "cluster")
+
+
 def _validate_offline_cves(markdown: str, allowed: set[str]) -> None:
     mentioned = {c.upper() for c in re.findall(r"\bCVE-\d{4}-\d{4,}\b", markdown, re.I)}
     extra = mentioned - {c.upper() for c in allowed}
     if extra:
         raise ValueError("Report contains CVE IDs not in reviewed offline matches: " + ", ".join(sorted(extra)))
+
+
+def _redact_unvetted_cves(markdown: str, allowed: set[str]) -> tuple[str, list[str]]:
+    """Replace CVE IDs that are not in the reviewed offline matches instead of discarding the report."""
+    allowed_up = {c.upper() for c in allowed}
+    removed: list[str] = []
+
+    def repl(m):
+        if m.group(0).upper() in allowed_up:
+            return m.group(0)
+        removed.append(m.group(0).upper())
+        return "[unverified CVE reference removed]"
+    return re.sub(r"\bCVE-\d{4}-\d{4,}\b", repl, markdown, flags=re.I), sorted(set(removed))
 
 
 def _load_metrics(store, layout, log_date: str, host_dir: str):
@@ -189,6 +210,8 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
                 "baselines_missing": [l for l, _, _ in BASELINES if l not in {d["label"] for d in diffs}],
                 "comparisons": diffs}
 
+    raw_docs = {"enabled": True}
+
     def assemble(cur_payload, cur_name, base_payloads):
         docs = [_doc("current", {"date": log_date, "node": host_dir, "log": log_name, "file": cur_name},
                      json.dumps(cur_payload, separators=(",", ":")))]
@@ -204,7 +227,7 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
                              json.dumps(analysis, separators=(",", ":"), default=str)))
         for label, key in (("index_stats", layout.index_stats(log_date, host_dir)),
                            ("query_stats", layout.query_stats(log_date, host_dir))):
-            if store.exists(key):
+            if raw_docs["enabled"] and store.exists(key):
                 docs.append(_doc(label, {"node": host_dir}, store.get_text(key)))
         header = (f"Generate the MongoDB Log Diagnostic report for node `{host_dir}` ({log_name} log), "
                   f"log day {log_date} (Atlas project timezone day). Baselines supplied: "
@@ -252,6 +275,32 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
             baselines = []
             user = assemble(_compact(short or current), current_file, [])
     if len(user) > max_chars:
+        # Raw index/query stats are unbounded; APPENDIX 1 still maps hashes from the stored file.
+        logger.warning("Report input node=%s still %d chars (limit %d); dropping raw index_stats/query_stats",
+                       host_dir, len(user), max_chars)
+        raw_docs["enabled"] = False
+        current_file += ", raw index/query stats omitted"
+        base_payloads = [(l, d, s_, _compact(p)) for l, d, s_, p in baselines]
+        if analysis is not None:
+            user = assemble(ri.trim_occurrences(current, ri.episode_windows(analysis), 0, max_groups=60),
+                            current_file, base_payloads)
+        else:
+            user = assemble(_compact(_load_extract(store, layout, log_date, host_dir, log_name,
+                                                   "extractionshort.json")[0] or current),
+                            current_file, base_payloads)
+    for groups in (30, 15):
+        if len(user) <= max_chars:
+            break
+        logger.warning("Report input node=%s still %d chars (limit %d); capping groups at %d",
+                       host_dir, len(user), max_chars, groups)
+        baselines = []
+        current_file = f"{current_file.split(' (')[0]} (groups capped at {groups}, baselines and raw stats omitted)"
+        if analysis is not None:
+            reduced = ri.trim_occurrences(current, ri.episode_windows(analysis), 0, max_groups=groups)
+        else:
+            reduced = _load_extract(store, layout, log_date, host_dir, log_name, "extractionshort.json")[0] or current
+        user = assemble(_compact(reduced, max_groups=groups), current_file, [])
+    if len(user) > max_chars:
         raise RuntimeError(f"Report input {len(user)} chars exceeds REPORT_MAX_INPUT_CHARS={max_chars} "
                            f"after reduction; reduce inputs for {host_dir}")
     logger.info("Report input node=%s chars=%d current_file=%s baselines=%s",
@@ -275,7 +324,10 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
         metrics_md = _metrics_appendix(metrics_payload, host_dir)
         if metrics_md:
             report_md = append_metrics_appendix(report_md, metrics_md)
-    _validate_offline_cves(report_md, {m["cve"] for m in offline_cves["matches"]})
+    report_md, removed_cves = _redact_unvetted_cves(report_md, {m["cve"] for m in offline_cves["matches"]})
+    if removed_cves:
+        logger.warning("Removed %d CVE ID(s) not in the reviewed offline matches node=%s: %s",
+                       len(removed_cves), host_dir, ", ".join(removed_cves))
     uploads = {"report": store.put_text(layout.report(log_date, host_dir, log_name, "report.md"),
                                         report_md, "text/markdown; charset=utf-8")}
     if analysis is not None:
@@ -517,6 +569,47 @@ CLUSTER_PROMPT = (
 )
 
 
+def write_fallback_report(store, layout, log_date, host_dir, log_name, error, config=None) -> dict:
+    """Always leave one report per node: deterministic content when the model-based report failed."""
+    config = config or {}
+    lines = [f"# MongoDB Log Diagnostic — node `{host_dir}` ({log_name} log), {log_date}", "",
+             "> **Partial report.** The model-based report could not be generated for this node "
+             f"(`{type(error).__name__}`: {str(error)[:300]}). The sections below are produced "
+             "deterministically from the extract and metrics; rerun `--stage report` after fixing the cause.", ""]
+    current, _ = _load_extract(store, layout, log_date, host_dir, log_name, "extractionOccurence.json")
+    metrics_payload = None
+    analysis = None
+    try:
+        metrics_payload = _load_metrics(store, layout, log_date, host_dir)
+        if metrics_payload is not None and current is not None and config.get("resource_investigation_enabled", True):
+            from . import resource_investigation as ri
+            analysis = ri.analyze(metrics_payload, current, config)
+            lines += [ri.render_markdown(analysis), ""]
+    except Exception as exc:  # fallback must never fail
+        logger.warning("Fallback resource investigation failed node=%s error_type=%s", host_dir, type(exc).__name__)
+    report_md = "\n".join(lines)
+    try:
+        if current is not None:
+            from .report_shape_mapping import append_reported_shapes
+            stats_key = layout.query_stats(log_date, host_dir)
+            report_md = append_reported_shapes(
+                report_md, current, store.get_text(stats_key) if store.exists(stats_key) else None)
+        if metrics_payload is not None and config.get("metrics_graphs_enabled", True):
+            from .report_shape_mapping import append_metrics_appendix
+            metrics_md = _metrics_appendix(metrics_payload, host_dir)
+            if metrics_md:
+                report_md = append_metrics_appendix(report_md, metrics_md)
+    except Exception as exc:
+        logger.warning("Fallback appendix failed node=%s error_type=%s", host_dir, type(exc).__name__)
+    uri = store.put_text(layout.report(log_date, host_dir, log_name, "report.md"),
+                         report_md, "text/markdown; charset=utf-8")
+    logger.warning("Wrote partial fallback report node=%s uri=%s", host_dir, uri)
+    return {"node": host_dir, "log_name": log_name, "current_file": "extractionOccurence.json (fallback)",
+            "baselines": [], "partial": True, "error": str(error)[:1000],
+            "resource_investigation": analysis["triggered"] if analysis else None,
+            "uploads": {"report": uri}, "report_md": report_md}
+
+
 def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = False) -> dict:
     from .providers import get_llm, get_store
     layout = Layout.from_config(config)
@@ -526,8 +619,11 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
     if not nodes:
         raise RuntimeError(f"No extractions found for {log_date}")
     expected = int(config.get("expected_node_count", 3))
+    logger.info("Report nodes for %s: %s", log_date, [f"{h}/{n}" for h, n in nodes])
     if len(nodes) != expected:
-        logger.warning("Found %d node extracts for %s (expected %d)", len(nodes), log_date, expected)
+        logger.warning("Found %d node extracts for %s (expected %d); node folders without "
+                       "extractionOccurence.json: %s", len(nodes), log_date, expected,
+                       hosts_without_extract(store, layout, log_date, nodes) or "none")
     results, failed = [], []
     if summary_only:
         if len(nodes) < 2:
@@ -551,6 +647,10 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
             except Exception as error:
                 logger.exception("Report failed for %s/%s", host, name)
                 failed.append({"node": host, "log_name": name, "error": str(error)[:1000]})
+                try:
+                    results.append(write_fallback_report(store, layout, log_date, host, name, error, config))
+                except Exception:
+                    logger.exception("Fallback report failed for %s/%s", host, name)
     cluster_uri = None
     if results and config.get("cluster_summary", True) and len(results) > 1:
         evidence = summarize_query_stats(store, layout, log_date, nodes)
