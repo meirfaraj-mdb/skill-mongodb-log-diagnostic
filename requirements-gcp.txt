@@ -7,3 +7,5 @@ requests>=2.31
 google-adk==1.39.1
 
 google-cloud-aiplatform[agent_engines]>=1.148.1,<2
+# Per-node metric graphs (report APPENDIX 2); optional - reports note when it is missing.
+matplotlib>=3.8

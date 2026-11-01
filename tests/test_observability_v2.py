@@ -117,7 +117,7 @@ class Tests(unittest.TestCase):
         self.assertIn('## Index analysis',rendered); self.assertIn('## Top 10',rendered)
 
     def test_partial_failure_keeps_other_artifacts_and_no_secrets(self):
-        def collect(config,host,pid,kind,source):
+        def collect(config,host,pid,kind,source,log_date=None):
             if kind=='metrics':raise RuntimeError('mongodb://user:password@host')
             return {'kind':kind}
         skills.observability=lambda:types.SimpleNamespace(collect=collect)
@@ -155,8 +155,10 @@ class Tests(unittest.TestCase):
              'ops_manager_host_ids':{'node':'host-id'}}
         with patch.object(collector,'_api_pages',return_value=([{'measurements':[]}],False)) as api:
             value=collector.collect_api(cfg,'node','node:27017','metrics','atlas_api')
-            self.assertIn('/processes/node%3A27017/measurements?',api.call_args.args[1])
-            self.assertIn('granularity=PT1H',api.call_args.args[1]); self.assertEqual(value['window']['hours'],24)
+            url=[c.args[1] for c in api.call_args_list if '/measurements?' in c.args[1]][-1]
+            self.assertIn('/processes/node%3A27017/measurements?',url)
+            self.assertIn('granularity=PT5M',url); self.assertIn('&m=',url); self.assertEqual(value['window']['hours'],24)
+            self.assertTrue(api.call_args.args[1].endswith('/processes/node%3A27017/disks'))
             collector.collect_api(cfg,'node',None,'advisor','ops_manager')
             self.assertIn('/hosts/host-id/performanceAdvisor/suggestedIndexes?',api.call_args.args[1])
 

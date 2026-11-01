@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import skills
 from .common import logger
+from agent.env_bool import parse_bool_env
 
 CLOUD_DEFAULTS = {
     "aws": {"storage_provider": "s3", "llm_provider": "bedrock"},
@@ -64,10 +65,16 @@ _ENV_FIELDS.update({
     "atlas_base_url": "ATLAS_BASE_URL", "ops_manager_base_url": "OPS_MANAGER_BASE_URL",
     "ops_manager_host_ids": "OPS_MANAGER_HOST_IDS", "ops_manager_public_key": "OPS_MANAGER_PUBLIC_KEY",
     "ops_manager_private_key": "OPS_MANAGER_PRIVATE_KEY", "observability_api_max_pages": "OBSERVABILITY_API_MAX_PAGES",
+    "metrics_granularity": "METRICS_GRANULARITY", "metrics_graphs_enabled": "METRICS_GRAPHS_ENABLED",
+    "metrics_graph_groups": "METRICS_GRAPH_GROUPS", "metrics_graph_config": "METRICS_GRAPH_CONFIG",
+    "resource_investigation_enabled": "RESOURCE_INVESTIGATION_ENABLED",
+    "resource_thresholds": "RESOURCE_THRESHOLDS",
 })
-_BOOL_FIELDS = {"cluster_summary", "observability_enabled", "index_stats_enabled", "profiler_enabled"}
+_BOOL_FIELDS = {"cluster_summary", "observability_enabled", "index_stats_enabled", "profiler_enabled",
+                "metrics_graphs_enabled", "resource_investigation_enabled"}
 _JSON_FIELDS = {"observability_sources": dict, "atlas_process_ids": dict, "ops_manager_host_ids": dict,
-                "query_plan_requests": list}
+                "query_plan_requests": list, "metrics_graph_groups": list, "metrics_graph_config": dict,
+                "resource_thresholds": dict}
 _INT_FIELDS = {"http_timeout_seconds", "max_retries", "slow_ms", "expected_node_count",
                "report_max_tokens", "report_max_input_chars"}
 _INT_FIELDS.update({"mongodb_timeout_ms", "mongodb_max_time_ms", "observability_max_rows",
@@ -90,9 +97,7 @@ def _env_config() -> dict:
             except ValueError as exc:
                 raise ValueError(f"{name} must be an integer") from exc
         elif key in _BOOL_FIELDS:
-            if value.lower() not in ("true", "false", "1", "0"):
-                raise ValueError(f"{name} must be true or false")
-            value = value.lower() in ("true", "1")
+            value  = parse_bool_env(name, default=True)
         elif key in _JSON_FIELDS:
             value = json.loads(value)
             if not isinstance(value, _JSON_FIELDS[key]):

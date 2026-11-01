@@ -50,8 +50,13 @@ def _discover_atlas_nodes(config: dict) -> list[dict]:
 
 
 def collect_nodes(config, log_date, store, nodes):
-    """One snapshot per kind/node; existing_bucket is strictly read-only."""
-    from .observability_contract import ARTIFACTS, artifact_key, resolve_source
+    """One snapshot per kind/node; existing_bucket is strictly read-only.
+
+    API collectors receive ``log_date`` so their windows match the log day in the
+    configured project timezone (not a rolling window at collection time).
+    """
+    from .observability_contract import (ARTIFACTS, QueryShapeWindowUnavailable, artifact_key,
+                                         resolve_source)
     layout = Layout.from_config(config)
     collector = None
     results = []
@@ -59,19 +64,30 @@ def collect_nodes(config, log_date, store, nodes):
         host, host_dir = info["host"], info["host_dir"]
         receipt = {"host": host, "host_dir": host_dir, "artifacts": {}, "errors": []}
         for kind in ARTIFACTS:
+            source = None
             try:
                 source = resolve_source(config, kind)
                 key = artifact_key(layout, log_date, host_dir, kind)
                 if source == "bucket":
                     receipt["artifacts"][kind] = {"status": "available" if store.exists(key) else "not_present",
-                                                     "source": "bucket", "uri": store.uri(key)}
+                                                  "source": "bucket", "uri": store.uri(key)}
                 elif source == "disabled":
                     receipt["artifacts"][kind] = {"status": "disabled"}
                 else:
                     collector = collector or skills.observability()
-                    data = collector.collect(config, host, info.get("process_id"), kind, source)
+                    data = collector.collect(config, host, info.get("process_id"), kind, source,
+                                             log_date=log_date)
                     receipt["artifacts"][kind] = {"status": "collected", "source": source,
-                        "uri": store.put_text(key, json.dumps(data, default=str, indent=2), "application/json")}
+                                                  "uri": store.put_text(key, json.dumps(data, default=str, indent=2), "application/json")}
+                    window = data.get("window") if isinstance(data, dict) else None
+                    if isinstance(window, dict):
+                        receipt["artifacts"][kind]["window"] = window
+            except QueryShapeWindowUnavailable as exc:
+                # Expected for backfills older than API retention: never store data from
+                # another day under this log day's key.
+                logger.info("Observability window unavailable node=%s kind=%s: %s", host_dir, kind, exc)
+                receipt["artifacts"][kind] = {"status": "out_of_retention", "source": source,
+                                              "reason": str(exc)}
             except Exception as exc:
                 # Raw driver/API messages can contain credentials and query literals.
                 logger.warning("Observability failed node=%s kind=%s error_type=%s", host_dir, kind, type(exc).__name__)
@@ -80,7 +96,8 @@ def collect_nodes(config, log_date, store, nodes):
     errors = any(item["errors"] for item in results)
     return {"status": "partial" if errors else "reused_existing_bucket" if config.get("input_mode") == "existing_bucket" else "completed",
             "nodes": results, "log_date": log_date,
-            "collection_time_note": "Live API windows are rolling at collection time, not necessarily the log day."}
+            "collection_time_note": "Atlas API windows are aligned to the log day in the configured timezone; "
+                                    "Query Shape Insights days older than the 7-day retention are out_of_retention."}
 
 
 def run(config: dict, log_date: str, store=None) -> dict:
