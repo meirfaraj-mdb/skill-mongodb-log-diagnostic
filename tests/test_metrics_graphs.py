@@ -149,16 +149,57 @@ class GraphAndAppendixTests(unittest.TestCase):
         self.assertEqual(fts["lines"][0]["name"], "FTS_PROCESS_RESIDENT_MEMORY")
 
     def test_appendix_order_and_idempotence(self):
+        """APPENDIX 1 = metrics graphs, APPENDIX 2 = query forms, whatever the call order."""
         extraction = {"slow": {"operations": [{"query_hash": "ABCDEF12", "namespace": "db.c",
                                                 "sample_query_shape": {"x": 1}}]}}
-        md = append_reported_shapes("# Report\n\nSlow hash ABCDEF12 found.\n", extraction)
-        md = append_metrics_appendix(md, "graph body")
+        self.assertIn("APPENDIX 1", METRICS_HEADING)
+        self.assertIn("APPENDIX 2", _HEADING)
+        shapes_first = append_metrics_appendix(
+            append_reported_shapes("# Report\n\nSlow hash ABCDEF12 found.\n", extraction), "graph body")
+        metrics_first = append_reported_shapes(
+            append_metrics_appendix("# Report\n\nSlow hash ABCDEF12 found.\n", "graph body"), extraction)
+        self.assertEqual(shapes_first, metrics_first)
+        md = shapes_first
         self.assertEqual(md.count(APPENDIX_HEADING + "\n"), 1)
-        self.assertLess(md.index(APPENDIX_HEADING), md.index(_HEADING))
-        self.assertLess(md.index(_HEADING), md.index(METRICS_HEADING))
+        self.assertLess(md.index(APPENDIX_HEADING), md.index(METRICS_HEADING))
+        self.assertLess(md.index(METRICS_HEADING), md.index("graph body"))
+        self.assertLess(md.index("graph body"), md.index(_HEADING))
         self.assertIn("#### Log query hash `ABCDEF12`", md)
         self.assertEqual(append_metrics_appendix(md, "again"), md)
         self.assertEqual(append_reported_shapes(md, extraction), md)
+
+    def test_shapes_appendix_without_metrics(self):
+        extraction = {"slow": {"operations": [{"query_hash": "ABCDEF12", "namespace": "db.c",
+                                                "sample_query_shape": {"x": 1}}]}}
+        md = append_reported_shapes("# Report\n\nSlow hash ABCDEF12 found.\n", extraction)
+        self.assertIn(APPENDIX_HEADING + "\n\n" + _HEADING, md)
+        self.assertNotIn(METRICS_HEADING, md)
+
+    def test_placeholder_lists_are_counted(self):
+        """$in/$nin lists of redacted values carry no structure: show "? (N values)"."""
+        shape = {"find": "?", "filter": {"status": {"$in": ["?"] * 4}, "_id": {"$nin": ["?"] * 10},
+                                         "$or": [{"a": "?"}, {"b": {"$in": ["?", "?"]}}],
+                                         "tags": {"$all": ["?"]}, "loc": [["?", "?"], ["?", "?"]]}}
+        extraction = {"slow": {"operations": [{"query_hash": "ABCDEF12", "namespace": "db.c",
+                                                "sample_query_shape": shape}]}}
+        md = append_reported_shapes("# Report\n\nSlow hash ABCDEF12 found.\n", extraction)
+        self.assertIn('"$in": "? (4 values)"', md)
+        self.assertIn('"$nin": "? (≥10 values)"', md)  # extractor keeps 10 items: lower bound
+        self.assertIn('"$in": "? (2 values)"', md)
+        self.assertIn('"$all": [\n', md)  # a single value is kept as a list
+        self.assertIn('"a": "?"', md)  # objects inside $or keep their structure
+        self.assertNotIn('"?",\n', md)  # no more one-line-per-"?" lists
+        qsi = {"data": [{"queryShapeHash": "A" * 64, "key": {"queryShape": {
+            "cmdNs": {"db": "d", "coll": "c"}, "command": "find", "filter": {"x": {"$in": ["?"] * 10}}}}}]}
+        md2 = append_reported_shapes("# Report\n\nShape " + "A" * 64 + "\n", {}, json.dumps(qsi))
+        self.assertIn('"$in": "? (10 values)"', md2)  # full list from $queryStats: exact count
+
+    def test_base64_graph_is_not_scanned_for_hashes(self):
+        extraction = {"slow": {"operations": [{"query_hash": "ABCDEF12", "namespace": "db.c",
+                                                "sample_query_shape": {"x": 1}}]}}
+        md = append_metrics_appendix("# Report\n", "![g](data:image/png;base64,QQ+ABCDEF12+QQ==)")
+        md = append_reported_shapes(md, extraction)
+        self.assertNotIn("#### Log query hash", md)
 
     def test_metrics_appendix_without_query_shapes_creates_appendix(self):
         md = append_metrics_appendix("# Report\n", "body")
@@ -177,7 +218,7 @@ class GraphAndAppendixTests(unittest.TestCase):
         llm = types.SimpleNamespace(generate=lambda system, user: "# Report\n\nFindings.")
         result = report_stage.report_node(store, layout, llm, "sys", "2026-10-27", "node", "mongodb", 600000)
         md = result["report_md"]
-        self.assertLess(md.index(_HEADING), md.index(METRICS_HEADING))
+        self.assertLess(md.index(METRICS_HEADING), md.index(_HEADING))
         prefix = "![Per-node metric graphs: CACHE, CONNECTIONS_AND_CURSORS, FTS_PROCESS](data:image/png;base64,"
         self.assertIn(prefix, md)
         self.assertIn("not offered by the measurements API", md)
@@ -199,9 +240,9 @@ class GraphAndAppendixTests(unittest.TestCase):
         store = Store({layout.extract("2026-10-27", "node", "mongodb", "extractionOccurence.json"): {}})
         llm = types.SimpleNamespace(generate=lambda system, user: "# Report")
         md = report_stage.report_node(store, layout, llm, "sys", "2026-10-27", "node", "mongodb", 600000)["report_md"]
-        self.assertNotIn(METRICS_HEADING, md)  # APPENDIX 2 only when metrics are present
+        self.assertNotIn(METRICS_HEADING, md)  # APPENDIX 1 only when metrics are present
         self.assertNotIn("High resource usage investigation", md)
-        # metrics file present but without any data point -> still no APPENDIX 2
+        # metrics file present but without any data point -> still no APPENDIX 1
         store.items[layout.observability("2026-10-27", "node", "metrics")] = {"data": [{"measurements": [
             measurement("CONNECTIONS", "SCALAR", [None, None])]}]}
         md2 = report_stage.report_node(store, layout, llm, "sys", "2026-10-27", "node", "mongodb", 600000)["report_md"]

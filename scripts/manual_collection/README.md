@@ -38,7 +38,7 @@ MDIAG_USER=diag_reader ./run_mongosh_all_nodes.sh hosts.txt
 ```
 - Connect **directly** to each data-bearing node. `$indexStats` and `$collStats` are node-local. `secondaryPreferred` is set so secondaries work.
 - Sharded clusters: also run it on each `mongos`, because routed queries appear in `$queryStats` on the mongos. Set `MDIAG_SKIP=index_definitions,index_stats,coll_stats` there.
-- Useful settings: `MDIAG_INCLUDE_DBS` / `MDIAG_EXCLUDE_DBS`, `MDIAG_MAX_COLLECTIONS` (5000), `MDIAG_MAX_QUERY_STATS` (5000, sorted by total exec time), `MDIAG_QUERYSTATS_HMAC_KEY` (hashes field and collection names), `MDIAG_WT_DETAILS=true` (full WiredTiger blobs; off by default, only reusable-space bytes are kept).
+- Useful settings: `MDIAG_INCLUDE_DBS` / `MDIAG_EXCLUDE_DBS`, `MDIAG_MAX_COLLECTIONS` (5000), `MDIAG_MAX_QUERY_STATS` (1000, sorted by total exec time — same cap as the agent), `MDIAG_QUERYSTATS_HMAC_KEY` (hashes field and collection names), `MDIAG_WT_DETAILS=true` (full WiredTiger blobs; off by default, only reusable-space bytes are kept).
 
 ## 2. Atlas API
 

@@ -26,7 +26,7 @@
  *   MDIAG_EXCLUDE_DBS          comma list; skipped databases (admin/config/local always skipped)
  *   MDIAG_SKIP                 comma list of: query_stats,index_definitions,index_stats,coll_stats
  *   MDIAG_MAX_COLLECTIONS      default 5000 (namespaces over the cap -> truncated=true)
- *   MDIAG_MAX_QUERY_STATS      default 5000 entries, sorted by total execution time
+ *   MDIAG_MAX_QUERY_STATS      default 1000 entries, sorted by total execution time
  *   MDIAG_MAX_TIME_MS          per-command maxTimeMS, default 30000
  *   MDIAG_QUERYSTATS_HMAC_KEY  base64 key (>=32 bytes) -> $queryStats transformIdentifiers
  *                              (field/collection names HMAC-hashed; needs queryStatsReadTransformed)
@@ -66,7 +66,7 @@
     excludeDbs: asList(opt('excludeDbs', 'MDIAG_EXCLUDE_DBS', '')),
     skip: asList(opt('skip', 'MDIAG_SKIP', '')),
     maxCollections: asInt(opt('maxCollections', 'MDIAG_MAX_COLLECTIONS', 5000), 5000),
-    maxQueryStats: asInt(opt('maxQueryStats', 'MDIAG_MAX_QUERY_STATS', 5000), 5000),
+    maxQueryStats: asInt(opt('maxQueryStats', 'MDIAG_MAX_QUERY_STATS', 1000), 1000),
     maxTimeMS: asInt(opt('maxTimeMS', 'MDIAG_MAX_TIME_MS', 30000), 30000),
     hmacKey: opt('hmacKey', 'MDIAG_QUERYSTATS_HMAC_KEY', ''),
     wtDetails: asBool(opt('wtDetails', 'MDIAG_WT_DETAILS', false)),

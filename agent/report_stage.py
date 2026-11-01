@@ -126,7 +126,7 @@ def _load_metrics(store, layout, log_date: str, host_dir: str):
     try:
         payload = json.loads(store.get_text(key))
     except (TypeError, ValueError):
-        logger.warning("Metrics file unparsable node=%s; APPENDIX 2 and resource investigation skipped", host_dir)
+        logger.warning("Metrics file unparsable node=%s; APPENDIX 1 (metrics graphs) and resource investigation skipped", host_dir)
         return None
     return payload if metrics_present(payload) else None
 
@@ -134,7 +134,7 @@ def _load_metrics(store, layout, log_date: str, host_dir: str):
 def _metrics_appendix(payload: dict, host_dir: str) -> str | None:
     """Render the metrics as one A4 page embedded in the Markdown as a base64 PNG data URI.
 
-    Returns None when no selected group has data (APPENDIX 2 is then omitted). Rendering
+    Returns None when no selected group has data (APPENDIX 1 is then omitted). Rendering
     failures never fail the report: the appendix states why the graph is unavailable.
     """
     import base64
@@ -275,7 +275,7 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
             baselines = []
             user = assemble(_compact(short or current), current_file, [])
     if len(user) > max_chars:
-        # Raw index/query stats are unbounded; APPENDIX 1 still maps hashes from the stored file.
+        # Raw index/query stats are unbounded; APPENDIX 2 still maps hashes from the stored file.
         logger.warning("Report input node=%s still %d chars (limit %d); dropping raw index_stats/query_stats",
                        host_dir, len(user), max_chars)
         raw_docs["enabled"] = False
@@ -301,8 +301,13 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
             reduced = _load_extract(store, layout, log_date, host_dir, log_name, "extractionshort.json")[0] or current
         user = assemble(_compact(reduced, max_groups=groups), current_file, [])
     if len(user) > max_chars:
-        raise RuntimeError(f"Report input {len(user)} chars exceeds REPORT_MAX_INPUT_CHARS={max_chars} "
-                           f"after reduction; reduce inputs for {host_dir}")
+        # Bounded last resort: shrink every document (never truncate JSON) instead of failing the node.
+        from .report_budget import fit_prompt
+        user, budget = fit_prompt(user, max_chars)
+        current_file += " (budget-reduced)"
+        logger.warning("Report input node=%s reduced %d -> %d chars (limit %d) levels=%s dropped=%s "
+                       "largest_before=%s", host_dir, budget["before_chars"], budget["after_chars"],
+                       max_chars, budget.get("levels"), budget.get("dropped"), budget["sizes_before"][:4])
     logger.info("Report input node=%s chars=%d current_file=%s baselines=%s",
                 host_dir, len(user), current_file, [b[0] for b in baselines])
     report_md = llm.generate(system_prompt, user)
@@ -317,8 +322,8 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     report_md, removed_internal = _strip_internal_content(report_md)
     if removed_internal:
         logger.info("Removed %d internal-only content block(s) from node report", removed_internal)
-    # APPENDIX 2 only when metrics exist; added after the internal-content filter so the
-    # embedded base64 image is never altered.
+    # APPENDIX 1 (metrics graphs) only when metrics exist; inserted ahead of APPENDIX 2 (query forms),
+    # after the internal-content filter so the embedded base64 image is never altered.
     if metrics_payload is not None and config.get("metrics_graphs_enabled", True):
         from .report_shape_mapping import append_metrics_appendix
         metrics_md = _metrics_appendix(metrics_payload, host_dir)
@@ -535,7 +540,7 @@ _DATA_URI_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(data:image/[a-z+]+;base64,[A-Za
 
 
 def _without_embedded_images(markdown: str) -> str:
-    """Replace base64-embedded images (APPENDIX 2) by a placeholder before sending a report to a model."""
+    """Replace base64-embedded images (APPENDIX 1) by a placeholder before sending a report to a model."""
     return _DATA_URI_IMAGE_RE.sub(lambda m: f"[embedded image omitted: {m.group(1)[:120]}]", markdown)
 
 
