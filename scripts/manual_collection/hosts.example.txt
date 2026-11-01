@@ -1,4 +1,0 @@
-# one host:port per line
-node1.example.net:27017
-node2.example.net:27017
-node3.example.net:27017

@@ -163,7 +163,7 @@ The repository README describes the offline OSV refresh as an incomplete snapsho
 Accordingly, when a local catalog is available, the agent must:
 
 * Treat it as an offline, potentially stale and incomplete reference, not a live feed.
-* Include only reviewed entries and honor exact driver-name and version-matching rules documented by the local matcher.
+* Include only reviewed entries (unless the operator set `MONGODB_LOG_DIAG_OFFLINE_CVE_INCLUDE_UNREVIEWED=true`, in which case unreviewed matches are labelled `unreviewed_candidate`) and honor the driver-name mapping and OSV range rules of the local matcher (`introduced` inclusive, `fixed` exclusive, `last_affected` inclusive, `unfixed` open-ended, explicit `versions`).
 * Describe a match as a candidate requiring human validation; do not assert exploitability based only on a version match or observed application name.
 * Report relevant unsupported driver ecosystems and catalog coverage limits. Never imply that a zero-result lookup establishes safety.
 * Never refresh OSV data, rewrite the catalog, change review flags, or map operating-system package CVEs to driver versions.
@@ -331,6 +331,10 @@ The ADK orchestration layer uses its own model, set by `MONGODB_LOG_DIAG_ADK_MOD
 | `MONGODB_LOG_DIAG_TREND_MIN_ABS_INCREASE` | Trend section: minimum extra occurrences for an increase (new items are always listed) | `5` |
 | `MONGODB_LOG_DIAG_TREND_RATIO_THRESHOLD` | Trend section: docs examined/returned at or above which a query is poorly indexed | `100` |
 | `MONGODB_LOG_DIAG_CLUSTER_SUMMARY` | Generate the cluster-wide report | `true` |
+| `MONGODB_LOG_DIAG_CLUSTER_SUMMARY_SOURCE` | `extract`: `cluster-summary.md` from node reports + extract trend alerts + query-shape evidence; `node_reports`: `cluster-summary.from-node-reports.md` built only from the stored node `report.md` files; `both`: write both to compare. `--stage cluster-summary-md` builds only the node-report variant from existing reports | `extract` |
+| `MONGODB_LOG_DIAG_QUERY_STATS_SKIP_EXISTING` | Do not call Query Shape Insights for a node whose stored query-stats file already has rows | `true` |
+| `MONGODB_LOG_DIAG_QUERY_SHAPE_SPLIT_TO_NODES` | When every per-node QSI request fails or is empty, copy the one cluster-wide result into each node file, marked `scope: cluster` (the API returns no per-node attribution) | `true` |
+| `MONGODB_LOG_DIAG_OFFLINE_CVE_INCLUDE_UNREVIEWED` | Also report OSV catalog entries with `reviewed: false`, labelled `unreviewed_candidate` | `false` |
 
 ### 14.7 Gateway TLS (managed Agent Engine)
 

@@ -31,6 +31,7 @@ Defaults:
 <selected-storage>/<prefix>/<date>/<node>/extracts/<log>/...
 <selected-storage>/<prefix>/<date>/<node>/reports/<log>/report.md
 <selected-storage>/<prefix>/<date>/cluster/reports/cluster-summary.md
+<selected-storage>/<prefix>/<date>/cluster/reports/cluster-summary.from-node-reports.md   (CLUSTER_SUMMARY_SOURCE=node_reports|both)
 <selected-storage>/<prefix>/<date>/cluster/reports/manifest.json
 ```
 

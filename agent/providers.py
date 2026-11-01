@@ -72,9 +72,14 @@ _ENV_FIELDS.update({
     "advisor_appendix_enabled": "ADVISOR_APPENDIX_ENABLED",
     "trend_increase_pct": "TREND_INCREASE_PCT", "trend_min_abs_increase": "TREND_MIN_ABS_INCREASE",
     "trend_ratio_threshold": "TREND_RATIO_THRESHOLD",
+    "query_stats_skip_existing": "QUERY_STATS_SKIP_EXISTING",
+    "offline_cve_include_unreviewed": "OFFLINE_CVE_INCLUDE_UNREVIEWED",
+    "query_shape_split_to_nodes": "QUERY_SHAPE_SPLIT_TO_NODES",
+    "cluster_summary_source": "CLUSTER_SUMMARY_SOURCE",
 })
-_BOOL_FIELDS = {"cluster_summary", "observability_enabled", "index_stats_enabled", "profiler_enabled",
-                "metrics_graphs_enabled", "resource_investigation_enabled", "advisor_appendix_enabled"}
+_BOOL_FIELDS = {"cluster_summary", "offline_cve_include_unreviewed", "observability_enabled", "index_stats_enabled", "profiler_enabled",
+                "metrics_graphs_enabled", "resource_investigation_enabled", "advisor_appendix_enabled",
+                "query_stats_skip_existing", "query_shape_split_to_nodes"}
 _JSON_FIELDS = {"observability_sources": dict, "atlas_process_ids": dict, "ops_manager_host_ids": dict,
                 "query_plan_requests": list, "metrics_graph_groups": list, "metrics_graph_config": dict,
                 "resource_thresholds": dict}

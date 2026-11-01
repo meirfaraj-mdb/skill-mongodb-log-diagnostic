@@ -57,6 +57,10 @@ class Layout:
     def query_stats(self, log_date: str, host_dir: str) -> str:
         return f"{self.day(log_date)}/{host_dir}/queryStats/query-stats.json"
 
+    def cluster_query_stats(self, log_date: str) -> str:
+        """Cluster-wide Query Shape Insights (e.g. mongos-collected shapes of a sharded cluster)."""
+        return f"{self.day(log_date)}/cluster/queryStats/query-stats.json"
+
 
 def shift(log_date: str, days: int) -> str:
     return (date.fromisoformat(log_date) + timedelta(days=days)).isoformat()

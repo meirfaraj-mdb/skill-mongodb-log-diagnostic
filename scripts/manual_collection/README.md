@@ -74,3 +74,12 @@ python3 opsmanager_collect_observability.py --base-url https://opsmanager:8443 -
 - HTTPS only, the API host only (pagination can't follow links to another host), and retries with backoff on 429/5xx.
 - Each item fails on its own: the error is recorded in the file or receipt, and the exit code is `2` (partial). Data is never made up to fill a gap.
 - Review the folder before sharing. `jq` or `grep` on `?` and on your own sensitive field names is a quick check.
+
+## No-Python samples (curl / Windows batch)
+
+[`curl/`](curl/README.md) has one folder per feature, each with a very small `run.sh` (bash + curl) and `run.cmd` (Windows `curl.exe`):
+- Atlas: processes, logs, metrics, Performance Advisor, Query Shape Insights with the cluster-wide fallback, cluster advisor.
+- mongosh: `$queryStats`, `$indexStats`.
+- Ops Manager: metrics, advisor.
+
+[`curl/README.md`](curl/README.md) also lists the API-key roles and database privileges each feature needs.

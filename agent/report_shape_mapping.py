@@ -106,6 +106,14 @@ def _node_stats(stats_json):
     return mapping
 
 
+def _is_cluster_scope(stats_json) -> bool:
+    try:
+        data = json.loads(stats_json) if isinstance(stats_json, str) else stats_json
+    except (TypeError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("scope") == "cluster"
+
+
 def append_reported_shapes(report_md: str, extraction: dict, query_stats_json=None) -> str:
     """Only enumerate exact hashes already mentioned in the generated report.
 
@@ -129,6 +137,7 @@ def append_reported_shapes(report_md: str, extraction: dict, query_stats_json=No
             log_rows.append((hash_value.upper(), str(group.get("namespace") or "unknown"), group.get("sample_query_shape")))
     insight_rows = [(hash_value, form) for hash_value, form in _node_stats(query_stats_json).items()
                     if hash_value in mentioned]
+    scope_label = " (cluster-wide, not node-attributed)" if _is_cluster_scope(query_stats_json) else ""
     lines = [_HEADING, "",
              "Hashes are included only if cited in this node report and found in this node's supplied evidence. "
              "Log `query_hash` and Query Shape Insights `queryShapeHash` are different identifiers; "
@@ -150,7 +159,7 @@ def append_reported_shapes(report_md: str, extraction: dict, query_stats_json=No
             lines.extend(["Redacted structural form unavailable in the supplied extraction.", ""])
     for h, form in sorted(insight_rows)[:_MAX_ITEMS]:
         rendered = json.dumps(_structure(form), sort_keys=True, indent=2, ensure_ascii=False)
-        lines.extend([f"#### Query Shape Insights `queryShapeHash` `{h}`", ""])
+        lines.extend([f"#### Query Shape Insights `queryShapeHash` `{h}`{scope_label}", ""])
         lines.extend(["```json", rendered, "```", ""] if len(rendered) <= 6000 else
                      ["Redacted structural form exceeds the display limit.", ""])
     if log_rows and not insight_rows:

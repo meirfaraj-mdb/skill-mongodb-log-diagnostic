@@ -55,8 +55,66 @@ def _process_id(host: str, port: int | str | None) -> str:
     return f"{host}:{port or 27017}"
 
 
+QSI_EMPTY_REASONS = {
+    "no_shapes_in_cluster": "Query Shape Insights returned no shape for the whole cluster in this window: no "
+                            "sampled read (find/aggregate/distinct) was recorded. Possible causes: idle or low-traffic "
+                            "cluster, write-only workload (writes are not collected before MongoDB 9.0), cluster below "
+                            "M10 or MongoDB < 8.0, or a project-level opt-out of query statistics.",
+    "collected_on_mongos_only": "Sharded cluster: Query Shape Insights collects $queryStats on mongos only, so a "
+                                "shard or config-server mongod returns no shape. Cluster-wide shapes are stored once "
+                                "under cluster/queryStats/.",
+    "no_reads_on_this_process": "Other processes of the cluster have shapes but this one has none in the window: "
+                                "typically a secondary when the application reads from the primary only.",
+    "process_id_not_matched": "This process id returned nothing, but an alternative id of the same process "
+                              "(hostname:port / alias:port) returned shapes.",
+    "per_process_request_failed": "The per-process Query Shape Insights request failed (HTTP/API error) for every "
+                                  "id of this process; the cluster-wide result was used instead.",
+}
+# Summaries carry no processId: a cluster-wide response cannot be divided by node. On fallback,
+# every node file receives the same cluster-wide list, marked scope=cluster.
+CLUSTER_COPY_NOTE = ("Cluster-wide Query Shape Insights copied to this node because the per-process request "
+                     "returned no data. Summaries do not identify the process that ran them: do not attribute "
+                     "these shapes to this node.")
+_CLUSTER_WIDE_CACHE: dict = {}
+
+
+def _qsi_summaries(payload) -> list:
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("summaries") or payload.get("results") or []
+    return rows if isinstance(rows, list) else []
+
+
+def _qsi_get(config, params):
+    url = atlas_query_shape_url(config) + "?" + urlencode(params, doseq=True)
+    api_version = config.get("api_version", "2025-03-12")
+    request = Request(url, headers={
+        "Accept": f"application/vnd.atlas.{api_version}+json",
+        "User-Agent": "mongodb-log-diagnostic-observability/1.0",
+    })
+    with _atlas_opener(config).open(request, timeout=int(config.get("http_timeout_seconds", 120))) as response:
+        return json.load(response)
+
+
+def _alt_process_ids(process_id, process):
+    """Other ids Atlas may use for the same process: hostname:port and userAlias:port."""
+    port = None
+    if process_id and process_id.rsplit(":", 1)[-1].isdigit():
+        port = process_id.rsplit(":", 1)[-1]
+    process = process or {}
+    port = str(process.get("port") or port or 27017)
+    out = []
+    for host in (process.get("hostname"), process.get("userAlias"), process.get("user_alias")):
+        if host:
+            candidate = host if (host.rsplit(":", 1)[-1].isdigit() and host.count(":") == 1) else f"{host}:{port}"
+            if candidate != process_id and candidate not in out:
+                out.append(candidate)
+    return out
+
+
 def collect_query_shapes(config: dict, host: str | None = None, process_id: str | None = None,
-                         log_date: str | None = None, now: datetime | None = None) -> dict:
+                         log_date: str | None = None, now: datetime | None = None,
+                         process: dict | None = None) -> dict:
     """Fetch Atlas query-shape summaries for exactly one log day.
 
     The window is [local midnight, next local midnight) of ``log_date`` in the configured
@@ -67,6 +125,15 @@ def collect_query_shapes(config: dict, host: str | None = None, process_id: str 
 
     ``process_id`` is normally derived from Atlas process discovery by the caller.
     Omit it only when a cluster-wide snapshot is explicitly wanted.
+
+    Order: (1) per process, as before, then the other ids of the same process
+    (hostname:port / userAlias:port); (2) when every per-process attempt failed (HTTP/API
+    error) or returned no summary, ONE cluster-wide call per cluster/window (cached);
+    (3) the cluster-wide result is copied to this node's file with ``scope: "cluster"`` and an
+    ``attribution_note`` (``query_shape_split_to_nodes``, default true). Summaries carry no
+    processId, so the cluster-wide list cannot be divided by node. ``diagnostics.reason``
+    explains the fallback (see QSI_EMPTY_REASONS); ``cluster_wide`` is also returned so the
+    stage stores it once under cluster/queryStats/.
     """
     if not log_date:
         raise ValueError("log_date is required for Atlas query-shape collection")
@@ -78,36 +145,92 @@ def collect_query_shapes(config: dict, host: str | None = None, process_id: str 
     from agent.observability_contract import query_shape_window
     since, until, complete_day = query_shape_window(log_date, config.get("timezone") or "UTC", now)
     window_hours = round((until - since).total_seconds() / 3600, 2)
-    params: list[tuple[str, str]] = [
+    base_params: list[tuple[str, str]] = [
         ("since", str(int(since.timestamp() * 1000))),
         ("until", str(int(until.timestamp() * 1000))),
         ("nSummaries", str(min(max(int(config.get("query_stats_max_summaries", 100)), 1), 100))),
     ]
-    requested_process_id = process_id or config.get("atlas_process_ids", {}).get(host or "")
-    if requested_process_id:
-        params.append(("processIds", requested_process_id))
     for command in config.get("query_shape_commands", []):
-        params.append(("commands", str(command)))
-
-    url = atlas_query_shape_url(config) + "?" + urlencode(params, doseq=True)
-    api_version = config.get("api_version", "2025-03-12")
-    request = Request(url, headers={
-        "Accept": f"application/vnd.atlas.{api_version}+json",
-        "User-Agent": "mongodb-log-diagnostic-observability/1.0",
-    })
-    with _atlas_opener(config).open(request, timeout=int(config.get("http_timeout_seconds", 120))) as response:
-        payload = json.load(response)
-    return {
+        base_params.append(("commands", str(command)))
+    requested_process_id = process_id or config.get("atlas_process_ids", {}).get(host or "")
+    diagnostics = {"process_type": (process or {}).get("typeName") or (process or {}).get("type")}
+    if not requested_process_id:
+        payload = _qsi_get(config, base_params)
+        used_process_id, scope, cluster_wide = None, "cluster", None
+        diagnostics["per_process_summaries"] = None
+    else:
+        # 1) Per process, as before; then the other ids of the same process.
+        payload, used_process_id, errors, tried = None, requested_process_id, [], []
+        candidates = [requested_process_id]
+        if config.get("query_shape_empty_diagnostics", True):
+            candidates += _alt_process_ids(requested_process_id, process)
+        for candidate in candidates:
+            tried.append(candidate)
+            try:
+                attempt = _qsi_get(config, base_params + [("processIds", candidate)])
+            except Exception as exc:  # HTTP/API error: try the next id, then the cluster-wide call
+                errors.append({"processId": candidate, "error_type": type(exc).__name__,
+                               "status": getattr(exc, "code", None)})
+                continue
+            if payload is None or _qsi_summaries(attempt):
+                payload, used_process_id = attempt, candidate
+            if _qsi_summaries(attempt):
+                if candidate != requested_process_id:
+                    diagnostics["reason"] = "process_id_not_matched"
+                break
+        diagnostics.update(per_process_summaries=len(_qsi_summaries(payload)), process_ids_tried=tried)
+        if errors:
+            diagnostics["per_process_errors"] = errors
+        scope, cluster_wide = "process", None
+        fallback = config.get("query_shape_cluster_fallback", config.get("query_shape_empty_diagnostics", True))
+        if not _qsi_summaries(payload) and (fallback or payload is None):
+            # 2) Failed or empty per host: get all hosts once per cluster/window (cached).
+            cache_key = (config.get("group_id"), config.get("cluster_name"), base_params[0][1], base_params[1][1])
+            if cache_key not in _CLUSTER_WIDE_CACHE:
+                _CLUSTER_WIDE_CACHE[cache_key] = _qsi_get(config, base_params)
+            cluster_wide = _CLUSTER_WIDE_CACHE[cache_key]
+            count = len(_qsi_summaries(cluster_wide))
+            diagnostics["cluster_wide_summaries"] = count
+            ptype = str(diagnostics.get("process_type") or "")
+            if count == 0:
+                diagnostics["reason"] = "no_shapes_in_cluster"
+            elif payload is None:
+                diagnostics["reason"] = "per_process_request_failed"
+            elif ptype.startswith("SHARD_") and ptype != "SHARD_MONGOS":
+                diagnostics["reason"] = "collected_on_mongos_only"
+            else:
+                diagnostics["reason"] = "no_reads_on_this_process"
+            if payload is None or (count and config.get("query_shape_split_to_nodes", True)):
+                # 3) Copy ("split") the cluster-wide file to this node, clearly marked.
+                payload, scope, used_process_id = cluster_wide, "cluster", None
+                if count:
+                    diagnostics["fallback"] = "cluster_wide_copy"
+    if diagnostics.get("reason"):
+        diagnostics["explanation"] = QSI_EMPTY_REASONS[diagnostics["reason"]]
+    collection = payload.get("queryStatsCollection") if isinstance(payload, dict) else None
+    if isinstance(collection, dict):
+        diagnostics["collection_mode"] = collection.get("mode")
+    result = {
         "source": "atlas_query_shape_insights",
         "endpoint": atlas_query_shape_url(config),
         "host": host,
-        "processId": requested_process_id,
+        "processId": used_process_id,
+        "requestedProcessId": requested_process_id,
+        "scope": scope,
         "window": {"since": since.isoformat(), "until": until.isoformat(), "hours": window_hours,
                    "log_date": log_date, "timezone": config.get("timezone") or "UTC",
                    "complete_day": complete_day},
         "retrievedAt": datetime.now(timezone.utc).isoformat(),
         "data": payload,
+        "diagnostics": diagnostics,
     }
+    if scope == "cluster" and requested_process_id:
+        result["attribution_note"] = CLUSTER_COPY_NOTE
+    if cluster_wide is not None and _qsi_summaries(cluster_wide):
+        result["cluster_wide"] = {"source": "atlas_query_shape_insights", "scope": "cluster",
+                                  "endpoint": atlas_query_shape_url(config), "window": result["window"],
+                                  "retrievedAt": result["retrievedAt"], "data": cluster_wide}
+    return result
 
 
 # Collector v2: imports are from the bundled application, not external services.
@@ -299,11 +422,11 @@ def _api_window(config, log_date, now):
         "log_date": log_date, "timezone": config.get("timezone") or "UTC", "complete_day": complete_day}
 
 
-def collect_api(config, host, process_id, kind, source, log_date=None, now=None):
+def collect_api(config, host, process_id, kind, source, log_date=None, now=None, process=None):
     if kind == "query_stats":
         if source != "atlas_api":
             raise ValueError("Ops Manager query statistics API is unsupported")
-        result = collect_query_shapes(config, host, process_id, log_date=log_date, now=now)
+        result = collect_query_shapes(config, host, process_id, log_date=log_date, now=now, process=process)
         result["schema_version"] = 2
         result["temporal_basis"] = "log_day_window" if log_date else "requested_api_window"
         result["limitations"] = ["Log-day window bounded by the 7-day Query Shape Insights retention; "
@@ -494,8 +617,12 @@ def _collect_disk_measurements(config, base, window, source, names_wanted):
     return out, errors
 
 
-def collect(config, host, process_id, kind, source, log_date=None, now=None):
-    """Dispatch one artifact kind. ``log_date`` aligns API windows to the log day."""
+def collect(config, host, process_id, kind, source, log_date=None, now=None, process=None):
+    """Dispatch one artifact kind. ``log_date`` aligns API windows to the log day.
+
+    ``process`` (optional): Atlas process facts (typeName, hostname, userAlias, port) used to
+    explain and retry empty Query Shape Insights results.
+    """
     if source == "mongodb":
         return collect_mongodb(config, host, kind)
-    return collect_api(config, host, process_id, kind, source, log_date=log_date, now=now)
+    return collect_api(config, host, process_id, kind, source, log_date=log_date, now=now, process=process)

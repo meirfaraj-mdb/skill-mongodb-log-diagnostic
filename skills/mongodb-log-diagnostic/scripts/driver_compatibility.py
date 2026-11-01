@@ -115,8 +115,13 @@ def _connection_details(obj: dict[str, Any]) -> tuple[str | None, set[str], set[
     return remote, application_names, platforms
 
 
-def _driver_records(obj: dict[str, Any]) -> list[tuple[str, str | None]]:
-    found: list[tuple[str, str | None]] = []
+def _driver_records_raw(obj: dict[str, Any]) -> list[tuple[str, str | None, str]]:
+    """(canonical name, version, raw handshake name) for each driver in a client-metadata record.
+
+    The raw name keeps the parts after '|' (e.g. ``mongo-java-driver|kotlin``) and the
+    ' / '-joined PHP stack (``mongoc / ext-mongodb:PHP / PHPLIB``) for advisory matching.
+    """
+    found: list[tuple[str, str | None, str]] = []
     for mapping in _walk(obj):
         value = mapping.get("driver") or mapping.get("clientDriver")
         if isinstance(value, dict):
@@ -124,18 +129,26 @@ def _driver_records(obj: dict[str, Any]) -> list[tuple[str, str | None]]:
             parts = raw_name.split("|") if raw_name else []
             name = _canonical_driver(parts[0] if parts else raw_name)
             version = _version_part(value.get("version") or value.get("driverVersion")) or (_version_part(parts[1]) if len(parts) > 1 else None)
-            if name: found.append((name, version))
+            if name: found.append((name, version, raw_name or name))
         elif value is not None:
             parts = _text(value).split("|")
             name = _canonical_driver(parts[0])
             version = _version_part(mapping.get("version") or mapping.get("driverVersion")) or (_version_part(parts[1]) if len(parts) > 1 else None)
-            if name: found.append((name, version))
+            if name: found.append((name, version, _text(value) or name))
         else:
-            name = _canonical_driver(mapping.get("driverName") or mapping.get("clientDriverName"))
-            if name: found.append((name, _version_part(mapping.get("driverVersion") or mapping.get("clientDriverVersion") or mapping.get("version"))))
-    unique: OrderedDict[tuple[str, str | None], None] = OrderedDict()
+            raw_name = _text(mapping.get("driverName") or mapping.get("clientDriverName"))
+            name = _canonical_driver(raw_name)
+            if name: found.append((name, _version_part(mapping.get("driverVersion") or mapping.get("clientDriverVersion") or mapping.get("version")), raw_name or name))
+    unique: OrderedDict[tuple[str, str | None, str], None] = OrderedDict()
     for item in found:
         unique[item] = None
+    return list(unique)
+
+
+def _driver_records(obj: dict[str, Any]) -> list[tuple[str, str | None]]:
+    unique: OrderedDict[tuple[str, str | None], None] = OrderedDict()
+    for name, version, _raw in _driver_records_raw(obj):
+        unique[(name, version)] = None
     return list(unique)
 
 
@@ -185,7 +198,11 @@ class DriverCompatibilityAccumulator:
                     if self.mongodb_version:
                         break
         remote, application_names, platforms = _connection_details(obj)
-        driver_records = _driver_records(obj)
+        raw_records = _driver_records_raw(obj)
+        raw_names: dict[tuple[str, str | None], set[str]] = {}
+        for name, version, raw in raw_records:
+            raw_names.setdefault((name, version), set()).add(raw)
+        driver_records = list(OrderedDict(((n, v), None) for n, v, _ in raw_records))
         if driver_records:
             # Count source log records, not incompatible version groups.
             self.driver_log_count += 1
@@ -205,7 +222,9 @@ class DriverCompatibilityAccumulator:
                 "first_seen": event.get("timestamp"),
                 "last_seen": event.get("timestamp"),
                 "source_files": set(),
+                "raw_names": set(),
             })
+            item["raw_names"].update(raw_names.get((driver_name, raw_version), ()))
             item["occurrences"] += 1
             if remote:
                 item["ips"].add(remote)
@@ -267,6 +286,15 @@ class DriverCompatibilityAccumulator:
             "distinct_compatible_drivers": {
                 name: {version: details for version, details in sorted(versions.items())}
                 for name, versions in sorted(compatible_versions.items())
+            },
+            # Every application driver/version seen, independent of the compatibility matrix
+            # and of the server version (used by the offline CVE check).
+            "observed_drivers": {
+                name: {version: {"distinctAppNames": sorted(obs["application_names"]),
+                                 "rawNames": sorted(obs["raw_names"])[:5], "occurrences": obs["occurrences"]}
+                       for (n, version), obs in sorted(self.observations.items(), key=lambda i: str(i[0][1]))
+                       if n == name and version}
+                for name in sorted({k[0] for k in self.observations})
             },
             "observed_application_connections": self.observed_application,
             "excluded_internal_connections": self.excluded_internal,

@@ -53,13 +53,21 @@ def build_system_prompt() -> str:
         "observed from plausible customer impact. A customer namespace alone does not prove client "
         "ownership. Index recommendations require query-shape metrics plus explain/index inventory; "
         "change streams and natural scans do not establish missing indexes.",
+        "Query Shape Insights rule: when a query_shape_insights_status document is supplied, this node has no "
+        "per-node Query Shape Insights shape for the day. State its explanation in one sentence (e.g. sharded "
+        "cluster: shapes are collected on mongos, not on shard mongods) and do not present the absence of "
+        "shapes as evidence that queries are healthy or that no index is needed. If it has scope 'cluster', "
+        "the query_stats document holds the CLUSTER-WIDE list copied to this node: you may cite those shapes "
+        "as cluster-wide workload, but never claim they ran on this node.",
         "You are running inside an automated pipeline. Follow the MongoDB Log Diagnostic skill exactly.",
         "Adapter note: the analysis prompt refers to `/home/user/extraction.json`; extraction files are "
         "supplied inline in labelled <document> tags. `current` is extractionOccurence.json; `n-1` and "
         "`n-8` are extractionshort.json baselines. Use exact numbers from `precomputed_diff`. "
         "You have no web access. Use only reviewed offline_driver_cves matches as version-range review "
         "candidates with unverified application exposure; include catalog refreshed_at. If status is "
-        "no_match_in_snapshot say so without claiming safety. Never invent CVEs. Output only Markdown.",
+        "no_match_in_snapshot say so without claiming safety. A match with review_status "
+        "unreviewed_candidate comes from an automated OSV import nobody has vetted: label it "
+        "'unreviewed candidate' and never present it as confirmed. Never invent CVEs. Output only Markdown.",
         "=== references/analysis-prompt.md ===\n" + _read_skill_text("references/analysis-prompt.md"),
         "=== references/extracted-signal-reference.md ===\n" + _read_skill_text("references/extracted-signal-reference.md"),
         "=== references/analysis-prompt.offline-cve-overlay.md ===\n" + _read_skill_text("references/analysis-prompt.offline-cve-overlay.md"),
@@ -253,7 +261,9 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     logger.info("Report input limit node=%s max_chars=%d (%s)", host_dir, max_chars,
                 "configured" if max_chars == configured_max else
                 "default with resource investigation" if analysis is not None else "default")
-    offline_cves = offline_cve.check(current)
+    # Opt-in only; when unset, offline_cve falls back to MONGODB_LOG_DIAG_OFFLINE_CVE_INCLUDE_UNREVIEWED.
+    cve_options = {"include_unreviewed": True} if config.get("offline_cve_include_unreviewed") else {}
+    offline_cves = offline_cve.check(current, **cve_options)
     baselines, diffs = [], []
     for label, offset, desc in BASELINES:
         bdate = shift(log_date, offset)
@@ -287,6 +297,17 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
                            ("query_stats", layout.query_stats(log_date, host_dir))):
             if raw_docs["enabled"] and store.exists(key):
                 docs.append(_doc(label, {"node": host_dir}, store.get_text(key)))
+        qs_key = layout.query_stats(log_date, host_dir)
+        if store.exists(qs_key):
+            try:
+                qs_data = json.loads(store.get_text(qs_key))
+                if not _rank_shapes(qs_data) or (isinstance(qs_data, dict) and qs_data.get("scope") == "cluster"):
+                    status = query_stats_status(qs_data) or {
+                        "explanation": "Query Shape Insights returned no shape for this node in the log-day window."}
+                    docs.append(_doc("query_shape_insights_status", {"node": host_dir},
+                                     json.dumps(status, separators=(",", ":"))))
+            except (ValueError, TypeError):
+                pass
         header = (f"Generate the MongoDB Log Diagnostic report for node `{host_dir}` ({log_name} log), "
                   f"log day {log_date} (Atlas project timezone day). Baselines supplied: "
                   f"{', '.join(d['label'] for d in diffs) or 'none -- omit historical-comparison claims'}.")
@@ -466,8 +487,38 @@ def _metric_number(value):
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
 
 
+def _rank_shapes(data):
+    shapes = [_shape(r) for r in _shape_records(data)]
+    shapes = [s for s in shapes if s]
+    shapes.sort(key=lambda s: (_metric_number(s.get("docsExaminedRatio")),
+                               _metric_number(s.get("avgWorkingMillis")),
+                               _metric_number(s.get("execCount"))), reverse=True)
+    return shapes
+
+
+def query_stats_status(data) -> dict:
+    """Compact, deterministic explanation of an empty Query Shape Insights file."""
+    if not isinstance(data, dict):
+        return {}
+    diagnostics = data.get("diagnostics") if isinstance(data.get("diagnostics"), dict) else {}
+    payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+    collection = payload.get("queryStatsCollection") if isinstance(payload.get("queryStatsCollection"), dict) else {}
+    out = {k: diagnostics[k] for k in ("reason", "explanation", "per_process_summaries", "cluster_wide_summaries",
+                                         "process_type", "fallback") if diagnostics.get(k) is not None}
+    if data.get("scope") == "cluster":
+        out["scope"] = "cluster"
+        out["attribution_note"] = data.get("attribution_note") or (
+            "Cluster-wide Query Shape Insights: not attributable to a single node.")
+    if collection:
+        out["collection_mode"] = collection.get("mode")
+        if collection.get("rateLimitPerSecond") is not None:
+            out["rate_limit_per_second"] = collection["rateLimitPerSecond"]
+    return out
+
+
 def summarize_query_stats(store, layout, log_date, nodes, limit=15):
     output = []
+    cluster_copy = None
     for host in sorted({host for host, _ in nodes}):
         key = layout.query_stats(log_date, host)
         index_available = store.exists(layout.index_stats(log_date, host))
@@ -476,16 +527,40 @@ def summarize_query_stats(store, layout, log_date, nodes, limit=15):
             continue
         try:
             data = json.loads(store.get_text(key))
-            shapes = [_shape(r) for r in _shape_records(data)]
-            shapes = [s for s in shapes if s]
-            shapes.sort(key=lambda s: (_metric_number(s.get("docsExaminedRatio")),
-                                       _metric_number(s.get("avgWorkingMillis")),
-                                       _metric_number(s.get("execCount"))), reverse=True)
-            output.append({"node": host, "status": "available", "index_stats_available": index_available,
-                           "shapes_found": len(shapes), "top_shapes": shapes[:limit]})
+            shapes = _rank_shapes(data)
+            if isinstance(data, dict) and data.get("scope") == "cluster":
+                # Same cluster-wide list copied to every node: listed once under node "cluster".
+                item = {"node": host, "status": "cluster_wide_copy", "index_stats_available": index_available,
+                        "shapes_found": len(shapes), **query_stats_status(data)}
+                if cluster_copy is None and shapes:
+                    cluster_copy = shapes
+            else:
+                item = {"node": host, "status": "available" if shapes else "empty",
+                        "index_stats_available": index_available,
+                        "shapes_found": len(shapes), "top_shapes": shapes[:limit]}
+                if not shapes:
+                    item.update(query_stats_status(data))
+            output.append(item)
         except (ValueError, TypeError) as exc:
             output.append({"node": host, "status": "invalid_query_stats",
                            "index_stats_available": index_available, "error_type": type(exc).__name__})
+    cluster_key = getattr(layout, "cluster_query_stats", None)
+    cluster_key = cluster_key(log_date) if cluster_key else None
+    if cluster_key and store.exists(cluster_key):
+        try:
+            shapes = _rank_shapes(json.loads(store.get_text(cluster_key)))
+            output.append({"node": "cluster", "scope": "cluster", "status": "available" if shapes else "empty",
+                           "note": "Cluster-wide Query Shape Insights (on sharded clusters collected on mongos); "
+                                   "not attributable to a single shard node.",
+                           "shapes_found": len(shapes), "top_shapes": shapes[:limit]})
+        except (ValueError, TypeError) as exc:
+            output.append({"node": "cluster", "scope": "cluster", "status": "invalid_query_stats",
+                           "error_type": type(exc).__name__})
+    elif cluster_copy:
+        output.append({"node": "cluster", "scope": "cluster", "status": "available",
+                       "note": "Cluster-wide Query Shape Insights (copied to the node files); "
+                               "not attributable to a single node.",
+                       "shapes_found": len(cluster_copy), "top_shapes": cluster_copy[:limit]})
     return output
 
 
@@ -625,7 +700,10 @@ CLUSTER_PROMPT = (
     "inconclusive, say 'No index gap verified from available evidence' and say what to collect. "
     "Use only supplied node reports and bounded query evidence; do not invent metrics or CVEs. "
     "Do not instruct customers to change vendor-managed platform components. State n-1/n-8 trends only if "
-    "present. Do not fill a quota of actions. Never expose credentials, IPs or query literals."
+    "present. Do not fill a quota of actions. Never expose credentials, IPs or query literals. "
+    "Query-shape evidence with status 'empty' is not proof of a healthy workload: state its reason/explanation "
+    "in one sentence. An item with scope 'cluster' holds cluster-wide (mongos) shapes; use it for query-shape "
+    "conclusions without attributing those shapes to a specific shard node."
 )
 
 TREND_INSTRUCTIONS = (
@@ -637,6 +715,68 @@ TREND_INSTRUCTIONS = (
     "summary and the priorities with their exact numbers; call them changes versus the baselines, not "
     "proven causes, and keep index wording as candidates to validate."
 )
+
+
+CLUSTER_SUMMARY_SOURCES = ("extract", "node_reports", "both")
+NODE_REPORTS_SUMMARY_FILE = "cluster-summary.from-node-reports.md"
+
+NODE_REPORTS_ONLY_INSTRUCTIONS = (
+    "SOURCE RESTRICTION: this summary is built ONLY from the per-node report Markdown files below "
+    "(each already analysed its extract, n-1/n-8 baselines, query statistics and metrics). No raw "
+    "extraction, trend table or separate query-shape evidence is supplied. Consolidate across nodes: "
+    "merge findings that appear on several nodes into one cluster-level item and list the nodes, keep "
+    "node-specific findings attributed to their node, and resolve or flag contradictions between "
+    "reports. Copy numbers exactly as the node reports state them; never recompute, add up or "
+    "extrapolate. Mention n-1/n-8 changes only where a node report states them. Do not "
+    "repeat appendices; refer to them by node."
+)
+
+
+def _cluster_summary_source(config: dict) -> str:
+    value = str(config.get("cluster_summary_source") or "extract").strip().lower().replace("-", "_")
+    if value not in CLUSTER_SUMMARY_SOURCES:
+        logger.warning("Unknown cluster_summary_source=%r; using 'extract'", value)
+        return "extract"
+    return value
+
+
+def _finish_cluster_summary(llm, system: str, user: str, trend_md: str | None = None) -> str:
+    """Shared generation, executive-summary retry and customer-safety validation."""
+    from . import trend_alerts
+    summary = llm.generate(system, user)
+    if not re.search(r"(?im)^#{1,2}\s*Executive summary\b", summary[:1200]):
+        summary = llm.generate(
+            system + " REQUIRE the heading ## Executive summary at the top. "
+            "Keep all conclusions grounded in the same supplied evidence.", user)
+    if not re.search(r"(?im)^#{1,2}\s*Executive summary\b", summary[:1200]):
+        raise ValueError("Cluster summary omitted its required executive summary")
+    if trend_md:
+        summary = trend_alerts.place_section(summary, trend_md)
+    summary, removed_internal = _strip_internal_content(summary)
+    if removed_internal:
+        logger.info("Removed %d internal-only content block(s) from cluster summary", removed_internal)
+    _validate_customer_summary(summary)
+    return summary
+
+
+def cluster_summary_from_node_reports(store, layout, llm, config: dict, log_date: str, results) -> str:
+    """Alternative cluster summary whose only input is the stored node report.md files.
+
+    Written next to cluster-summary.md so both versions can be compared; no extract, trend or
+    query-stats file is read.
+    """
+    body = "\n\n".join(_doc("node_report", {"node": r["node"], "log": r["log_name"]},
+                            _without_embedded_images(r["report_md"])) for r in results)
+    user = (f"Cluster `{config['cluster_name']}`, day {log_date}. Inputs: {len(results)} node reports "
+            "(no extracts).\n\n" + body)
+    summary = _finish_cluster_summary(llm, CLUSTER_PROMPT + " " + NODE_REPORTS_ONLY_INSTRUCTIONS, user)
+    header = (f"<!-- cluster summary variant: node_reports (built only from {len(results)} node report.md "
+              "files; compare with cluster-summary.md, which also uses extract-based trend alerts and "
+              "query-shape evidence) -->\n")
+    uri = store.put_text(layout.cluster_report(log_date, NODE_REPORTS_SUMMARY_FILE),
+                         header + summary, "text/markdown; charset=utf-8")
+    logger.info("Cluster summary (node_reports) nodes=%d chars=%d uri=%s", len(results), len(summary), uri)
+    return uri
 
 
 def _trend_alerts(store, layout, log_date: str, nodes, config) -> dict | None:
@@ -737,8 +877,10 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
                     results.append(write_fallback_report(store, layout, log_date, host, name, error, config))
                 except Exception:
                     logger.exception("Fallback report failed for %s/%s", host, name)
-    cluster_uri, trend_uri = None, None
-    if results and config.get("cluster_summary", True) and len(results) > 1:
+    cluster_uri, trend_uri, node_reports_uri = None, None, None
+    source = _cluster_summary_source(config)
+    want_summary = bool(results) and config.get("cluster_summary", True) and len(results) > 1
+    if want_summary and source in ("extract", "both"):
         evidence = summarize_query_stats(store, layout, log_date, nodes)
         logger.info("Cluster summary inputs nodes=%d query_stats=%s summary_only=%s",
                     len(nodes), [(x["node"], x["status"], x.get("shapes_found")) for x in evidence],
@@ -765,21 +907,16 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
             user += "\n\n" + _doc("trend_alerts", {"date": log_date, "baselines": "n-1,n-8"},
                                   json.dumps(trend_alerts.model_view(alerts), default=str))
         user += "\n\n" + body
-        summary = llm.generate(system, user)
-        if not re.search(r"(?im)^#{1,2}\s*Executive summary\b", summary[:1200]):
-            summary = llm.generate(
-                system + " REQUIRE the heading ## Executive summary at the top. "
-                "Keep all conclusions grounded in the same supplied evidence.", user)
-        if not re.search(r"(?im)^#{1,2}\s*Executive summary\b", summary[:1200]):
-            raise ValueError("Cluster summary omitted its required executive summary")
-        if trend_md:
-            summary = trend_alerts.place_section(summary, trend_md)
-        summary, removed_internal = _strip_internal_content(summary)
-        if removed_internal:
-            logger.info("Removed %d internal-only content block(s) from cluster summary", removed_internal)
-        _validate_customer_summary(summary)
+        summary = _finish_cluster_summary(llm, system, user, trend_md)
         cluster_uri = store.put_text(layout.cluster_report(log_date, "cluster-summary.md"),
                                      summary, "text/markdown; charset=utf-8")
+    if want_summary and source in ("node_reports", "both"):
+        try:
+            node_reports_uri = cluster_summary_from_node_reports(store, layout, llm, config, log_date, results)
+        except Exception as exc:
+            if source == "node_reports":
+                raise
+            logger.warning("Node-report cluster summary failed error_type=%s", type(exc).__name__)
     catalog = offline_cve.load_catalog()
     manifest = {
         "cluster": config["cluster_name"], "log_date": log_date, "cloud": config.get("cloud"),
@@ -791,12 +928,13 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "node_count": len(nodes), "expected_node_count": expected,
         "reports": [{k: v for k, v in r.items() if k != "report_md"} for r in results],
-        "cluster_summary": cluster_uri, "failed": failed,
+        "cluster_summary": cluster_uri, "cluster_summary_source": source,
+        "cluster_summary_from_node_reports": node_reports_uri, "failed": failed,
         "trend_alerts": trend_uri,
     }
     store.put_text(layout.cluster_report(log_date, "manifest.json"),
                    json.dumps(manifest, indent=2), "application/json")
-    if summary_only and not cluster_uri:
+    if summary_only and not (cluster_uri or node_reports_uri):
         raise RuntimeError("Cluster summary generation disabled or failed")
     if not results:
         raise RuntimeError(json.dumps(manifest))

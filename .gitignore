@@ -1,3 +1,4 @@
 .DS_Store
 *.pyc
 /scripts/data
+skills/mongodb-log-diagnostic/references/offline-driver-cves.json.bak
