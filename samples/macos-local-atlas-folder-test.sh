@@ -26,7 +26,7 @@ python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || die "python3 >= 
 # environment (e.g. INDEX_STATS_ENABLED=yes would break every stage's config load).
 unset MONGODB_LOG_DIAG_OBSERVABILITY_ENABLED MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE \
   MONGODB_LOG_DIAG_QUERY_SHAPE_WINDOW_HOURS MONGODB_LOG_DIAG_INDEX_STATS_ENABLED \
-  MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE
+  MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE MONGODB_LOG_DIAG_CLUSTER_SUMMARY_SOURCE
 
 source "$PROJECT_ROOT/samples/local-atlas-storage.sh"
 # Prompt to restore missing skill files from the repository before collecting credentials.
@@ -48,6 +48,47 @@ for f in skills/mongodb-atlas-logs/scripts/atlas_logs.py \
   [[ -f "$f" ]] || die "Missing vendored skill file: $f (run samples/restore-vendored-skills.sh)"
 done
 
+# Extra choices remembered by this runner (log date, Atlas public key, cluster-summary variant).
+# Kept in a separate 0600 JSON file so the shared ~/.localsample format is untouched.
+# The Atlas private key and the Anthropic API key are never written.
+FOLDER_TEST_SAVED="${FOLDER_TEST_SAVED:-$HOME/.localsample.atlas-folder.json}"
+saved_value() {  # saved_value KEY -> prints the remembered value or nothing
+  [[ -f "$FOLDER_TEST_SAVED" ]] || return 0
+  python3 - "$FOLDER_TEST_SAVED" "$1" <<'PYSAVED' 2>/dev/null || true
+import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8")).get(sys.argv[2], "")
+    print(value if isinstance(value, str) else "")
+except Exception:
+    pass
+PYSAVED
+}
+save_folder_test_choices() {  # values go through the environment, not the command line
+  SAVE_LOG_DATE="$LOG_DATE" SAVE_PUBLIC_KEY="$SAVED_PUBLIC_KEY" SAVE_SUMMARY="${CLUSTER_SUMMARY_SOURCE:-}" \
+    python3 - "$FOLDER_TEST_SAVED" <<'PYSAVE' || printf 'warning: could not save choices to %s\n' "$FOLDER_TEST_SAVED" >&2
+import json, os, sys
+path = sys.argv[1]
+try:
+    data = json.load(open(path, encoding="utf-8"))
+except Exception:
+    data = {}
+if not isinstance(data, dict):
+    data = {}
+data["log_date"] = os.environ["SAVE_LOG_DATE"]          # as typed: blank = yesterday, N = last N days
+data["atlas_public_key"] = os.environ["SAVE_PUBLIC_KEY"]
+if os.environ["SAVE_SUMMARY"]:
+    data["cluster_summary_source"] = os.environ["SAVE_SUMMARY"]
+data.pop("atlas_private_key", None)                     # never remembered
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, indent=2)
+    handle.write("\n")
+os.replace(tmp, path)
+os.chmod(path, 0o600)
+PYSAVE
+}
+
 choose_atlas_storage
 case "$STORAGE_PROVIDER" in
   s3) storage_module=skills/aws-storage/scripts/aws_storage.py ;;
@@ -62,7 +103,10 @@ if [[ -n "$storage_module" && ! -f "$storage_module" ]]; then
   fi
   [[ -f "$storage_module" ]] || die "Missing vendored storage file: $storage_module"
 fi
-prompt LOG_DATE "Log date (YYYY-MM-DD, or number of days ending yesterday; blank means yesterday)" ""
+prompt LOG_DATE "Log date (YYYY-MM-DD, number of days ending yesterday, or 'yesterday')" "$(saved_value log_date)"
+case "$(printf '%s' "$LOG_DATE" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+  yesterday|y) LOG_DATE="" ;;   # back to yesterday when a fixed date was remembered
+esac
 prompt TIMEZONE "Timezone used for yesterday" "Asia/Jerusalem"
 # Plan all dates once in the selected timezone, oldest first. 1 means yesterday.
 if ! DATE_PLAN="$(LOG_DATE_INPUT="$LOG_DATE" LOG_TIMEZONE="$TIMEZONE" python3 - <<'PYDATES'
@@ -104,7 +148,8 @@ fi
 note "Atlas API configuration"
 prompt CLUSTER_NAME "Atlas cluster name" ""
 prompt GROUP_ID "Atlas project (group) ID" ""
-prompt ATLAS_PUBLIC_KEY "Atlas API public key" ""
+prompt ATLAS_PUBLIC_KEY "Atlas API public key" "$(saved_value atlas_public_key)"
+SAVED_PUBLIC_KEY="$ATLAS_PUBLIC_KEY"   # remembered; the private key below is not
 read -r -s -p "Atlas API private key (input hidden): " ATLAS_PRIVATE_KEY; printf '\n'
 [[ -n "$CLUSTER_NAME" && -n "$GROUP_ID" && -n "$ATLAS_PUBLIC_KEY" && -n "$ATLAS_PRIVATE_KEY" ]] || die "Atlas values are required."
 prompt LOG_NAMES "Log names (comma-separated: auto,mongodb,mongos)" "auto"
@@ -170,10 +215,23 @@ case "$REPORT_PROVIDER" in
     fi
     ;;
 esac
+CLUSTER_SUMMARY_SOURCE=""
+if [[ "$REPORT_PROVIDER" != none ]]; then
+  note "Cluster summary (built when the day has at least 2 node reports)"
+  printf '  extract      - cluster-summary.md (node reports + trend alerts + query shapes)\n'
+  printf '  node_reports - cluster-summary.from-node-reports.md (node reports only)\n'
+  printf '  both         - write both files to compare\n'
+  summary_default="$(saved_value cluster_summary_source)"
+  prompt CLUSTER_SUMMARY_SOURCE "Cluster summary (extract/node_reports/both)" "${summary_default:-extract}"
+  CLUSTER_SUMMARY_SOURCE=$(printf '%s' "$CLUSTER_SUMMARY_SOURCE" | tr '[:upper:]-' '[:lower:]_' | tr -d '[:space:]')
+  [[ "$CLUSTER_SUMMARY_SOURCE" == extract || "$CLUSTER_SUMMARY_SOURCE" == node_reports || "$CLUSTER_SUMMARY_SOURCE" == both ]] \
+    || die "Choose extract, node_reports, or both."
+fi
 
 # Persist selections before installing dependencies or checking S3/GCS access.
 # Failed cloud authentication must not discard a newly selected S3 bucket.
 save_atlas_sample_defaults
+save_folder_test_choices
 
 note "Creating Python environment"
 python3 -m venv .venv-local-atlas-folder
@@ -246,6 +304,7 @@ if [[ -n "${STORAGE_AWS_REGION:-}" ]]; then export MONGODB_LOG_DIAG_AWS_REGION="
 if [[ -n "${STORAGE_GCP_PROJECT:-}" ]]; then export MONGODB_LOG_DIAG_GCP_PROJECT="$STORAGE_GCP_PROJECT"; fi
 if [[ "$REPORT_PROVIDER" != none ]]; then
   export MONGODB_LOG_DIAG_LLM_PROVIDER="$REPORT_PROVIDER"
+  export MONGODB_LOG_DIAG_CLUSTER_SUMMARY_SOURCE="$CLUSTER_SUMMARY_SOURCE"
   case "$REPORT_PROVIDER" in
     bedrock)
       export MONGODB_LOG_DIAG_BEDROCK_REGION="$BEDROCK_REGION"
@@ -261,7 +320,7 @@ if [[ "$REPORT_PROVIDER" != none ]]; then
       ;;
   esac
 else
-  unset MONGODB_LOG_DIAG_LLM_PROVIDER
+  unset MONGODB_LOG_DIAG_LLM_PROVIDER MONGODB_LOG_DIAG_CLUSTER_SUMMARY_SOURCE
 fi
 
 # Fail before any network operation if the generated secret is not keys-only.
@@ -338,6 +397,11 @@ done
 if [[ "$REPORT_PROVIDER" != none ]]; then
   note "Generating $REPORT_PROVIDER reports into the selected bucket"
   python -m agent.handler --stage report --log-date "$REPORT_DATE"
+  case "$CLUSTER_SUMMARY_SOURCE" in
+    extract) note "Cluster summary: cluster/reports/cluster-summary.md" ;;
+    node_reports) note "Cluster summary: cluster/reports/cluster-summary.from-node-reports.md" ;;
+    both) note "Cluster summaries: cluster/reports/cluster-summary.md and cluster-summary.from-node-reports.md" ;;
+  esac
 fi
 show_atlas_storage_outputs "$REPORT_DATE"
 printf '\nTemporary keys-only credential file will be removed on exit.\n'
