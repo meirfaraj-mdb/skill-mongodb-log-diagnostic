@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# macOS: Atlas API -> local folder / S3 / GCS -> extraction -> optional reports.
+# macOS: Atlas API -> local folder / S3 / GCS -> extraction -> optional reports
+#        -> optional P0 Jira / P1 Slack notifications (each: off | json | create/send).
 set -euo pipefail
 umask 077  # credential file contains Atlas API keys
 
@@ -27,6 +28,15 @@ python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || die "python3 >= 
 unset MONGODB_LOG_DIAG_OBSERVABILITY_ENABLED MONGODB_LOG_DIAG_QUERY_SHAPE_SOURCE \
   MONGODB_LOG_DIAG_QUERY_SHAPE_WINDOW_HOURS MONGODB_LOG_DIAG_INDEX_STATS_ENABLED \
   MONGODB_LOG_DIAG_MONGODB_URI_TEMPLATE MONGODB_LOG_DIAG_CLUSTER_SUMMARY_SOURCE
+# Same for notification settings and credentials (a stale JIRA_MODE=create must never leak in).
+for _var in $(compgen -e); do
+  case "$_var" in
+    MONGODB_LOG_DIAG_ENVIRONMENT|MONGODB_LOG_DIAG_JIRA_*|MONGODB_LOG_DIAG_SLACK_*|MONGODB_LOG_DIAG_NOTIFY_*|\
+    NOTIFICATION_SECRET_ID|NOTIFICATION_CONFIG_FILE) unset "$_var" ;;
+  esac
+done
+unset _var
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]'; }
 
 source "$PROJECT_ROOT/samples/local-atlas-storage.sh"
 # Prompt to restore missing skill files from the repository before collecting credentials.
@@ -48,10 +58,17 @@ for f in skills/mongodb-atlas-logs/scripts/atlas_logs.py \
   [[ -f "$f" ]] || die "Missing vendored skill file: $f (run samples/restore-vendored-skills.sh)"
 done
 
-# Extra choices remembered by this runner (log date, Atlas public key, cluster-summary variant).
-# Kept in a separate 0600 JSON file so the shared ~/.localsample format is untouched.
-# The Atlas private key and the Anthropic API key are never written.
+# Extra choices remembered by this runner (log date, Atlas public key, cluster-summary variant,
+# non-secret notification settings). Kept in a separate 0600 JSON file so the shared
+# ~/.localsample format is untouched. The Atlas private key, the Anthropic API key, and the
+# Jira/Slack tokens and webhook URL are never written.
 FOLDER_TEST_SAVED="${FOLDER_TEST_SAVED:-$HOME/.localsample.atlas-folder.json}"
+saved_or() { local v; v="$(saved_value "$1")"; printf '%s' "${v:-$2}"; }  # saved_or KEY DEFAULT
+# Non-secret notification answers remembered as notify_<name lower-case>.
+NOTIFY_SAVED_KEYS=(ENABLE_NOTIFICATIONS NOTIFY_ENVIRONMENT JIRA_MODE JIRA_PROJECT_KEY JIRA_ISSUE_TYPE
+  JIRA_PRIORITIES JIRA_DEPLOYMENT JIRA_ASSIGNEE JIRA_LABELS JIRA_COMPONENTS JIRA_PARENT_KEY JIRA_BASE_URL
+  JIRA_DEDUPE_SCOPE JIRA_EMAIL SLACK_MODE SLACK_PRIORITIES SLACK_MENTIONS SLACK_REPEAT_AFTER_DAYS
+  SLACK_SEND_VIA SLACK_CHANNEL)
 saved_value() {  # saved_value KEY -> prints the remembered value or nothing
   [[ -f "$FOLDER_TEST_SAVED" ]] || return 0
   python3 - "$FOLDER_TEST_SAVED" "$1" <<'PYSAVED' 2>/dev/null || true
@@ -64,6 +81,9 @@ except Exception:
 PYSAVED
 }
 save_folder_test_choices() {  # values go through the environment, not the command line
+  local notify_env=() key
+  for key in "${NOTIFY_SAVED_KEYS[@]}"; do notify_env+=("SAVE_NOTIFY_$key=${!key:-}"); done
+  env "${notify_env[@]}" \
   SAVE_LOG_DATE="$LOG_DATE" SAVE_PUBLIC_KEY="$SAVED_PUBLIC_KEY" SAVE_SUMMARY="${CLUSTER_SUMMARY_SOURCE:-}" \
     python3 - "$FOLDER_TEST_SAVED" <<'PYSAVE' || printf 'warning: could not save choices to %s\n' "$FOLDER_TEST_SAVED" >&2
 import json, os, sys
@@ -78,7 +98,13 @@ data["log_date"] = os.environ["SAVE_LOG_DATE"]          # as typed: blank = yest
 data["atlas_public_key"] = os.environ["SAVE_PUBLIC_KEY"]
 if os.environ["SAVE_SUMMARY"]:
     data["cluster_summary_source"] = os.environ["SAVE_SUMMARY"]
-data.pop("atlas_private_key", None)                     # never remembered
+if os.environ.get("SAVE_NOTIFY_ENABLE_NOTIFICATIONS"):
+    for name, value in os.environ.items():
+        if name.startswith("SAVE_NOTIFY_"):
+            data["notify_" + name[len("SAVE_NOTIFY_"):].lower()] = value
+for secret in ("atlas_private_key", "notify_jira_api_token", "notify_jira_pat",
+               "notify_slack_webhook_url", "notify_slack_bot_token"):
+    data.pop(secret, None)                              # never remembered
 tmp = path + ".tmp"
 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -228,6 +254,117 @@ if [[ "$REPORT_PROVIDER" != none ]]; then
     || die "Choose extract, node_reports, or both."
 fi
 
+# --------------------------------------------------------------------------- notifications
+# P0 -> Jira and P1 -> Slack, built from cluster/reports/ (cluster summary; node reports as fallback).
+# Modes: off = nothing (default) | json = write jira-issues.json / slack-messages.json only |
+#        create (Jira) / send (Slack) = real ticket / real message. Tokens are asked hidden,
+#        written to a temporary 0600 file for this run only, and never remembered.
+ENABLE_NOTIFICATIONS=no; NOTIFY_ENVIRONMENT=""; JIRA_MODE=off; SLACK_MODE=off
+JIRA_PROJECT_KEY=""; JIRA_ISSUE_TYPE=""; JIRA_PRIORITIES=""; JIRA_DEPLOYMENT=""; JIRA_ASSIGNEE=""
+JIRA_LABELS=""; JIRA_COMPONENTS=""; JIRA_PARENT_KEY=""; JIRA_BASE_URL=""; JIRA_DEDUPE_SCOPE=""; JIRA_EMAIL=""
+SLACK_PRIORITIES=""; SLACK_MENTIONS=""; SLACK_REPEAT_AFTER_DAYS=""; SLACK_SEND_VIA=""; SLACK_CHANNEL=""
+JIRA_API_TOKEN=""; JIRA_PAT=""; SLACK_WEBHOOK_URL=""; SLACK_BOT_TOKEN=""
+confirm_real() {  # confirm_real WHAT -> 0 when the user confirms a real external action
+  local answer; read -r -p "$1 Continue with real calls? (yes/no) [no]: " answer
+  answer="${answer:-no}"; yes_no answer "Confirm"; [[ "$answer" == yes ]]
+}
+note "Notifications: Jira for P0, Slack for P1 (each off/json/create|send)"
+if [[ "$REPORT_PROVIDER" == none ]]; then
+  printf '  No report provider: notifications use the reports already stored for %s.\n' "$REPORT_DATE"
+fi
+prompt ENABLE_NOTIFICATIONS "Configure Jira/Slack notifications? (yes/no)" "$(saved_or notify_enable_notifications no)"
+yes_no ENABLE_NOTIFICATIONS "Configure notifications"
+if [[ "$ENABLE_NOTIFICATIONS" == yes ]]; then
+  prompt NOTIFY_ENVIRONMENT "Environment tag (dev/staging/production)" "$(saved_or notify_notify_environment dev)"
+  NOTIFY_ENVIRONMENT="$(lower "$NOTIFY_ENVIRONMENT")"
+  [[ "$NOTIFY_ENVIRONMENT" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || die "Environment must be a short slug such as dev, staging or production."
+
+  # ---- Jira (P0)
+  prompt JIRA_MODE "Jira for P0 (off/json/create)" "$(saved_or notify_jira_mode off)"
+  JIRA_MODE="$(lower "$JIRA_MODE")"
+  [[ "$JIRA_MODE" == off || "$JIRA_MODE" == json || "$JIRA_MODE" == create ]] || die "Choose off, json, or create."
+  if [[ "$JIRA_MODE" != off ]]; then
+    prompt JIRA_PROJECT_KEY "Jira project key" "$(saved_value notify_jira_project_key)"
+    JIRA_PROJECT_KEY="$(printf '%s' "$JIRA_PROJECT_KEY" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
+    [[ "$JIRA_PROJECT_KEY" =~ ^[A-Z][A-Z0-9_]{0,19}$ ]] || die "Enter a Jira project key such as OPS."
+    prompt JIRA_ISSUE_TYPE "Jira issue type" "$(saved_or notify_jira_issue_type Bug)"
+    prompt JIRA_PRIORITIES "Priorities that open a Jira issue (comma list of P0..P3)" "$(saved_or notify_jira_priorities P0)"
+    JIRA_PRIORITIES="$(printf '%s' "$JIRA_PRIORITIES" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
+    [[ "$JIRA_PRIORITIES" =~ ^P[0-3](,P[0-3])*$ ]] || die "Jira priorities must look like P0 or P0,P1."
+    prompt JIRA_DEPLOYMENT "Jira deployment (cloud/datacenter)" "$(saved_or notify_jira_deployment cloud)"
+    JIRA_DEPLOYMENT="$(lower "$JIRA_DEPLOYMENT")"
+    [[ "$JIRA_DEPLOYMENT" == cloud || "$JIRA_DEPLOYMENT" == datacenter ]] || die "Choose cloud or datacenter."
+    if [[ "$JIRA_DEPLOYMENT" == cloud ]]; then
+      prompt JIRA_ASSIGNEE "Assignee Atlassian accountId (blank = unassigned)" "$(saved_value notify_jira_assignee)"
+    else
+      prompt JIRA_ASSIGNEE "Assignee username (blank = unassigned)" "$(saved_value notify_jira_assignee)"
+    fi
+    prompt JIRA_LABELS "Extra labels, comma-separated, no spaces (blank = none)" "$(saved_value notify_jira_labels)"
+    [[ "$JIRA_LABELS" != *" "* ]] || die "Jira labels cannot contain spaces."
+    prompt JIRA_COMPONENTS "Components, comma-separated (blank = none)" "$(saved_value notify_jira_components)"
+    prompt JIRA_PARENT_KEY "Parent/epic issue key (blank = none)" "$(saved_value notify_jira_parent_key)"
+    if [[ "$JIRA_MODE" == create ]]; then
+      prompt JIRA_BASE_URL "Jira base URL (https://...)" "$(saved_value notify_jira_base_url)"
+      JIRA_BASE_URL="${JIRA_BASE_URL%/}"
+      [[ "$JIRA_BASE_URL" == https://* ]] || die "The Jira base URL must start with https://"
+      prompt JIRA_DEDUPE_SCOPE "Skip creation when a ticket exists: open tickets only or any (open/all)" "$(saved_or notify_jira_dedupe_scope open)"
+      JIRA_DEDUPE_SCOPE="$(lower "$JIRA_DEDUPE_SCOPE")"
+      [[ "$JIRA_DEDUPE_SCOPE" == open || "$JIRA_DEDUPE_SCOPE" == all ]] || die "Choose open or all."
+      if [[ "$JIRA_DEPLOYMENT" == cloud ]]; then
+        prompt JIRA_EMAIL "Jira account email (for the API token)" "$(saved_value notify_jira_email)"
+        [[ -n "$JIRA_EMAIL" ]] || die "A Jira account email is required for Jira Cloud."
+        read -r -s -p "Jira API token (input hidden): " JIRA_API_TOKEN; printf '\n'
+        [[ -n "$JIRA_API_TOKEN" ]] || die "A Jira API token is required for JIRA_MODE=create."
+      else
+        read -r -s -p "Jira personal access token (input hidden): " JIRA_PAT; printf '\n'
+        [[ -n "$JIRA_PAT" ]] || die "A Jira personal access token is required for JIRA_MODE=create."
+      fi
+      if ! confirm_real "Jira create mode opens real issues in $JIRA_PROJECT_KEY for $NOTIFY_ENVIRONMENT (existing ones are skipped)."; then
+        note "Jira switched to json mode (jira-issues.json only)"
+        JIRA_MODE=json; JIRA_API_TOKEN=""; JIRA_PAT=""
+      fi
+    fi
+  fi
+
+  # ---- Slack (P1)
+  prompt SLACK_MODE "Slack for P1 (off/json/send)" "$(saved_or notify_slack_mode off)"
+  SLACK_MODE="$(lower "$SLACK_MODE")"
+  [[ "$SLACK_MODE" == off || "$SLACK_MODE" == json || "$SLACK_MODE" == send ]] || die "Choose off, json, or send."
+  if [[ "$SLACK_MODE" != off ]]; then
+    prompt SLACK_PRIORITIES "Priorities that are sent to Slack (comma list of P0..P3)" "$(saved_or notify_slack_priorities P1)"
+    SLACK_PRIORITIES="$(printf '%s' "$SLACK_PRIORITIES" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
+    [[ "$SLACK_PRIORITIES" =~ ^P[0-3](,P[0-3])*$ ]] || die "Slack priorities must look like P1 or P0,P1."
+    prompt SLACK_MENTIONS "Mentions, comma-separated (e.g. <!subteam^ID>,<@UID>; blank = none)" "$(saved_value notify_slack_mentions)"
+    prompt SLACK_REPEAT_AFTER_DAYS "Resend the same item at most every N days (0 = every day it is present)" "$(saved_or notify_slack_repeat_after_days 0)"
+    [[ "$SLACK_REPEAT_AFTER_DAYS" =~ ^[0-9]+$ ]] || die "Enter a whole number of days."
+    if [[ "$SLACK_MODE" == send ]]; then
+      prompt SLACK_SEND_VIA "Send via incoming webhook or bot token (webhook/bot)" "$(saved_or notify_slack_send_via webhook)"
+      SLACK_SEND_VIA="$(lower "$SLACK_SEND_VIA")"
+      if [[ "$SLACK_SEND_VIA" == webhook ]]; then
+        read -r -s -p "Slack incoming webhook URL (input hidden): " SLACK_WEBHOOK_URL; printf '\n'
+        [[ "$SLACK_WEBHOOK_URL" == https://hooks.slack.com/* ]] || die "The webhook URL must start with https://hooks.slack.com/"
+      elif [[ "$SLACK_SEND_VIA" == bot ]]; then
+        prompt SLACK_CHANNEL "Slack channel ID or #name" "$(saved_value notify_slack_channel)"
+        [[ -n "$SLACK_CHANNEL" ]] || die "A channel is required with a bot token."
+        read -r -s -p "Slack bot token (input hidden): " SLACK_BOT_TOKEN; printf '\n'
+        [[ "$SLACK_BOT_TOKEN" == xoxb-* ]] || die "A Slack bot token (xoxb-...) is required."
+      else
+        die "Choose webhook or bot."
+      fi
+      if ! confirm_real "Slack send mode posts a real message for $NOTIFY_ENVIRONMENT."; then
+        note "Slack switched to json mode (slack-messages.json only)"
+        SLACK_MODE=json; SLACK_WEBHOOK_URL=""; SLACK_BOT_TOKEN=""
+      fi
+    else
+      prompt SLACK_CHANNEL "Channel written into the JSON payload (blank = none)" "$(saved_value notify_slack_channel)"
+    fi
+  fi
+  if [[ "$JIRA_MODE" == off && "$SLACK_MODE" == off ]]; then
+    note "Jira and Slack are both off: notifications disabled"
+    ENABLE_NOTIFICATIONS=no
+  fi
+fi
+
 # Persist selections before installing dependencies or checking S3/GCS access.
 # Failed cloud authentication must not discard a newly selected S3 bucket.
 save_atlas_sample_defaults
@@ -272,7 +409,8 @@ esac
 
 # Use a fresh keys-only file, never the prior mixed config file. Remove it on exit.
 CONFIG_FILE="$(mktemp "${TMPDIR:-/tmp}/mongodb-atlas-keys.XXXXXXXX")"
-cleanup_credentials() { rm -f -- "$CONFIG_FILE"; }
+NOTIFY_FILE=""
+cleanup_credentials() { rm -f -- "$CONFIG_FILE"; if [[ -n "$NOTIFY_FILE" ]]; then rm -f -- "$NOTIFY_FILE"; fi; }
 trap cleanup_credentials EXIT
 # Pass private key via the child's environment, never its process command line.
 ATLAS_PUBLIC_KEY="$ATLAS_PUBLIC_KEY" ATLAS_PRIVATE_KEY="$ATLAS_PRIVATE_KEY" \
@@ -288,6 +426,26 @@ Path(sys.argv[1]).write_text(json.dumps({
 PYCODE
 chmod 600 "$CONFIG_FILE"
 unset ATLAS_PUBLIC_KEY ATLAS_PRIVATE_KEY
+# Notification credentials go to their own temporary file (the Atlas file must stay keys-only).
+if [[ -n "$JIRA_API_TOKEN$JIRA_PAT$SLACK_WEBHOOK_URL$SLACK_BOT_TOKEN" ]]; then
+  NOTIFY_FILE="$(mktemp "${TMPDIR:-/tmp}/mongodb-notification-keys.XXXXXXXX")"
+  N_JIRA_EMAIL="$JIRA_EMAIL" N_JIRA_API_TOKEN="$JIRA_API_TOKEN" N_JIRA_PAT="$JIRA_PAT" \
+  N_SLACK_WEBHOOK_URL="$SLACK_WEBHOOK_URL" N_SLACK_BOT_TOKEN="$SLACK_BOT_TOKEN" \
+    python - "$NOTIFY_FILE" <<'PYCODE'
+import json
+import os
+import sys
+from pathlib import Path
+names = {"jira_email": "N_JIRA_EMAIL", "jira_api_token": "N_JIRA_API_TOKEN", "jira_pat": "N_JIRA_PAT",
+         "slack_webhook_url": "N_SLACK_WEBHOOK_URL", "slack_bot_token": "N_SLACK_BOT_TOKEN"}
+data = {key: os.environ[env] for key, env in names.items() if os.environ.get(env)}
+if "jira_api_token" not in data and "jira_pat" not in data:
+    data.pop("jira_email", None)  # an email alone is not a credential
+Path(sys.argv[1]).write_text(json.dumps(data) + "\n", encoding="utf-8")
+PYCODE
+  chmod 600 "$NOTIFY_FILE"
+fi
+unset JIRA_API_TOKEN JIRA_PAT SLACK_WEBHOOK_URL SLACK_BOT_TOKEN
 export CLOUD_PROVIDER=local ATLAS_CONFIG_FILE="$CONFIG_FILE" \
   SKILLS_DIR="$PROJECT_ROOT/skills" DIAG_SKILL_DIR="$PROJECT_ROOT/skills/mongodb-log-diagnostic"
 export MONGODB_LOG_DIAG_INPUT_MODE=atlas_api
@@ -322,6 +480,29 @@ if [[ "$REPORT_PROVIDER" != none ]]; then
 else
   unset MONGODB_LOG_DIAG_LLM_PROVIDER MONGODB_LOG_DIAG_CLUSTER_SUMMARY_SOURCE
 fi
+export_if() { if [[ -n "$2" ]]; then export "$1=$2"; fi; }
+if [[ "$ENABLE_NOTIFICATIONS" == yes ]]; then
+  export MONGODB_LOG_DIAG_ENVIRONMENT="$NOTIFY_ENVIRONMENT"
+  export MONGODB_LOG_DIAG_JIRA_MODE="$JIRA_MODE" MONGODB_LOG_DIAG_SLACK_MODE="$SLACK_MODE"
+  export MONGODB_LOG_DIAG_NOTIFY_SOURCE=auto
+  if [[ "$JIRA_MODE" != off ]]; then
+    export MONGODB_LOG_DIAG_JIRA_PROJECT_KEY="$JIRA_PROJECT_KEY" MONGODB_LOG_DIAG_JIRA_ISSUE_TYPE="$JIRA_ISSUE_TYPE"
+    export MONGODB_LOG_DIAG_JIRA_PRIORITIES="$JIRA_PRIORITIES" MONGODB_LOG_DIAG_JIRA_DEPLOYMENT="$JIRA_DEPLOYMENT"
+    export_if MONGODB_LOG_DIAG_JIRA_ASSIGNEE "$JIRA_ASSIGNEE"
+    export_if MONGODB_LOG_DIAG_JIRA_LABELS "$JIRA_LABELS"
+    export_if MONGODB_LOG_DIAG_JIRA_COMPONENTS "$JIRA_COMPONENTS"
+    export_if MONGODB_LOG_DIAG_JIRA_PARENT_KEY "$JIRA_PARENT_KEY"
+    export_if MONGODB_LOG_DIAG_JIRA_BASE_URL "$JIRA_BASE_URL"
+    export_if MONGODB_LOG_DIAG_JIRA_DEDUPE_SCOPE "$JIRA_DEDUPE_SCOPE"
+  fi
+  if [[ "$SLACK_MODE" != off ]]; then
+    export MONGODB_LOG_DIAG_SLACK_PRIORITIES="$SLACK_PRIORITIES"
+    export MONGODB_LOG_DIAG_SLACK_REPEAT_AFTER_DAYS="$SLACK_REPEAT_AFTER_DAYS"
+    export_if MONGODB_LOG_DIAG_SLACK_MENTIONS "$SLACK_MENTIONS"
+    export_if MONGODB_LOG_DIAG_SLACK_CHANNEL "$SLACK_CHANNEL"
+  fi
+  export_if NOTIFICATION_CONFIG_FILE "$NOTIFY_FILE"
+fi
 
 # Fail before any network operation if the generated secret is not keys-only.
 python - <<'PYCODE'
@@ -334,6 +515,26 @@ if keys != {"atlas_public_key", "atlas_private_key"}:
     raise SystemExit("Generated Atlas credential file has unexpected fields")
 print("Atlas credential file verified: keys-only")
 PYCODE
+if [[ "$ENABLE_NOTIFICATIONS" == yes ]]; then
+  # Same validation as the pipeline, before any download: bad settings fail here, not after the report.
+  python - <<'PYCODE'
+import json
+from agent import notifications
+from agent.providers import _env_config
+cfg = _env_config()
+s = notifications.settings(cfg)
+secrets = notifications.load_secrets(cfg, "local")
+if s["jira_mode"] == "create" and not (secrets.get("jira_pat") or
+                                      (secrets.get("jira_email") and secrets.get("jira_api_token"))):
+    raise SystemExit("JIRA_MODE=create needs Jira credentials")
+if s["slack_mode"] == "send" and not (secrets.get("slack_webhook_url") or secrets.get("slack_bot_token")):
+    raise SystemExit("SLACK_MODE=send needs a Slack webhook URL or bot token")
+print("Notifications verified: " + json.dumps({
+    "environment": s["environment"], "jira_mode": s["jira_mode"], "jira_priorities": s["jira_priorities"],
+    "jira_project": s["jira"]["project_key"] or None, "slack_mode": s["slack_mode"],
+    "slack_priorities": s["slack_priorities"], "credentials": sorted(secrets)}))
+PYCODE
+fi
 
 show_atlas_storage_target
 for CURRENT_DATE in "${LOG_DATES[@]}"; do
@@ -403,5 +604,42 @@ if [[ "$REPORT_PROVIDER" != none ]]; then
     both) note "Cluster summaries: cluster/reports/cluster-summary.md and cluster-summary.from-node-reports.md" ;;
   esac
 fi
+notification_summary() {  # prints notifications.json; exit 3 when it does not exist for the day
+  python - "$1" <<'PYCODE'
+import json
+import sys
+from agent.common import Layout
+from agent.notifications import RESULT_FILE
+from agent.providers import get_store, load_config
+cfg = load_config()
+store, layout = get_store(cfg), Layout.from_config(cfg)
+key = layout.cluster_report(sys.argv[1], RESULT_FILE)
+if not store.exists(key):
+    sys.exit(3)
+r = json.loads(store.get_text(key))
+jira, slack = r.get("jira") or {}, r.get("slack") or {}
+print(json.dumps({
+    "status": r.get("status"), "environment": r.get("environment"), "sources": r.get("sources"),
+    "findings": len(r.get("findings") or []),
+    "jira": {"mode": r.get("jira_mode"), "created": [c.get("key") for c in jira.get("created", [])],
+             "existing": [e.get("key") or e.get("fingerprint") for e in jira.get("existing", [])],
+             "exported": len(jira.get("exported", [])), "file": jira.get("file"),
+             "errors": len(jira.get("errors", []))},
+    "slack": {"mode": r.get("slack_mode"), "sent": slack.get("sent"), "items": len(slack.get("items", [])),
+              "suppressed": len(slack.get("suppressed", [])), "file": slack.get("file"),
+              "errors": len(slack.get("errors", []))},
+    "result": store.uri(key), "ledger": r.get("ledger")}, indent=2))
+PYCODE
+}
+if [[ "$ENABLE_NOTIFICATIONS" == yes ]]; then
+  # The report stage notifies after a cluster summary (>= 2 nodes). Otherwise (one node, or no
+  # report provider) run the notify stage on the stored reports; it is idempotent (ledger + Jira JQL).
+  if [[ "$REPORT_PROVIDER" == none ]] || ! notification_summary "$REPORT_DATE" >/dev/null 2>&1; then
+    note "Running notifications (P0 Jira: $JIRA_MODE, P1 Slack: $SLACK_MODE) for $REPORT_DATE"
+    python -m agent.handler --stage notify --log-date "$REPORT_DATE" >/dev/null
+  fi
+  note "Notification result ($NOTIFY_ENVIRONMENT)"
+  notification_summary "$REPORT_DATE" || printf 'No notifications.json was written for %s.\n' "$REPORT_DATE"
+fi
 show_atlas_storage_outputs "$REPORT_DATE"
-printf '\nTemporary keys-only credential file will be removed on exit.\n'
+printf '\nTemporary keys-only credential file(s) will be removed on exit.\n' 

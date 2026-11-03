@@ -66,6 +66,75 @@ def _structure(value, depth=0, list_cap=None):
     return "?"
 
 
+# Command options rendered on one compact line above each log query form (and removed from the JSON body).
+# The extractor (>= 1.4) keeps their real logged values; older extractions show ``?``.
+OPTION_KEYS = ("$db", "$readPreference", "readConcern", "writeConcern", "batchSize", "singleBatch", "limit",
+               "skip", "maxTimeMS", "maxAwaitTimeMS", "allowDiskUse", "hint", "cursor", "tailable", "awaitData",
+               "noCursorTimeout", "allowPartialResults", "ordered", "readOnce", "apiVersion", "apiStrict",
+               "getMoreOptions")
+_OPTION_LABEL = {"$readPreference": "readPreference", "getMoreOptions": "getMore"}
+_SAFE_TEXT = re.compile(r"^[A-Za-z0-9_.:$\-]{1,128}$")
+
+
+def _option_scalar(value) -> str:
+    """Defence in depth: only short plain settings are echoed; anything else is ``?``."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str) and _SAFE_TEXT.match(value):
+        return value
+    return "?"
+
+
+def _option_text(key: str, value) -> str | None:
+    if isinstance(value, dict):
+        primary = {"$readPreference": "mode", "readConcern": "level"}.get(key)
+        rest = []
+        head = None
+        for k, v in list(value.items())[:12]:
+            if k == primary:
+                head = _option_scalar(v)
+            elif v == "?":
+                continue  # opaque cluster-time payloads etc.
+            elif isinstance(v, list):
+                rest.append(f"{k}=[" + ", ".join(
+                    ";".join(f"{a}:{_option_scalar(b)}" for a, b in item.items()) if isinstance(item, dict)
+                    else _option_scalar(item) for item in v[:5]) + "]")
+            elif isinstance(v, dict):
+                rest.append(f"{k}={{" + ", ".join(f"{a}:{_option_scalar(b)}" for a, b in list(v.items())[:6]) + "}")
+            else:
+                rest.append(f"{k}={_option_scalar(v)}")
+        if head is None and not rest:
+            return None  # e.g. aggregate `cursor: {}`
+        return " ".join(x for x in (head, f"({', '.join(rest)})" if head and rest else ", ".join(rest)) if x)
+    if isinstance(value, list):
+        return "[" + ", ".join(_option_scalar(v) for v in value[:6]) + "]"
+    return _option_scalar(value)
+
+
+def split_options(form: dict) -> tuple[str | None, dict]:
+    """Return (one-line option summary, form without the option keys) for a top-level command form."""
+    parts, body = [], dict(form)
+    for key in OPTION_KEYS:
+        if key in body:
+            text = _option_text(key, body.pop(key))
+            if text is not None:
+                parts.append(f"`{_OPTION_LABEL.get(key, key)}: {text.replace('`', '')}`")
+    return (" · ".join(parts) if parts else None), body
+
+
+_ONE_LINE_MAX = 120
+
+
+def _render_form(value) -> str:
+    """Compact JSON: one line when short, otherwise indented."""
+    one = json.dumps(value, sort_keys=True, ensure_ascii=False)
+    return one if len(one) <= _ONE_LINE_MAX else json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False)
+
+
 def _json_shape(value):
     if isinstance(value, str):
         try:
@@ -141,7 +210,9 @@ def append_reported_shapes(report_md: str, extraction: dict, query_stats_json=No
     lines = [_HEADING, "",
              "Hashes are included only if cited in this node report and found in this node's supplied evidence. "
              "Log `query_hash` and Query Shape Insights `queryShapeHash` are different identifiers; "
-             "no relationship is assumed. Values below are replaced with `?`; use representative "
+             "no relationship is assumed. Query literal values are replaced with `?`; command options "
+             "(`$db`, read preference/concern, write concern, batchSize, singleBatch, limit, maxTimeMS, ...) "
+             "are shown once on the **Options** line with their logged values. Use representative "
              "parameters and `explain(\"executionStats\")` to validate a plan.", ""]
     if not log_rows and not insight_rows:
         lines.append("No cited query hash could be resolved to a supplied redacted query form for this node.")
@@ -151,14 +222,16 @@ def append_reported_shapes(report_md: str, extraction: dict, query_stats_json=No
         lines.extend([f"#### Log query hash `{h}` — `{ns.replace('`', '')[:120]}`", ""])
         parsed = _json_shape(parsed)
         if parsed is not None:
-            rendered = json.dumps(_structure(parsed, list_cap=_EXTRACTOR_LIST_CAP), sort_keys=True, indent=2,
-                                  ensure_ascii=False)
+            options, body = split_options(parsed)
+            if options:
+                lines.extend([f"**Options:** {options}", ""])
+            rendered = _render_form(_structure(body, list_cap=_EXTRACTOR_LIST_CAP))
             lines.extend(["```json", rendered, "```", ""] if len(rendered) <= 6000 else
                          ["Redacted structural form exceeds the display limit.", ""])
         else:
             lines.extend(["Redacted structural form unavailable in the supplied extraction.", ""])
     for h, form in sorted(insight_rows)[:_MAX_ITEMS]:
-        rendered = json.dumps(_structure(form), sort_keys=True, indent=2, ensure_ascii=False)
+        rendered = _render_form(_structure(form))
         lines.extend([f"#### Query Shape Insights `queryShapeHash` `{h}`{scope_label}", ""])
         lines.extend(["```json", rendered, "```", ""] if len(rendered) <= 6000 else
                      ["Redacted structural form exceeds the display limit.", ""])

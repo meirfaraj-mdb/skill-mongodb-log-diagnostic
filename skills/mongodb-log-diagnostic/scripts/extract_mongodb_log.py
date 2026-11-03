@@ -23,7 +23,7 @@ except ModuleNotFoundError:
     from ftdc_decoder import decode_ftdc_bytes, emit_source_debug
     from driver_compatibility import DriverCompatibilityAccumulator, extract_driver_compatibility
 
-VERSION = "1.3"
+VERSION = "1.4"
 LEGACY_RE = re.compile(
     r"^(?P<ts>\S+)\s+(?P<sev>[DIWFE])\s+(?P<component>\S+)(?:\s+(?P<id>\d+))?\s+(?:\[(?P<ctx>[^\]]+)\])?\s*(?P<msg>.*)$"
 )
@@ -309,15 +309,57 @@ def fingerprint(text: str) -> str:
 
 SENSITIVE_QUERY_KEYS = {"lsid", "$clusterTime", "signature", "clientMetadata", "remote"}
 
+# Top-level command options whose values are driver/deployment settings, not user data. Their real values
+# are kept (validated) in query shapes: a shape that says `"$readPreference": "?"` or `"batchSize": "?"`
+# cannot support a read-routing, cursor-batching or timeout diagnosis. Only applied at the top level of a
+# command document (never inside filter/pipeline/update bodies, where a user field may share the name).
+OPTION_VALUE_KEYS = frozenset({
+    "$db", "$readPreference", "readConcern", "writeConcern", "batchSize", "maxTimeMS", "maxAwaitTimeMS",
+    "singleBatch", "limit", "skip", "allowDiskUse", "hint", "cursor", "tailable", "awaitData",
+    "noCursorTimeout", "allowPartialResults", "ordered", "readOnce", "apiVersion", "apiStrict",
+})
+# Inside option values: drop opaque cluster-time / op-time payloads (noise, never diagnostic).
+_OPTION_OPAQUE_KEYS = frozenset({"afterClusterTime", "atClusterTime", "afterOpTime", "$timestamp", "$oid"})
+_SAFE_OPTION_TEXT = re.compile(r"^[A-Za-z0-9_.:$\-]{1,128}$")
 
-def query_shape(value: Any, depth: int = 0) -> Any:
-    """Keep command structure and field names while replacing literal values."""
+
+def _option_value(value: Any, depth: int = 0) -> Any:
+    """Return an option value unchanged when it is a short, plain setting; otherwise ``?``."""
+    if depth > 3:
+        return "?"
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return value if abs(value) < 10**12 else "?"
+    if isinstance(value, str):
+        return value if _SAFE_OPTION_TEXT.match(value) else "?"
+    if isinstance(value, dict):
+        if len(value) == 1 and next(iter(value)) in {"$numberLong", "$numberInt", "$numberDouble"}:
+            raw = str(next(iter(value.values())))
+            return raw if re.fullmatch(r"-?\d+(?:\.\d+)?", raw) else "?"
+        return {str(k): ("?" if str(k) in _OPTION_OPAQUE_KEYS else _option_value(v, depth + 1))
+                for k, v in list(value.items())[:20]}
+    if isinstance(value, list):
+        return [_option_value(v, depth + 1) for v in value[:10]]
+    return "?"
+
+
+def query_shape(value: Any, depth: int = 0, keep_options: bool = False) -> Any:
+    """Keep command structure and field names while replacing literal values.
+
+    With ``keep_options`` (top level of a command document), :data:`OPTION_VALUE_KEYS` keep their
+    validated real values (``$db``, read preference/concern, batchSize, maxTimeMS, singleBatch, ...).
+    """
     if depth > 8:
         return "..."
     if isinstance(value, dict):
         shaped = {}
         for key, item in value.items():
-            if str(key) not in SENSITIVE_QUERY_KEYS:
+            if str(key) in SENSITIVE_QUERY_KEYS:
+                continue
+            if keep_options and depth == 0 and str(key) in OPTION_VALUE_KEYS:
+                shaped[str(key)] = _option_value(item)
+            else:
                 shaped[str(key)] = query_shape(item, depth + 1)
         return shaped
     if isinstance(value, list):
@@ -325,6 +367,24 @@ def query_shape(value: Any, depth: int = 0) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return "?"
     return "?"
+
+
+def _command_shape(attr: dict[str, Any]) -> dict[str, Any] | None:
+    """Shape of the originating command (getMore) or the command, with option values kept.
+
+    For a getMore, the getMore's own cursor options (``batchSize``, ``maxTimeMS``) are added under
+    ``getMoreOptions`` because the originating find/aggregate carries the first-batch settings only.
+    """
+    origin, command = attr.get("originatingCommand"), attr.get("command")
+    source = origin if isinstance(origin, dict) else command
+    if not isinstance(source, dict):
+        return None
+    shaped = query_shape(source, keep_options=True)
+    if source is origin and isinstance(command, dict) and "getMore" in command:
+        extra = {k: _option_value(command[k]) for k in ("batchSize", "maxTimeMS", "maxAwaitTimeMS") if k in command}
+        if extra:
+            shaped["getMoreOptions"] = extra
+    return shaped
 
 
 def redact_message(value: str) -> str:
@@ -412,7 +472,9 @@ def redact_original_log(raw_line: str | None) -> str | None:
             key_lower = key.lower()
             if key in SENSITIVE_QUERY_KEYS or any(token in key_lower for token in ("password", "passwd", "token", "secret", "credential")):
                 return "<redacted>"
-            if key_lower in {"command", "query", "filter", "updates", "update", "insert", "documents", "deletes", "q", "u", "keyvalue", "keys", "indexspec", "keypattern"}:
+            if key_lower in {"command", "originatingcommand"}:
+                return query_shape(value, keep_options=True)
+            if key_lower in {"query", "filter", "updates", "update", "insert", "documents", "deletes", "q", "u", "keyvalue", "keys", "indexspec", "keypattern"}:
                 return query_shape(value)
             if key_lower in {"msg", "message"}:
                 return redact_message(str(value))
@@ -509,7 +571,7 @@ def parse_line(line: str) -> tuple[dict[str, Any] | None, str | None]:
             "has_sort_stage": bool(attr.get("hasSortStage", False)),
             "queue_time_us": scalar(attr.get("queues", {}).get("execution", {}).get("totalTimeQueuedMicros")) if isinstance(attr.get("queues"), dict) else None,
             "app_name": scalar(attr.get("appName")),
-            "query_shape": query_shape(attr.get("originatingCommand") if isinstance(attr.get("originatingCommand"), dict) else attr.get("command")) if isinstance(attr.get("originatingCommand") if isinstance(attr.get("originatingCommand"), dict) else attr.get("command"), dict) else None,
+            "query_shape": _command_shape(attr),
             "is_change_stream": _contains_change_stream(attr.get("command")) or _contains_change_stream(attr.get("originatingCommand")),
             "operation_name": scalar(attr.get("commandName") or attr.get("operation") or attr.get("op")) or (command_names[0] if command_names else inferred.get("operation_name")),
             "error_code": scalar(attr.get("code")) or inferred.get("error_code"),

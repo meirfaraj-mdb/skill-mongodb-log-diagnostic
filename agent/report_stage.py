@@ -64,8 +64,10 @@ def build_system_prompt() -> str:
         "supplied inline in labelled <document> tags. `current` is extractionOccurence.json; `n-1` and "
         "`n-8` are extractionshort.json baselines. Use exact numbers from `precomputed_diff`. "
         "You have no web access. Use only reviewed offline_driver_cves matches as version-range review "
-        "candidates with unverified application exposure; include catalog refreshed_at. If status is "
-        "no_match_in_snapshot say so without claiming safety. A match with review_status "
+        "candidates with unverified application exposure; include catalog refreshed_at. All CVE "
+        "information goes only inside the driver compatibility section (section 10); never add a separate "
+        "top-level 'Driver CVE Status' section. If status is no_match_in_snapshot say so in one line inside "
+        "that section without claiming safety. A match with review_status "
         "unreviewed_candidate comes from an automated OSV import nobody has vetted: label it "
         "'unreviewed candidate' and never present it as confirmed. Never invent CVEs. Output only Markdown.",
         "=== references/analysis-prompt.md ===\n" + _read_skill_text("references/analysis-prompt.md"),
@@ -401,6 +403,11 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     report_md, removed_internal = _strip_internal_content(report_md)
     if removed_internal:
         logger.info("Removed %d internal-only content block(s) from node report", removed_internal)
+    from .report_cve_section import relocate_standalone_cve_status
+    report_md, relocated_cve = relocate_standalone_cve_status(report_md)
+    if relocated_cve:
+        logger.info("Removed %d standalone driver-CVE status block(s); CVE details stay in the driver "
+                    "section node=%s", relocated_cve, host_dir)
     # APPENDIX 1 (metrics graphs) and APPENDIX 2 (Performance Advisor) only when their data exist;
     # placed ahead of APPENDIX 3 (query forms), after the internal-content filter so the embedded
     # base64 image is never altered (the advisor renderer already omits system namespaces).
@@ -732,6 +739,25 @@ NODE_REPORTS_ONLY_INSTRUCTIONS = (
 )
 
 
+def _notification_instructions(config: dict) -> str:
+    """Ask for the machine-readable priority table only when a notification mode is enabled."""
+    from . import notifications
+    return (" " + notifications.TABLE_INSTRUCTIONS) if notifications.enabled(config) else ""
+
+
+def _run_notifications(config: dict, log_date: str, store) -> dict | None:
+    """P0 -> Jira / P1 -> Slack after the cluster reports exist. Never fails the report stage."""
+    from . import notifications
+    if not notifications.enabled(config) or not config.get("notify_after_report", True):
+        return None
+    try:
+        result = notifications.run(config, log_date, store=store)
+    except Exception as exc:
+        logger.exception("Notifications failed")
+        return {"status": "failed", "error": str(exc)[:500]}
+    return {k: result.get(k) for k in ("status", "environment", "jira_mode", "slack_mode", "uri")}
+
+
 def _cluster_summary_source(config: dict) -> str:
     value = str(config.get("cluster_summary_source") or "extract").strip().lower().replace("-", "_")
     if value not in CLUSTER_SUMMARY_SOURCES:
@@ -769,7 +795,8 @@ def cluster_summary_from_node_reports(store, layout, llm, config: dict, log_date
                             _without_embedded_images(r["report_md"])) for r in results)
     user = (f"Cluster `{config['cluster_name']}`, day {log_date}. Inputs: {len(results)} node reports "
             "(no extracts).\n\n" + body)
-    summary = _finish_cluster_summary(llm, CLUSTER_PROMPT + " " + NODE_REPORTS_ONLY_INSTRUCTIONS, user)
+    summary = _finish_cluster_summary(llm, CLUSTER_PROMPT + " " + NODE_REPORTS_ONLY_INSTRUCTIONS
+                                      + _notification_instructions(config), user)
     header = (f"<!-- cluster summary variant: node_reports (built only from {len(results)} node report.md "
               "files; compare with cluster-summary.md, which also uses extract-based trend alerts and "
               "query-shape evidence) -->\n")
@@ -899,7 +926,7 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
                                        json.dumps(alerts, indent=2, default=str), "application/json")
             logger.info("Trend alerts status=%s nodes_compared=%s items=%d uri=%s", alerts["status"],
                         alerts["nodes_compared"], sum(len(n.get("items", [])) for n in alerts["nodes"]), trend_uri)
-        system = CLUSTER_PROMPT
+        system = CLUSTER_PROMPT + _notification_instructions(config)
         user = (f"Cluster `{config['cluster_name']}`, day {log_date}.\n\n"
                 + _doc("query_shape_insights", {"date": log_date}, json.dumps(evidence)))
         if trend_md:
@@ -934,6 +961,12 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
     }
     store.put_text(layout.cluster_report(log_date, "manifest.json"),
                    json.dumps(manifest, indent=2), "application/json")
+    if cluster_uri or node_reports_uri:
+        notified = _run_notifications(config, log_date, store)
+        if notified is not None:
+            manifest["notifications"] = notified
+            store.put_text(layout.cluster_report(log_date, "manifest.json"),
+                           json.dumps(manifest, indent=2), "application/json")
     if summary_only and not (cluster_uri or node_reports_uri):
         raise RuntimeError("Cluster summary generation disabled or failed")
     if not results:

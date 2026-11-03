@@ -87,6 +87,9 @@ Specify what to measure after remediation, including p95/p99 latency, write late
 ## 9. Important limitations
 List all limitations, including missing timestamps, filtered records, aggregate-only metrics, redacted fields, incomplete client attribution, and any inability to establish causality.
 
+## 10. Driver compatibility and CVE review
+This is the **only** place for driver versions, driver compatibility, and CVE/advisory information (including the red warning table and any "no match" statement). Do not create a separate "Driver CVE Status", "CVE status", or similar section, banner, or standalone paragraph anywhere else in the report. The executive summary may mention a confirmed or candidate driver CVE match in at most one bullet that refers to section 10; it must not mention a no-match or lookup-limitation status. Omit this section entirely when no customer-owned driver is in scope.
+
 ## Writing rules
 
 - Use concise but technically precise language suitable for MongoDB engineers and customer stakeholders.
@@ -152,7 +155,7 @@ For each distinct driver and observed version:
 
 ### Required red warning table
 
-Whenever any driver is affected by a confirmed CVE, has an available security advisory, is end-of-life, or requires an update for compatibility, place this block near the top of the report and before ordinary findings:
+Whenever any driver is affected by a confirmed CVE, has an available security advisory, is end-of-life, or requires an update for compatibility, place this block at the start of section 10 (Driver compatibility and CVE review), never as a separate top-of-report section:
 
 > **⚠️ DRIVER CVE WARNINGS — UPDATE REVIEW REQUIRED**
 >
@@ -179,7 +182,7 @@ Rules for completing the warning table:
 6. Separate “incompatible with the observed MongoDB/server context” from “vulnerable to a CVE.” An incompatibility finding is not automatically a security vulnerability.
 7. Recommend validation after any update: application-driver compatibility testing, representative workload tests, authentication/TLS checks, connection-pool behavior, and post-deployment error review. Do not claim that an update was applied.
 
-If no affected, advisory-relevant, obsolete, or incompatible driver is found after inspecting all observed driver versions, include this statement instead of an empty warning table: `No driver CVE or driver-update warning was identified in the extracted data after checking the available authoritative sources.`
+If no affected, advisory-relevant, obsolete, or incompatible driver is found after inspecting all observed driver versions, include this statement once, inside section 10 only, instead of an empty warning table: `No driver CVE or driver-update warning was identified in the extracted data after checking the available authoritative sources.` Do not repeat it elsewhere in the report.
 
 ## Optional historical comparison: n-1 and n-8
 
