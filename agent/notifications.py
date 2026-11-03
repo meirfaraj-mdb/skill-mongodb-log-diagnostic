@@ -1,5 +1,16 @@
 """Per-environment P0 -> Jira and P1 -> Slack notifications built from the cluster reports.
 
+Input (written by ``report_stage.run`` under ``<prefix>/<day>/cluster/reports/``):
+
+* ``cluster-summary.md`` and/or ``cluster-summary.from-node-reports.md`` (primary source);
+* ``manifest.json`` (report URIs, cluster summary source) and ``trend-alerts.json`` (linked);
+* the per-node ``report.md`` files listed in the manifest, used only as a fallback when the
+  cluster summary contains no P0/P1 item (``notify_source=auto``) or when ``notify_source=node_reports``.
+
+Each channel has three modes, selected per deployment/environment:
+
+==========  ===================================================================================
+``off``     nothing is generated (default; the pipeline behaves as before)
 ``json``    write an importable file only: ``jira-issues.json`` (Jira REST bulk-create body,
             ``POST /rest/api/2/issue/bulk``) / ``slack-messages.json`` (Slack ``chat.postMessage``
             / incoming-webhook payloads)
