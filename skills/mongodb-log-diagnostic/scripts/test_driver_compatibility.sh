@@ -20,7 +20,7 @@ main = source.split("def main()", 1)[1]
 import re
 assert not re.search(r"(?<![A-Za-z0-9_])events\.append", main), "whole-log event accumulation returned"
 assert not re.search(r"(?<![A-Za-z0-9_])events\s*:\s*list", main), "main still declares a whole-log event list"
-assert "analyzer.add(event)" in main and "driver.add(event)" in main
+assert re.search(r"analyzer\.add\(event[,)]", main) and "driver.add(event)" in main
 print("streaming source guard: PASS")
 PYSTATIC
 
@@ -61,7 +61,15 @@ PY
 RSS_FILE="$TMP_DIR/rss.txt"
 INPUT_FILE="$TMP_DIR/large.json"
 [ "$MODE" = "gzip" ] && INPUT_FILE="$TMP_DIR/large.json.gz"
-if /usr/bin/time -f '%M' -o "$RSS_FILE" true 2>/dev/null; then
+if [ ! -x /usr/bin/time ]; then
+    # No external time(1): measure the child's peak RSS from Python (KB on Linux, bytes on macOS).
+    python3 - "$RSS_FILE" python3 "$EXTRACTOR" --output "$TMP_DIR/out" "$INPUT_FILE" <<'PYRSS' >/dev/null
+import resource, subprocess, sys
+subprocess.run(sys.argv[2:], check=True)
+peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+open(sys.argv[1], "w").write(f"{peak // 1024 if sys.platform == 'darwin' else peak}\n")
+PYRSS
+elif /usr/bin/time -f '%M' -o "$RSS_FILE" true 2>/dev/null; then
     /usr/bin/time -f '%M' -o "$RSS_FILE" python3 "$EXTRACTOR" --output "$TMP_DIR/out" "$INPUT_FILE" >/dev/null
 else
     /usr/bin/time -l -o "$RSS_FILE" python3 "$EXTRACTOR" --output "$TMP_DIR/out" "$INPUT_FILE" >/dev/null

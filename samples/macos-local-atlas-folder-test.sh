@@ -374,6 +374,13 @@ note "Creating Python environment"
 python3 -m venv .venv-local-atlas-folder
 source .venv-local-atlas-folder/bin/activate
 python -m pip install --upgrade pip
+# Faster log decoding for the extractor (optional; results are identical without it).
+python -m pip install 'msgspec>=0.18' || note "msgspec unavailable; extractor uses orjson or stdlib json"
+python - <<'PYCODE'
+import sys; sys.path.insert(0, "skills/mongodb-log-diagnostic/scripts")
+import extract_mongodb_log as m
+print(f"Extractor parser {m.VERSION}, JSON reader: {m.JSON_BACKEND}")
+PYCODE
 prepare_atlas_storage
 [[ ! -f skills/mongodb-log-diagnostic/requirements.txt ]] || python -m pip install -r skills/mongodb-log-diagnostic/requirements.txt
 if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then

@@ -202,7 +202,9 @@ def append_reported_shapes(report_md: str, extraction: dict, query_stats_json=No
         if not isinstance(group, dict):
             continue
         hash_value = group.get("query_hash")
-        if isinstance(hash_value, str) and hash_value.upper() in mentioned and re.fullmatch(r"[a-fA-F0-9]{8}", hash_value):
+        # 8-hex legacy queryHash, or the 64-hex queryShapeHash that MongoDB 8.0+ logs on slow queries
+        # (the extractor stores whichever the log line carries as query_hash).
+        if isinstance(hash_value, str) and hash_value.upper() in mentioned and re.fullmatch(r"[a-fA-F0-9]{8}|[a-fA-F0-9]{64}", hash_value):
             log_rows.append((hash_value.upper(), str(group.get("namespace") or "unknown"), group.get("sample_query_shape")))
     insight_rows = [(hash_value, form) for hash_value, form in _node_stats(query_stats_json).items()
                     if hash_value in mentioned]
@@ -237,7 +239,7 @@ def append_reported_shapes(report_md: str, extraction: dict, query_stats_json=No
                      ["Redacted structural form exceeds the display limit.", ""])
     if log_rows and not insight_rows:
         lines.extend(["No cited 64-character Query Shape Insights `queryShapeHash` could be resolved "
-                      "from this node's query-statistics file; do not relabel the 8-character log hashes.", ""])
+                      "from this node's query-statistics file; do not relabel the log hashes.", ""])
     return _insert_ordered(report_md, SHAPES_HEADING, "\n".join(lines).rstrip())
 
 

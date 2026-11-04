@@ -4,3 +4,6 @@ boto3>=1.34
 pymongo>=4.6
 # Per-node metric graphs (report APPENDIX 1); optional - reports note when it is missing.
 matplotlib>=3.8
+# Optional faster log decoding for the extractor (msgspec preferred, orjson fallback);
+# results are identical without them.
+msgspec>=0.18

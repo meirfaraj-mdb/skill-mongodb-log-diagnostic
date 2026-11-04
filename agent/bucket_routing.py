@@ -44,6 +44,13 @@ class SplitBucketStore:
     def download(self, key, path):
         return self._store(key).download(key, path)
 
+    def open_read(self, key):
+        store = self._store(key)
+        opener = getattr(store, "open_read", None)
+        if not callable(opener):
+            raise NotImplementedError("open_read")
+        return opener(key)
+
     def get_text(self, key):
         return self._store(key).get_text(key)
 

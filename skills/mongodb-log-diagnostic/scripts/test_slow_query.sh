@@ -42,16 +42,22 @@ occurrences = group["occurrence_timestamps"]
 assert len(occurrences) == 1 and len(next(iter(occurrences.values()))) == 2, occurrences
 first_detail = next(iter(occurrences.values()))[0]
 metrics = next(iter(first_detail.values()))
-for field in ("workingMillis", "cpuNanos", "numYields", "docs_examined", "n_returned", "has_sort_stage"):
+for field in ("workingMillis", "cpuNanos", "numYields", "docs_examined", "n_returned"):
     assert field in metrics, (field, metrics)
+# 1.5: namespace lives on the group; has_sort_stage appears only when true; durationMillis only if it differs from duration_ms.
+assert "namespace" not in metrics and metrics.get("has_sort_stage", False) in (True, False), metrics
+assert "durationMillis" not in metrics or metrics["durationMillis"] != metrics.get("duration_ms"), metrics
 
 change = next(item for item in groups if item["namespace"] == "aDb.aCollection")
 assert change["count"] == 1, change
 assert change["query_hash"] == "B8D1FBAC", change
 assert change["sample_query_shape"]["aggregate"] == "?", change
 change_metrics = next(iter(next(iter(change["occurrence_timestamps"].values()))[0].values()))
-for field in ("nBatches", "cursorid", "planCacheShapeHash", "planCacheKey", "queryFramework", "workingMillis", "cpuNanos"):
+for field in ("nBatches", "cursorid", "workingMillis", "cpuNanos"):
     assert field in change_metrics, (field, change_metrics)
+# Plan-cache identity is constant for the single occurrence, so 1.5 records it once on the group.
+for field in ("planCacheShapeHash", "planCacheKey", "queryFramework"):
+    assert field in change or field in change_metrics, (field, change, change_metrics)
 assert slow["global_stats"]["count"] == 3, slow
 assert slow["global_stats"]["collscan_count"] == 3, slow
 assert slow["global_stats"]["change_stream_count"] == 1, slow

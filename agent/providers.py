@@ -253,6 +253,10 @@ class LocalStore:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_bytes(self._p(key).read_bytes())
 
+    def open_read(self, key):
+        """Binary reader over the stored object (streamed extraction input)."""
+        return open(self._p(key), "rb")
+
     def _write_meta(self, key, content_type, metadata):
         self._p(key + ".meta.json").write_text(json.dumps({"content_type": content_type, **(metadata or {})}))
 
