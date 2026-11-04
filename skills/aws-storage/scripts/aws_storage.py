@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import logging
 import mimetypes
@@ -26,6 +27,61 @@ def parse_uri(uri: str) -> tuple[str, str]:
         raise ValueError(f"Not an s3:// URI: {uri}")
     bucket, _, key = uri[5:].partition("/")
     return bucket, key
+
+
+class _ResumableS3Reader(io.RawIOBase):
+    """Read an S3 object sequentially; resume from the current offset on a dropped stream."""
+
+    RETRIES = 5
+
+    def __init__(self, s3, bucket: str, key: str):
+        self._s3, self._bucket, self._key = s3, bucket, key
+        self._pos, self._body, self._eof = 0, None, False
+
+    def readable(self) -> bool:
+        return True
+
+    def _open(self):
+        extra = {"Range": f"bytes={self._pos}-"} if self._pos else {}
+        self._body = self._s3.get_object(Bucket=self._bucket, Key=self._key, **extra)["Body"]
+
+    def read(self, size: int = -1) -> bytes:
+        if self._eof:
+            return b""
+        for attempt in range(self.RETRIES + 1):
+            try:
+                if self._body is None:
+                    self._open()
+                data = self._body.read(None if size is None or size < 0 else size)
+                break
+            except Exception as error:  # botocore read timeouts / IncompleteRead / connection resets
+                self._discard()
+                if attempt == self.RETRIES:
+                    raise
+                logger.warning("S3 read interrupted key=%s offset=%d error_type=%s; resuming",
+                               self._key, self._pos, type(error).__name__)
+                time.sleep(min(2 ** attempt, 10))
+        if not data and size != 0:
+            self._eof = True
+        self._pos += len(data)
+        return data
+
+    def readinto(self, buffer) -> int:
+        data = self.read(len(buffer))
+        buffer[:len(data)] = data
+        return len(data)
+
+    def _discard(self):
+        if self._body is not None:
+            try:
+                self._body.close()
+            except Exception:
+                pass
+        self._body = None
+
+    def close(self):
+        self._discard()
+        super().close()
 
 
 class S3Store:
@@ -58,6 +114,10 @@ class S3Store:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.s3.download_file(self.bucket, key, str(path))
+
+    def open_read(self, key: str):
+        """Sequential binary reader; reconnects with a byte Range if the stream drops."""
+        return _ResumableS3Reader(self.s3, self.bucket, key)
 
     @staticmethod
     def _extra(content_type: str, metadata: dict | None) -> dict:

@@ -74,18 +74,25 @@ def _ip(value: Any) -> str | None:
     return value
 
 
-def _walk(value: Any) -> Iterable[dict[str, Any]]:
-    if isinstance(value, dict):
-        yield value
-        for child in value.values():
-            yield from _walk(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from _walk(child)
+def _walk(value: Any) -> list[dict[str, Any]]:
+    """Every mapping in ``value``, depth-first pre-order (parent before children, in key order).
+
+    Built once per record as a list (was a recursive generator re-run four times per record)."""
+    found: list[dict[str, Any]] = []
+    stack = [value]
+    pop, push = stack.pop, stack.extend
+    while stack:
+        item = pop()
+        if isinstance(item, dict):
+            found.append(item)
+            push(reversed(list(item.values())))
+        elif isinstance(item, list):
+            push(reversed(item))
+    return found
 
 
-def _remote(obj: dict[str, Any]) -> str | None:
-    for mapping in _walk(obj):
+def _remote(obj: dict[str, Any], mappings: list[dict[str, Any]] | None = None) -> str | None:
+    for mapping in (_walk(obj) if mappings is None else mappings):
         for key in ("remote", "client", "ip", "clientIp", "clientIP", "address"):
             if key in mapping:
                 found = _ip(mapping[key])
@@ -94,12 +101,13 @@ def _remote(obj: dict[str, Any]) -> str | None:
     return None
 
 
-def _connection_details(obj: dict[str, Any]) -> tuple[str | None, set[str], set[str]]:
+def _connection_details(obj: dict[str, Any], mappings: list[dict[str, Any]] | None = None) -> tuple[str | None, set[str], set[str]]:
     """Return remote IP, application names, and platform names from client metadata."""
-    remote = _remote(obj)
+    if mappings is None: mappings = _walk(obj)
+    remote = _remote(obj, mappings)
     application_names: set[str] = set()
     platforms: set[str] = set()
-    for mapping in _walk(obj):
+    for mapping in mappings:
         application = mapping.get("application")
         if isinstance(application, dict):
             name = _text(application.get("name"))
@@ -115,27 +123,40 @@ def _connection_details(obj: dict[str, Any]) -> tuple[str | None, set[str], set[
     return remote, application_names, platforms
 
 
-def _driver_records(obj: dict[str, Any]) -> list[tuple[str, str | None]]:
-    found: list[tuple[str, str | None]] = []
-    for mapping in _walk(obj):
+def _driver_records_raw(obj: dict[str, Any], mappings: list[dict[str, Any]] | None = None) -> list[tuple[str, str | None, str]]:
+    """(canonical name, version, raw handshake name) for each driver in a client-metadata record.
+
+    The raw name keeps the parts after '|' (e.g. ``mongo-java-driver|kotlin``) and the
+    ' / '-joined PHP stack (``mongoc / ext-mongodb:PHP / PHPLIB``) for advisory matching.
+    """
+    found: list[tuple[str, str | None, str]] = []
+    for mapping in (_walk(obj) if mappings is None else mappings):
         value = mapping.get("driver") or mapping.get("clientDriver")
         if isinstance(value, dict):
             raw_name = _text(value.get("name") or value.get("driverName"))
             parts = raw_name.split("|") if raw_name else []
             name = _canonical_driver(parts[0] if parts else raw_name)
             version = _version_part(value.get("version") or value.get("driverVersion")) or (_version_part(parts[1]) if len(parts) > 1 else None)
-            if name: found.append((name, version))
+            if name: found.append((name, version, raw_name or name))
         elif value is not None:
             parts = _text(value).split("|")
             name = _canonical_driver(parts[0])
             version = _version_part(mapping.get("version") or mapping.get("driverVersion")) or (_version_part(parts[1]) if len(parts) > 1 else None)
-            if name: found.append((name, version))
+            if name: found.append((name, version, _text(value) or name))
         else:
-            name = _canonical_driver(mapping.get("driverName") or mapping.get("clientDriverName"))
-            if name: found.append((name, _version_part(mapping.get("driverVersion") or mapping.get("clientDriverVersion") or mapping.get("version"))))
-    unique: OrderedDict[tuple[str, str | None], None] = OrderedDict()
+            raw_name = _text(mapping.get("driverName") or mapping.get("clientDriverName"))
+            name = _canonical_driver(raw_name)
+            if name: found.append((name, _version_part(mapping.get("driverVersion") or mapping.get("clientDriverVersion") or mapping.get("version")), raw_name or name))
+    unique: OrderedDict[tuple[str, str | None, str], None] = OrderedDict()
     for item in found:
         unique[item] = None
+    return list(unique)
+
+
+def _driver_records(obj: dict[str, Any]) -> list[tuple[str, str | None]]:
+    unique: OrderedDict[tuple[str, str | None], None] = OrderedDict()
+    for name, version, _raw in _driver_records_raw(obj):
+        unique[(name, version)] = None
     return list(unique)
 
 
@@ -177,15 +198,22 @@ class DriverCompatibilityAccumulator:
                 obj = json.loads(raw)
             except json.JSONDecodeError:
                 return
+        mappings = _walk(obj)
         if not self.mongodb_version:
-            for mapping in _walk(obj):
+            for mapping in mappings:
                 build = mapping.get("buildInfo")
                 if isinstance(build, dict):
                     self.mongodb_version = _major_minor(build.get("version"))
                     if self.mongodb_version:
                         break
-        remote, application_names, platforms = _connection_details(obj)
-        driver_records = _driver_records(obj)
+        raw_records = _driver_records_raw(obj, mappings)
+        if not raw_records:
+            return  # no driver in this record: connection details would be discarded
+        remote, application_names, platforms = _connection_details(obj, mappings)
+        raw_names: dict[tuple[str, str | None], set[str]] = {}
+        for name, version, raw in raw_records:
+            raw_names.setdefault((name, version), set()).add(raw)
+        driver_records = list(OrderedDict(((n, v), None) for n, v, _ in raw_records))
         if driver_records:
             # Count source log records, not incompatible version groups.
             self.driver_log_count += 1
@@ -205,7 +233,9 @@ class DriverCompatibilityAccumulator:
                 "first_seen": event.get("timestamp"),
                 "last_seen": event.get("timestamp"),
                 "source_files": set(),
+                "raw_names": set(),
             })
+            item["raw_names"].update(raw_names.get((driver_name, raw_version), ()))
             item["occurrences"] += 1
             if remote:
                 item["ips"].add(remote)
@@ -267,6 +297,15 @@ class DriverCompatibilityAccumulator:
             "distinct_compatible_drivers": {
                 name: {version: details for version, details in sorted(versions.items())}
                 for name, versions in sorted(compatible_versions.items())
+            },
+            # Every application driver/version seen, independent of the compatibility matrix
+            # and of the server version (used by the offline CVE check).
+            "observed_drivers": {
+                name: {version: {"distinctAppNames": sorted(obs["application_names"]),
+                                 "rawNames": sorted(obs["raw_names"])[:5], "occurrences": obs["occurrences"]}
+                       for (n, version), obs in sorted(self.observations.items(), key=lambda i: str(i[0][1]))
+                       if n == name and version}
+                for name in sorted({k[0] for k in self.observations})
             },
             "observed_application_connections": self.observed_application,
             "excluded_internal_connections": self.excluded_internal,

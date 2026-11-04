@@ -1,0 +1,8 @@
+# Atlas: processId (hostname:port as in 01_list_processes)  [typeName]  [host_dir override]
+atlas-abc123-shard-00-00.xyz12.mongodb.net:27017 REPLICA_PRIMARY
+atlas-abc123-shard-00-01.xyz12.mongodb.net:27017 REPLICA_SECONDARY
+atlas-abc123-shard-00-02.xyz12.mongodb.net:27017 REPLICA_SECONDARY
+# sharded: mongos on the same host gets <hostname>_<port> as folder
+# atlas-abc123-shard-00-00.xyz12.mongodb.net:27016 SHARD_MONGOS
+# Ops Manager (09/10): hostId  hostname:port  [host_dir]
+# 5f1e0c7d2b3a4c5d6e7f8a9b mongo1.example.net:27017

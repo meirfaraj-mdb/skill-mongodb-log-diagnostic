@@ -69,17 +69,45 @@ _ENV_FIELDS.update({
     "metrics_graph_groups": "METRICS_GRAPH_GROUPS", "metrics_graph_config": "METRICS_GRAPH_CONFIG",
     "resource_investigation_enabled": "RESOURCE_INVESTIGATION_ENABLED",
     "resource_thresholds": "RESOURCE_THRESHOLDS",
+    "advisor_appendix_enabled": "ADVISOR_APPENDIX_ENABLED",
+    "trend_increase_pct": "TREND_INCREASE_PCT", "trend_min_abs_increase": "TREND_MIN_ABS_INCREASE",
+    "trend_ratio_threshold": "TREND_RATIO_THRESHOLD",
+    "query_stats_skip_existing": "QUERY_STATS_SKIP_EXISTING",
+    "offline_cve_include_unreviewed": "OFFLINE_CVE_INCLUDE_UNREVIEWED",
+    "query_shape_split_to_nodes": "QUERY_SHAPE_SPLIT_TO_NODES",
+    "cluster_summary_source": "CLUSTER_SUMMARY_SOURCE",
 })
-_BOOL_FIELDS = {"cluster_summary", "observability_enabled", "index_stats_enabled", "profiler_enabled",
-                "metrics_graphs_enabled", "resource_investigation_enabled"}
+# Per-environment notifications (agent/notifications.py). Tokens/webhooks are NOT here: they live in the
+# separate NOTIFICATION_SECRET_ID secret (or NOTIFICATION_CONFIG_FILE locally).
+_ENV_FIELDS.update({
+    "environment": "ENVIRONMENT", "notify_source": "NOTIFY_SOURCE", "notify_after_report": "NOTIFY_AFTER_REPORT",
+    "notify_env_overrides": "NOTIFY_ENV_OVERRIDES",
+    "jira_mode": "JIRA_MODE", "jira_priorities": "JIRA_PRIORITIES", "jira_base_url": "JIRA_BASE_URL",
+    "jira_deployment": "JIRA_DEPLOYMENT", "jira_project_key": "JIRA_PROJECT_KEY", "jira_issue_type": "JIRA_ISSUE_TYPE",
+    "jira_assignee": "JIRA_ASSIGNEE", "jira_assignee_field": "JIRA_ASSIGNEE_FIELD", "jira_labels": "JIRA_LABELS",
+    "jira_components": "JIRA_COMPONENTS", "jira_parent_key": "JIRA_PARENT_KEY", "jira_epic_key": "JIRA_EPIC_KEY",
+    "jira_epic_link_field": "JIRA_EPIC_LINK_FIELD", "jira_priority_map": "JIRA_PRIORITY_MAP",
+    "jira_extra_fields": "JIRA_EXTRA_FIELDS", "jira_dedupe_scope": "JIRA_DEDUPE_SCOPE",
+    "jira_comment_on_existing": "JIRA_COMMENT_ON_EXISTING", "jira_max_issues": "JIRA_MAX_ISSUES",
+    "jira_summary_template": "JIRA_SUMMARY_TEMPLATE",
+    "slack_mode": "SLACK_MODE", "slack_priorities": "SLACK_PRIORITIES", "slack_channel": "SLACK_CHANNEL",
+    "slack_mentions": "SLACK_MENTIONS", "slack_repeat_after_days": "SLACK_REPEAT_AFTER_DAYS",
+    "slack_max_findings": "SLACK_MAX_FINDINGS",
+})
+_BOOL_FIELDS = {"cluster_summary", "offline_cve_include_unreviewed", "observability_enabled", "index_stats_enabled", "profiler_enabled",
+                "metrics_graphs_enabled", "resource_investigation_enabled", "advisor_appendix_enabled",
+                "query_stats_skip_existing", "query_shape_split_to_nodes", "notify_after_report",
+                "jira_comment_on_existing"}
 _JSON_FIELDS = {"observability_sources": dict, "atlas_process_ids": dict, "ops_manager_host_ids": dict,
                 "query_plan_requests": list, "metrics_graph_groups": list, "metrics_graph_config": dict,
-                "resource_thresholds": dict}
+                "resource_thresholds": dict, "notify_env_overrides": dict, "jira_priority_map": dict,
+                "jira_extra_fields": dict}
 _INT_FIELDS = {"http_timeout_seconds", "max_retries", "slow_ms", "expected_node_count",
                "report_max_tokens", "report_max_input_chars"}
 _INT_FIELDS.update({"mongodb_timeout_ms", "mongodb_max_time_ms", "observability_max_rows",
                     "index_stats_max_collections", "query_shape_window_hours", "query_stats_max_summaries",
-                    "observability_api_max_pages"})
+                    "observability_api_max_pages", "trend_increase_pct", "trend_min_abs_increase",
+                    "trend_ratio_threshold", "jira_max_issues", "slack_repeat_after_days", "slack_max_findings"})
 _CREDENTIAL_FIELDS = {"atlas_public_key", "atlas_private_key"}
 
 
@@ -224,6 +252,10 @@ class LocalStore:
     def download(self, key, path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_bytes(self._p(key).read_bytes())
+
+    def open_read(self, key):
+        """Binary reader over the stored object (streamed extraction input)."""
+        return open(self._p(key), "rb")
 
     def _write_meta(self, key, content_type, metadata):
         self._p(key + ".meta.json").write_text(json.dumps({"content_type": content_type, **(metadata or {})}))

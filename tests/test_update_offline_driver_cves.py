@@ -36,18 +36,20 @@ class RefreshTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'No representable'):
             mod.refresh(self.catalog, self.fetch, '2026-10-04')
         self.record['affected'][0]['package']['name'] = 'go.mongodb.org/mongo-driver/v2'
+        # No fix released: kept as an open-ended interval, not dropped.
         self.record['affected'][0]['ranges'][0]['events'] = [{'introduced': '2.0.0'}]
-        with self.assertRaisesRegex(ValueError, 'No representable'):
-            mod.refresh(self.catalog, self.fetch, '2026-10-04')
+        result, stats = mod.refresh(self.catalog, self.fetch, '2026-10-04')
+        self.assertEqual(result['entries'][0]['affected'], [{'introduced': '2.0.0', 'unfixed': True}])
+        self.assertEqual(stats['unfixed_entries'], ['CVE-2026-88031'])
     def test_full_language_coverage_declares_gaps(self):
-        self.assertEqual(set(mod.COVERAGE), {"C", "C++", ".NET/C#", "Go", "Java", "Kotlin", "Node.js/JS/TS", "PHP", "Python", "Ruby", "Rust", "Scala"})
+        self.assertEqual(set(mod.COVERAGE), {"C", "C++", ".NET/C#", "Go", "Java", "Kotlin", "Node.js/JS/TS", "PHP", "Python", "Ruby", "Rust", "Scala", "Swift"})
         self.assertEqual(mod.COVERAGE['C'][0], 'gap')
         self.assertEqual(mod.COVERAGE['C++'][0], 'gap')
         self.assertEqual(mod.COVERAGE['PHP'][0], 'partial')
-        self.assertEqual(len(mod.PACKAGES), 16)
+        self.assertEqual(len(mod.PACKAGES), 21)
         self.assertEqual(len(mod.PACKAGES), len(set((ecosystem, package) for _, ecosystem, package in mod.PACKAGES)))
         result, stats = mod.refresh(self.catalog, self.fetch, '2026-10-04')
-        self.assertEqual(stats['packages_queried'], 16)
+        self.assertEqual(stats['packages_queried'], 21)
         self.assertEqual(stats['coverage']['C++']['status'], 'gap')
         self.assertIn('PHP native extension', result['coverage_note'])
 

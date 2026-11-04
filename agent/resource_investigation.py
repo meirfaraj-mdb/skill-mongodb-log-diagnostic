@@ -211,8 +211,8 @@ def correlate(extract, start, end, top=10):
         hits = [(t, d) for t, d in _occurrence_times(g.get("occurrence_timestamps")) if start <= t <= end]
         if not hits:
             continue
-        def total(field):
-            vals = [_num(d.get(field)) for _, d in hits]
+        def total(field, *aliases):
+            vals = [_num(next((d.get(f) for f in (field, *aliases) if d.get(f) is not None), None)) for _, d in hits]
             vals = [v for v in vals if v is not None]
             return round(sum(vals), 2) if vals else None
         reads = [_bytes_read(d.get("storage")) for _, d in hits]
@@ -221,7 +221,7 @@ def correlate(extract, start, end, top=10):
                      "app_names": (g.get("app_names") or [])[:5], "occurrences_in_window": len(hits),
                      "first_in_window_utc": min(t for t, _ in hits).isoformat(),
                      "last_in_window_utc": max(t for t, _ in hits).isoformat(),
-                     "duration_ms_total": total("duration_ms"), "cpu_nanos_total": total("cpu_nanos"),
+                     "duration_ms_total": total("duration_ms"), "cpu_nanos_total": total("cpuNanos", "cpu_nanos"),
                      "docs_examined_total": total("docs_examined"), "keys_examined_total": total("keys_examined"),
                      "n_returned_total": total("n_returned"),
                      "storage_bytes_read_total": round(sum(reads), 0) if reads else None,

@@ -1,4 +1,4 @@
-"""One-page per-node metric graphs (report Appendix 2).
+"""One-page per-node metric graphs (report Appendix 1).
 
 Ported from slowInvest ``sl_plot/graphs.py`` (``plot_all_metricsForProcess`` /
 ``plot_metric_group``): one panel per configured metric group, every metric of the group on the
@@ -225,7 +225,7 @@ def render_one_page(panels, title, png_path, svg_path=None, subtitle=None):
 
 
 def appendix_markdown(png_name, panels, empty, payload, svg_name=None, unavailable_reason=None):
-    """Markdown body for Appendix 2 (heading is added by the caller)."""
+    """Markdown body for Appendix 1 (heading is added by the caller)."""
     window = payload.get("window", {}) if isinstance(payload, dict) else {}
     plan = payload.get("measurement_plan", {}) if isinstance(payload, dict) else {}
     lines = []

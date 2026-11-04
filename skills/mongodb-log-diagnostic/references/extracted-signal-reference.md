@@ -125,7 +125,7 @@ Important group fields are:
 - `collscan_count` and `sort_stage_count`: counts within the group.
 - `examined_returned_ratio_max`: maximum examined-to-returned ratio using the larger of keys/docs examined.
 - `first_seen` and `last_seen`: normalized UTC timestamps.
-- `sample_query_shape`: redacted structural command shape; literal values are replaced with `?` and sensitive fields are omitted.
+- `sample_query_shape`: redacted structural command shape; literal values are replaced with `?` and sensitive fields are omitted. Since parser 1.4, top-level command options keep their logged values (validated short settings only): `$db`, `$readPreference`, `readConcern` (level), `writeConcern`, `batchSize`, `singleBatch`, `limit`, `skip`, `maxTimeMS`, `maxAwaitTimeMS`, `allowDiskUse`, `hint`, `cursor`, and cursor flags. A getMore adds `getMoreOptions` (its own `batchSize`/`maxTimeMS`). Use them for read-routing, read-concern, cursor-batching, and timeout analysis; they are settings, not user data.
 - `sample_message`: redacted message suffix when available.
 - `occurrence_timestamps`: full-file occurrence evidence only.
 

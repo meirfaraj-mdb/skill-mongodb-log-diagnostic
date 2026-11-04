@@ -10,14 +10,34 @@ Source keys: query_stats, index_definitions, index_stats, coll_stats, query_plan
 
 Historical producer snapshots must identify collection time and counter reset/entry timestamps. Missing metadata disables historical claims rather than creating false 24-hour evidence.
 
-## Per-node metric graphs (report APPENDIX 2)
+## Per-node metric graphs (report APPENDIX 1)
 
 * `MONGODB_LOG_DIAG_METRICS_GRANULARITY`: `PT1M`, `PT5M` (default), `PT1H` or `P1D` for the 24h measurements window.
-* `MONGODB_LOG_DIAG_METRICS_GRAPHS_ENABLED`: true/false (default true). Adds APPENDIX 2 to a node report only when that node's metrics file has data points; the graph is embedded in `report.md` as a base64 PNG (`data:image/png;base64,...`).
+* `MONGODB_LOG_DIAG_METRICS_GRAPHS_ENABLED`: true/false (default true). Adds APPENDIX 1 (before APPENDIX 2, Performance Advisor, and APPENDIX 3, the reported query forms) to a node report only when that node's metrics file has data points; the graph is embedded in `report.md` as a base64 PNG (`data:image/png;base64,...`).
 * `MONGODB_LOG_DIAG_METRICS_GRAPH_GROUPS`: JSON list of group names to graph; defaults to the 21 groups in `agent/metrics_catalog.py` (`DEFAULT_SELECTED_GROUPS`): the 18 original groups plus `NORMALIZED_SYSTEM_CPU`, `MAX_NORMALIZED_SYSTEM_CPU` and `DISK_QUEUE_DEPTH` (avg `DISK_QUEUE_DEPTH` + `MAX_DISK_QUEUE_DEPTH`).
 * `MONGODB_LOG_DIAG_METRICS_GRAPH_CONFIG`: optional JSON object with the slowInvest `cluster.per_node.graph` shape: `{"group_of_metrics": {"GROUP": {"list_of_metrics": [...]}}, "metrics": ["GROUP", ...]}`. Entries are merged over the built-in groups.
 
 Only measurements needed by the selected groups are requested (repeated `m` parameters, at most 10 per call). Names are validated against the documented Atlas `m` values; template aliases are mapped (`FTS_PROCESS_RESIDENT_MEMORY`→`FTS_MEMORY_RESIDENT`, `FTS_PROCESS_VIRTUAL_MEMORY`→`FTS_MEMORY_VIRTUAL`, `FTS_DISK_USAGE`→`FTS_DISK_UTILIZATION`) and names without an API equivalent are listed in the appendix instead of being requested. A batch rejected with HTTP 400 is retried per metric. Disk-partition metrics (`DISK_QUEUE_DEPTH`, `MAX_DISK_QUEUE_DEPTH`) are requested per partition from `/processes/{id}/disks/{partition}/measurements` (up to 4 partitions); `MAX_DISK_QUEUE_DEPTH` is not in the documented `m` list, so it is requested alone and, if rejected, read from a request without `m`. With several partitions each one gets its own line in the graph. Graphs are embedded in `report.md` as a base64 PNG (no separate image file); the embedded image is replaced by a placeholder before node reports are sent to the cluster-summary model.
+
+## Performance Advisor (report APPENDIX 2)
+
+* `MONGODB_LOG_DIAG_ADVISOR_APPENDIX_ENABLED`: true/false (default true). Adds APPENDIX 2 between the metrics graphs and the query forms, only when the node's `advisor/advisor.json` contains at least one suggested index, advisor query shape or slow namespace outside admin/config/local and `__mdb_internal*`. Rendered deterministically by `agent/advisor_appendix.py`.
+* Accepted formats: the collector envelope (`{"source": "atlas_api_advisor"|"ops_manager_advisor", "window", "data": [API pages]}`), a bare API page (`{"suggestedIndexes": [...], "shapes": [...]}`), index keys as `index: [{field: 1}, ...]` or `indexes: [{key: {...}}]`, and Ops Manager `slow_namespaces`.
+* Content: suggested index keys (field names and directions only), number of shapes impacted, weight, whether the same key already exists in `indexDefinitions/index-definitions.json` (when supplied); advisor query shapes with executions, average ms, max docs examined/returned and inefficiency score. Example predicates and raw operations are never printed.
+
+## Report input size
+
+* `MONGODB_LOG_DIAG_REPORT_MAX_INPUT_CHARS`: unset by default. Per node: 60,000 characters, or 90,000 when the node has metrics and the resource investigation runs (`MONGODB_LOG_DIAG_RESOURCE_INVESTIGATION_ENABLED`, default true). An explicit positive value applies to every node. Larger inputs are reduced (occurrences outside resource episodes, baselines, raw stats, then a bounded per-document reduction), never truncated mid-JSON.
+
+## Cluster summary: new or sharply increasing issues
+
+When a node has BOTH baselines (n-1 and n-8 `extractionshort.json`), `agent/trend_alerts.py` compares the day with each baseline and the cluster summary gets `## New or sharply increasing issues (vs n-1 and n-8)` right after the executive summary (the table is inserted deterministically; the model only comments on it). Listed when bad and either new (absent from both baselines) or at least +`MONGODB_LOG_DIAG_TREND_INCREASE_PCT` % (default 200, i.e. 3×) above n-1 or n-8 with at least `MONGODB_LOG_DIAG_TREND_MIN_ABS_INCREASE` (default 5) more occurrences:
+
+* slow-query groups that are COLLSCAN (change streams excluded), poorly indexed (docs examined/returned ≥ `MONGODB_LOG_DIAG_TREND_RATIO_THRESHOLD`, default 100) or use an in-memory sort; also a 3× median-latency increase for such a query;
+* error groups (fingerprint/category), with a redacted message template;
+* totals: slow operations, COLLSCAN operations, error events and groups, F/E/W severities, slow CPU and duration, incompatible drivers, plus new incompatible driver versions.
+
+System namespaces and platform-managed components are skipped. Nodes missing a baseline are listed as not compared. The full result is stored in `cluster/reports/trend-alerts.json`.
 
 ### High resource usage investigation
 

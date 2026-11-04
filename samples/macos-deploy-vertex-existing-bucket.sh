@@ -113,7 +113,7 @@ payload = {
   "timezone": timezone, "report_name": report_name, "storage_provider": "gcs",
   "llm_provider": "vertex", "vertex_model": model, "vertex_location": location,
   "vertex_project": project, "slow_ms": 1000, "expected_node_count": 3,
-  "report_max_tokens": 16000, "report_max_input_chars": 600000, "cluster_summary": True
+  "report_max_tokens": 16000, "cluster_summary": True
 }
 with open(out, "w", encoding="utf-8") as handle: json.dump(payload, handle, indent=2)
 PY

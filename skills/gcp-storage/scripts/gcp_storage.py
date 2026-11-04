@@ -68,6 +68,10 @@ class GCSStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.bucket.blob(key).download_to_filename(str(path))
 
+    def open_read(self, key: str):
+        """Sequential binary reader (ranged, retried chunk reads; same bytes as download())."""
+        return self.bucket.blob(key).open("rb", chunk_size=CHUNK)
+
     def _blob(self, key: str, metadata: dict | None):
         blob = self.bucket.blob(key, chunk_size=CHUNK)
         if metadata:

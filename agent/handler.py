@@ -44,9 +44,16 @@ def run_pipeline(event: dict, config: dict | None = None) -> dict:
             out["observability"] = {"status": "skipped_existing_bucket", "log_date": log_date}
         else:
             out["observability"] = observability_stage.run(config, log_date)
-    if stage in ("all", "report", "cluster-summary"):
+    if stage in ("all", "report", "cluster-summary", "cluster-summary-md"):
+        if stage == "cluster-summary-md":
+            # Only the alternative summary built from the stored node report.md files.
+            config = {**config, "cluster_summary_source": "node_reports"}
         out["report"] = report_stage.run(
-            config, log_date, summary_only=(stage == "cluster-summary"))
+            config, log_date, summary_only=stage in ("cluster-summary", "cluster-summary-md"))
+    if stage == "notify":
+        # Re-run only the P0 Jira / P1 Slack step from the stored cluster reports (idempotent: ledger + JQL).
+        from . import notifications
+        out["notify"] = notifications.run(config, log_date)
     return out
 
 
@@ -60,7 +67,8 @@ def lambda_handler(event, context):
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="MongoDB log diagnostic agent")
     parser.add_argument("--stage", default=os.environ.get("STAGE", "all"),
-                        choices=["all", "download", "extract", "observability", "report", "cluster-summary"])
+                        choices=["all", "download", "extract", "observability", "report", "cluster-summary",
+                                 "cluster-summary-md", "notify"])
     parser.add_argument("--log-date", default=None)
     parser.add_argument("--no-skip-existing", action="store_true",
                         help="re-download logs even if already stored")

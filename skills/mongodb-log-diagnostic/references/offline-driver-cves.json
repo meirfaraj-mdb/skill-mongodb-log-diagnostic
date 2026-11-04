@@ -4,11 +4,38 @@
   "catalog_version": "2026-10-04-osv-candidates",
   "refreshed_at": "2026-10-04",
   "refresh_owner": "OSV automated import; human review required for new/changed ranges",
-  "coverage_note": "Incomplete OSV snapshot for exact allowlisted packages; C/C++ and the PHP native extension are not covered. New or changed matches are unreviewed and excluded from reports. Absence of a match is not evidence of safety; a match does not establish application exposure.",
+  "coverage_note": "Incomplete OSV snapshot for exact allowlisted packages; C/C++ and the PHP native extension are not covered. New or changed matches are unreviewed and excluded from reports unless MONGODB_LOG_DIAG_OFFLINE_CVE_INCLUDE_UNREVIEWED=true (then labelled unreviewed_candidate). Absence of a match is not evidence of safety; a match does not establish application exposure.",
   "sources": [
     "https://api.osv.dev/v1"
   ],
   "entries": [
+    {
+      "cve": "CVE-2021-20329",
+      "driver": "mongo-go-driver",
+      "affected": [
+        {
+          "introduced": "0",
+          "fixed": "1.5.1"
+        }
+      ],
+      "advisory_ids": [
+        "CVE-2021-20329",
+        "GHSA-f6mq-5m25-4r72",
+        "GO-2021-0112"
+      ],
+      "severity": "review advisory",
+      "summary": "Improper input validation in go.mongodb.org/mongo-driver",
+      "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
+      "source": "https://api.osv.dev/v1/vulns/GO-2021-0112",
+      "reviewed": false,
+      "packages": [
+        {
+          "ecosystem": "Go",
+          "name": "go.mongodb.org/mongo-driver",
+          "osv_id": "GO-2021-0112"
+        }
+      ]
+    },
     {
       "cve": "CVE-2021-20328",
       "driver": "mongo-java-driver",
@@ -34,12 +61,32 @@
           "fixed": "4.2.1"
         }
       ],
-      "severity": "review advisory",
+      "advisory_ids": [
+        "CVE-2021-20328",
+        "GHSA-rghw-6px2-fgwc"
+      ],
+      "severity": "MODERATE",
+      "cvss": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N",
       "summary": "Improper Certificate Validation in MongoDB",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-rghw-6px2-fgwc",
       "reviewed": false,
       "packages": [
+        {
+          "ecosystem": "Maven",
+          "name": "org.mongodb:mongo-java-driver",
+          "osv_id": "GHSA-rghw-6px2-fgwc"
+        },
+        {
+          "ecosystem": "Maven",
+          "name": "org.mongodb:mongodb-driver",
+          "osv_id": "GHSA-rghw-6px2-fgwc"
+        },
+        {
+          "ecosystem": "Maven",
+          "name": "org.mongodb:mongodb-driver-legacy",
+          "osv_id": "GHSA-rghw-6px2-fgwc"
+        },
         {
           "ecosystem": "Maven",
           "name": "org.mongodb:mongodb-driver-sync",
@@ -64,7 +111,12 @@
           "fixed": "5.8.0"
         }
       ],
-      "severity": "review advisory",
+      "advisory_ids": [
+        "CVE-2021-32050",
+        "GHSA-vxvm-qww3-2fh7"
+      ],
+      "severity": "MODERATE",
+      "cvss": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:U/C:H/I:N/A:N",
       "summary": "MongoDB Driver may publish events containing authentication-related data",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-vxvm-qww3-2fh7",
@@ -79,14 +131,19 @@
     },
     {
       "cve": "CVE-2021-32050",
-      "driver": "mongo-php-driver",
+      "driver": "mongo-php-library",
       "affected": [
         {
           "introduced": "1.0.0",
           "fixed": "1.9.2"
         }
       ],
-      "severity": "review advisory",
+      "advisory_ids": [
+        "CVE-2021-32050",
+        "GHSA-vxvm-qww3-2fh7"
+      ],
+      "severity": "MODERATE",
+      "cvss": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:U/C:H/I:N/A:N",
       "summary": "MongoDB Driver may publish events containing authentication-related data",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-vxvm-qww3-2fh7",
@@ -101,7 +158,7 @@
     },
     {
       "cve": "CVE-2026-81525",
-      "driver": "mongo-php-driver",
+      "driver": "mongo-php-library",
       "affected": [
         {
           "introduced": "2.0.0",
@@ -130,7 +187,12 @@
           "fixed": "2.8.2"
         }
       ],
-      "severity": "review advisory",
+      "advisory_ids": [
+        "CVE-2024-6382",
+        "GHSA-32jf-h775-g29h"
+      ],
+      "severity": "MODERATE",
+      "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:L",
       "summary": "MongoDB Rust driver may issue unintended commands",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-32jf-h775-g29h",
@@ -140,6 +202,61 @@
           "ecosystem": "crates.io",
           "name": "mongodb",
           "osv_id": "GHSA-32jf-h775-g29h"
+        }
+      ]
+    },
+    {
+      "cve": "CVE-2021-32050",
+      "driver": "mongo-swift-driver",
+      "affected": [
+        {
+          "introduced": "1.0.0",
+          "fixed": "1.1.1"
+        }
+      ],
+      "advisory_ids": [
+        "CVE-2021-32050",
+        "GHSA-vxvm-qww3-2fh7"
+      ],
+      "severity": "MODERATE",
+      "cvss": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:U/C:H/I:N/A:N",
+      "summary": "MongoDB Driver may publish events containing authentication-related data",
+      "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
+      "source": "https://api.osv.dev/v1/vulns/GHSA-vxvm-qww3-2fh7",
+      "reviewed": false,
+      "packages": [
+        {
+          "ecosystem": "SwiftURL",
+          "name": "github.com/mongodb/mongo-swift-driver",
+          "osv_id": "GHSA-vxvm-qww3-2fh7"
+        }
+      ]
+    },
+    {
+      "cve": "CVE-2024-5629",
+      "driver": "pymongo",
+      "affected": [
+        {
+          "introduced": "0",
+          "fixed": "4.6.3"
+        }
+      ],
+      "advisory_ids": [
+        "CVE-2024-5629",
+        "GHSA-m87m-mmvp-v9qm",
+        "PYSEC-2026-1826"
+      ],
+      "severity": "MODERATE",
+      "cvss": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:N/A:L",
+      "summary": "PyMongo Out-of-bounds Read in the bson module",
+      "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
+      "source": "https://api.osv.dev/v1/vulns/GHSA-m87m-mmvp-v9qm",
+      "reviewed": false,
+      "packages": [
+        {
+          "ecosystem": "PyPI",
+          "name": "pymongo",
+          "osv_id": "GHSA-m87m-mmvp-v9qm"
         }
       ]
     }

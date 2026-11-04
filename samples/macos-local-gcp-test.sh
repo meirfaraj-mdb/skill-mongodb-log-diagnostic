@@ -82,7 +82,6 @@ config = {
   "slow_ms": 1000,
   "expected_node_count": 3,
   "report_max_tokens": 16000,
-  "report_max_input_chars": 600000,
   "cluster_summary": True
 }
 if project:

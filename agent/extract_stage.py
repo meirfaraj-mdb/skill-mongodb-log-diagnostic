@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import sys
 import tempfile
 from pathlib import Path
@@ -110,33 +111,103 @@ def _streams(keys):
     return [pieces for _, pieces in sorted(result, key=lambda pair: _natural(pair[0]))]
 
 
-def assemble_input(store, keys, work):
-    """Stream all input through one gzip; preserve records cut by byte splitting.
+BLOCK = 1024 * 1024
 
-Independent files are separated by a newline if needed. Memory stays bounded;
-only one downloaded source and the combined gzip are held on disk at a time.
-"""
+
+def _open_source(store, key, work):
+    """Yield a binary reader over one source object's *decompressed* bytes.
+
+Uses ``store.open_read(key)`` when the store offers it (no local copy);
+otherwise downloads to ``source.tmp`` (one source on disk at a time)."""
+    opener = getattr(store, "open_read", None)
+    gz = key.lower().endswith(".gz")
+    raw = None
+    if callable(opener):
+        try:
+            raw = opener(key)
+        except (AttributeError, NotImplementedError):
+            raw = None  # wrapped store without streaming support
+    if raw is not None:
+        try:
+            yield gzip.GzipFile(fileobj=raw, mode="rb") if gz else raw
+        finally:
+            raw.close()
+        return
+    local = work / "source.tmp"
+    store.download(key, local)
+    try:
+        with (gzip.open if gz else open)(local, "rb") as incoming:
+            yield incoming
+    finally:
+        local.unlink(missing_ok=True)
+
+
+def iter_input_blocks(store, keys, work):
+    """Decompressed input as byte blocks; preserve records cut by byte splitting.
+
+Independent files are separated by a newline if needed; pieces of one split
+sequence are concatenated with nothing inserted. Memory stays bounded."""
+    last = b""
+    for sequence in _streams(keys):
+        if last and last != b"\n":
+            yield b"\n"
+            last = b"\n"
+        for key in sequence:
+            for incoming in _open_source(store, key, work):
+                while True:
+                    block = incoming.read(BLOCK)
+                    if not block:
+                        break
+                    last = block[-1:]
+                    yield block
+
+
+def assemble_input(store, keys, work):
+    """File fallback: write all input to one gzip (level 1: it is read once, locally)."""
     target = work / "node-input.gz"
-    with gzip.open(target, "wb") as combined:
-        last = b""
-        for sequence in _streams(keys):
-            if last and last != b"\n":
-                combined.write(b"\n")
-            for key in sequence:
-                local = work / "source.tmp"
-                store.download(key, local)
-                try:
-                    opener = gzip.open if key.lower().endswith(".gz") else open
-                    with opener(local, "rb") as incoming:
-                        while True:
-                            block = incoming.read(1024 * 1024)
-                            if not block:
-                                break
-                            combined.write(block)
-                            last = block[-1:]
-                finally:
-                    local.unlink(missing_ok=True)
+    with gzip.open(target, "wb", compresslevel=1) as combined:
+        for block in iter_input_blocks(store, keys, work):
+            combined.write(block)
     return target
+
+
+def _stream_enabled() -> bool:
+    return os.environ.get("MONGODB_LOG_DIAG_EXTRACT_STREAM", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _run_streaming(cmd, cwd, blocks, timeout_s, work):
+    """Run the extractor reading stdin; feed it blocks; enforce the timeout. Returns (rc, stderr)."""
+    err_path = work / "extractor.stderr"
+    with open(err_path, "wb") as err, open(os.devnull, "wb") as out:
+        proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=out, stderr=err)
+        expired = threading.Event()
+
+        def _expire():
+            expired.set()
+            proc.kill()
+        timer = threading.Timer(timeout_s, _expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            try:
+                for block in blocks:
+                    proc.stdin.write(block)
+            except BrokenPipeError:
+                pass  # extractor exited early; its return code and stderr explain why
+            finally:
+                try:
+                    proc.stdin.close()
+                except BrokenPipeError:
+                    pass
+            rc = proc.wait()
+        except BaseException:
+            proc.kill(); proc.wait()
+            raise
+        finally:
+            timer.cancel()
+    if expired.is_set():
+        raise subprocess.TimeoutExpired(cmd, timeout_s)
+    return rc, err_path.read_text(encoding="utf-8", errors="replace")
 
 
 def extract_one(store, layout: Layout, log_date: str, entry: dict, slow_ms: float,
@@ -147,7 +218,8 @@ def extract_one(store, layout: Layout, log_date: str, entry: dict, slow_ms: floa
     keys = entry["source_keys"]
     targets = {n: layout.extract(log_date, host_dir, log_name, n) for n in EXTRACT_FILES}
     manifest_key = layout.extract(log_date, host_dir, log_name, MANIFEST)
-    expected = {"version": 1, "source_keys": keys}
+    # parser_version: an extract written by an older extractor (e.g. pre-1.4 "$db: ?" shapes) is redone.
+    expected = {"version": 1, "parser_version": extractor_version(skill_dir), "source_keys": keys}
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="extract-", dir=WORK_DIR))
     try:
@@ -161,14 +233,28 @@ def extract_one(store, layout: Layout, log_date: str, entry: dict, slow_ms: floa
             except (OSError, ValueError):
                 logger.warning("Unreadable source manifest for %s; re-extracting", host_dir)
         validate_skill_bundle(skill_dir)
-        local_log = assemble_input(store, keys, work)
         out_dir = work / "out"
         cmd = [sys.executable, str(skill_dir / "scripts" / "extract_mongodb_log.py"),
-               "--output", str(out_dir), "--slow-ms", str(slow_ms), str(local_log)]
+               "--output", str(out_dir), "--slow-ms", str(slow_ms)]
         logger.info("Running one extractor for %s/%s (%s source files)", host_dir, log_name, len(keys))
-        proc = subprocess.run(cmd, cwd=str(skill_dir), capture_output=True, text=True, timeout=timeout_s)
-        if proc.returncode != 0:
-            raise RuntimeError(f"Extractor failed rc={proc.returncode}: {proc.stderr[-2000:]}")
+        if _stream_enabled():
+            # Decompressed bytes go straight to the extractor: no node-input.gz re-compression.
+            # --input-name keeps the recorded input file name identical to the file path below.
+            rc, stderr = _run_streaming(cmd + ["--input-name", "node-input.gz", "-"], str(skill_dir),
+                                        iter_input_blocks(store, keys, work), timeout_s, work)
+        else:
+            local_log = assemble_input(store, keys, work)
+            proc = subprocess.run(cmd + [str(local_log)], cwd=str(skill_dir), capture_output=True,
+                                  text=True, timeout=timeout_s)
+            rc, stderr = proc.returncode, proc.stderr
+        if rc != 0:
+            raise RuntimeError(f"Extractor failed rc={rc}: {stderr[-2000:]}")
+        timings = stderr
+        # Make the speed-up visible: parser version, JSON reader, input mode and the extractor's own timings.
+        logger.info("Extractor %s for %s/%s: parser=%s input=%s %s", "finished", host_dir, log_name,
+                    extractor_version(skill_dir), "stream" if _stream_enabled() else "file(gzip-1)",
+                    " | ".join(line.strip() for line in timings.splitlines()
+                               if line.strip().startswith(("JSON reader", "Loading log", "Writing output", "Total extraction"))))
         for name in targets:
             if not (out_dir / name).is_file():
                 raise RuntimeError(f"Extractor did not produce {name}")
@@ -184,6 +270,18 @@ def extract_one(store, layout: Layout, log_date: str, entry: dict, slow_ms: floa
         return {**entry, "status": "extracted", "extract": targets, "uploaded": uploaded}
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+_VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.M)
+
+
+def extractor_version(skill_dir: Path) -> str | None:
+    """The bundled extractor's VERSION constant (read from source; the script is not imported)."""
+    try:
+        match = _VERSION_RE.search((Path(skill_dir) / "scripts" / "extract_mongodb_log.py").read_text(encoding="utf-8"))
+    except OSError:
+        return None
+    return match.group(1) if match else None
 
 
 def _shard(items: list, index: int | None, count: int | None) -> list:
