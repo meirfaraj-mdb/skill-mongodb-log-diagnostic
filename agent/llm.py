@@ -1,7 +1,9 @@
 """LLM backends for report generation.
 
-Bedrock and direct Anthropic use their respective SDKs. Vertex Claude uses
-rawPredict; Vertex Gemini uses the Google Gen AI SDK (Vertex AI API v1).
+Bedrock and direct Anthropic use their respective SDKs.
+Vertex uses plain REST over google-auth + requests for every model:
+Claude -> rawPredict, Gemini -> generateContent (Vertex AI API v1).
+No google-genai SDK is required.
 Report generation may continue when a model reaches its output token limit.
 """
 from __future__ import annotations
@@ -89,6 +91,8 @@ class BedrockLLM:
 
 
 class VertexLLM:
+    """Vertex AI over REST for both Claude and Gemini (google-auth + requests only)."""
+
     def __init__(self, config: dict, session=None, client=None):
         configured_model = config.get("vertex_model") or os.environ.get("VERTEX_MODEL") or "claude-sonnet-5"
         if configured_model.startswith("publishers/"):
@@ -114,30 +118,24 @@ class VertexLLM:
             self.project = detected
         if not self.project:
             raise ValueError("Set MONGODB_LOG_DIAG_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT")
-
         self.session = session
-        self.client = client
-        if self.is_claude and self.session is None:
+        self.client = client  # unused; kept so existing callers passing client= do not break
+        if self.session is None:
+            # Same authenticated REST session for Claude and Gemini: no google-genai needed.
             import google.auth
             from google.auth.transport.requests import AuthorizedSession
             creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
             self.session = AuthorizedSession(creds)
-        if not self.is_claude and self.client is None:
-            from google import genai
-            from google.genai import types
-            self.client = genai.Client(
-                vertexai=True, project=self.project, location=self.location,
-                http_options=types.HttpOptions(api_version="v1"),
-            )
 
     def _url(self) -> str:
-        """Claude rawPredict endpoint (Gemini requests use the Gen AI client)."""
+        """Claude -> rawPredict, Gemini -> generateContent (Vertex AI REST v1)."""
         host = "aiplatform.googleapis.com" if self.location == "global" else f"{self.location}-aiplatform.googleapis.com"
+        method = "rawPredict" if self.is_claude else "generateContent"
         return (f"https://{host}/v1/projects/{self.project}/locations/{self.location}"
-                f"/publishers/{self.publisher}/models/{self.model}:rawPredict")
+                f"/publishers/{self.publisher}/models/{self.model}:{method}")
 
     def _post(self, body: dict) -> dict:
-        """Send a Claude request without logging prompts or arbitrary headers."""
+        """Send a Vertex request without logging prompts or arbitrary headers."""
         url = self._url()
         started = time.monotonic()
         logger.info("Vertex request starting project=%s location=%s publisher=%s model=%s endpoint=%s",
@@ -199,24 +197,19 @@ class VertexLLM:
                                  {"role": "user", "content": CONTINUE}])
             return "".join(parts)
 
-        from google.genai import types
-        contents = [types.Content(role="user", parts=[types.Part.from_text(text=user_content)])]
+        # Gemini: Vertex AI REST generateContent (same session/auth as Claude).
+        contents = [{"role": "user", "parts": [{"text": user_content}]}]
         for turn in range(self.max_continuations + 1):
-            response = self.client.models.generate_content(
-                model=self.model, contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    max_output_tokens=self.max_tokens,
-                    temperature=0.1,
-                ),
-            )
-            candidate = (response.candidates or [None])[0]
-            content = getattr(candidate, "content", None)
-            text = "".join(part.text or "" for part in (getattr(content, "parts", None) or [])
-                           if getattr(part, "text", None))
-            finish = getattr(candidate, "finish_reason", None)
-            finish = getattr(finish, "value", finish)
-            logger.info("Vertex/Gemini turn=%d finish=%s usage=%s", turn, finish, response.usage_metadata)
+            data = self._post({
+                "contents": contents,
+                "systemInstruction": {"parts": [{"text": system_prompt}]},
+                "generationConfig": {"maxOutputTokens": self.max_tokens, "temperature": 0.1},
+            })
+            candidate = (data.get("candidates") or [{}])[0]
+            text = "".join(p.get("text", "") for p in (candidate.get("content") or {}).get("parts", [])
+                           if not p.get("thought"))
+            finish = candidate.get("finishReason")
+            logger.info("Vertex/Gemini turn=%d finish=%s usage=%s", turn, finish, data.get("usageMetadata"))
             if not text and finish != "MAX_TOKENS":
                 raise RuntimeError("Gemini produced no report text; check finish reason and safety settings")
             parts.append(text)
@@ -225,8 +218,8 @@ class VertexLLM:
             if not text:
                 raise RuntimeError("Gemini hit the token limit without report text")
             contents.extend([
-                types.Content(role="model", parts=[types.Part.from_text(text=text)]),
-                types.Content(role="user", parts=[types.Part.from_text(text=CONTINUE)]),
+                {"role": "model", "parts": [{"text": text}]},
+                {"role": "user", "parts": [{"text": CONTINUE}]},
             ])
         return "".join(parts)
 
