@@ -11,12 +11,15 @@ from .skills import diagnostic_skill_dir
 
 BASELINES = (("n-1", -1, "yesterday"), ("n-8", -7, "one week ago"))
 # Model input budget when MONGODB_LOG_DIAG_REPORT_MAX_INPUT_CHARS / report_max_input_chars is not set.
-DEFAULT_MAX_INPUT_CHARS = 60_000
-DEFAULT_MAX_INPUT_CHARS_RESOURCE = 90_000  # resource investigation runs for the node
+DEFAULT_MAX_INPUT_CHARS = 80_000
+# Resource investigation runs for the node: the whole report stays on the occurrence extract, plus the
+# resource_investigation and concurrency_findings documents. 200k chars (~50-60k tokens) keeps the
+# episode-window occurrences of a busy node; lower it with report_max_input_chars for small-context models.
+DEFAULT_MAX_INPUT_CHARS_RESOURCE = 200_000
 
 
 def resolve_max_input_chars(configured, resource_investigation: bool) -> int:
-    """Explicit positive setting wins; otherwise 90k with resource investigation, 60k without."""
+    """Explicit positive setting wins; otherwise 200k with resource investigation, 80k without."""
     if configured is not None and str(configured).strip():
         try:
             value = int(configured)
@@ -73,7 +76,19 @@ def build_system_prompt() -> str:
         "=== references/analysis-prompt.md ===\n" + _read_skill_text("references/analysis-prompt.md"),
         "=== references/extracted-signal-reference.md ===\n" + _read_skill_text("references/extracted-signal-reference.md"),
         "=== references/analysis-prompt.offline-cve-overlay.md ===\n" + _read_skill_text("references/analysis-prompt.offline-cve-overlay.md"),
+        *_optional_skill_texts("references/resource-investigation-rules.md"),
     ])
+
+
+def _optional_skill_texts(*rels: str) -> list[str]:
+    """Extra skill references loaded into the system prompt when the bundled skill ships them."""
+    out = []
+    for rel in rels:
+        try:
+            out.append(f"=== {rel} ===\n" + _read_skill_text(rel))
+        except OSError:
+            logger.info("Skill reference %s not found; not added to the system prompt", rel)
+    return out
 
 
 def _doc(label: str, meta: dict, body: str) -> str:
@@ -241,8 +256,90 @@ RESOURCE_INSTRUCTIONS = (
     "query hash, plan summary, occurrences in the window, duration/cpuNanos/docsExamined/storage bytes read, "
     "co-occurring errors) with confidence. Call causes plausible, never confirmed. If no occurrence falls in "
     "the window say 'source not identified from the available evidence'. For a rule not triggered write one "
-    "line with the observed maximum; for status no_data say it was not evaluated and why."
+    "line with the observed maximum; for status no_data say it was not evaluated and why. Before blaming "
+    "CPU capacity or an individual query, read each episode's `contention`: when its verdict is "
+    "hot_document_contention_likely the first-ranked cause is write contention on one document (conflict "
+    "retries burn CPU and hold write tickets), so say so, refer to the write contention section, and do not "
+    "recommend a larger tier or an index as the fix. `correlated.unsampled_active_groups` are capped groups "
+    "that may have run in the window without a retained sample: mention them as a data limitation."
 )
+
+
+CONCURRENCY_INSTRUCTIONS = (
+    "A `concurrency_findings` document is supplied: deterministic write-contention evaluation of the FULL "
+    "occurrence extract (uncapped minute timeline and hot write targets), computed before any size reduction "
+    "of `current`. It has precedence over slow-group occurrence samples for times and counts. When "
+    "`contention_detected` is true, include a section titled exactly `## Write contention (hot document)` right "
+    "after the executive summary: one P1 finding per incident window with verdict "
+    "hot_document_contention_likely (start, peak and end UTC and project timezone; namespace, filter fields, "
+    "hashed target id, writes, write conflicts and their share of the window, peak writes per minute, ratio "
+    "of slow operations and slow-operation CPU versus baseline, apps and query hashes), the mechanism (each "
+    "write conflict is a retry that burns CPU and holds a write ticket, so the whole node slows down) and "
+    "application-side fixes. Rank it above CPU capacity, index and individual-query findings in the same "
+    "window and say that a larger tier or an index will not remove it. Never try to reveal hashed target "
+    "values. List `coverage.heavy_groups_without_samples_in_windows` as a data limitation. When status is "
+    "not_extracted, say in one line that write conflicts were not extracted (older parser), never that "
+    "there were none."
+)
+CONTENTION_SECTION_RE = re.compile(r"(?im)^#{1,3}\s*Write contention\b")
+
+
+def _contention_graph(current: dict, findings: dict, host_dir: str) -> str | None:
+    """Embedded (base64 PNG) contention timeline; None when there is no incident window."""
+    import base64
+    import tempfile
+    from pathlib import Path
+    from . import concurrency_graphs as cg
+    if not (findings or {}).get("incident_windows"):
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="contention-graph-") as tmp:
+            png = str(Path(tmp) / "contention.png")
+            if not cg.render_png(current, findings, png, f"Node {host_dir} — write contention (log)"):
+                return None
+            data_uri = "data:image/png;base64," + base64.b64encode(Path(png).read_bytes()).decode("ascii")
+    except ImportError:
+        return cg.section_markdown(None, findings, "matplotlib is not installed in this runtime")
+    except Exception as exc:  # never let a graph break the report
+        logger.warning("Contention graph failed node=%s error_type=%s", host_dir, type(exc).__name__)
+        return cg.section_markdown(None, findings, "graph rendering failed")
+    return cg.section_markdown(data_uri, findings)
+
+
+def _insert_in_section(report_md: str, section_re, block: str) -> str | None:
+    """Insert ``block`` at the end of the first section matching ``section_re`` (before the next
+    heading of the same or higher level); None when the section is absent."""
+    m = section_re.search(report_md)
+    if not m:
+        return None
+    level = len(report_md[m.start():].split(" ", 1)[0])
+    nxt = re.compile(r"(?m)^#{1,%d}\s" % level).search(report_md, m.end())
+    pos = nxt.start() if nxt else len(report_md)
+    return report_md[:pos].rstrip() + "\n\n" + block.rstrip() + "\n\n" + report_md[pos:].lstrip("\n")
+
+
+def _add_contention_graph(report_md: str, current: dict, findings, host_dir: str, config: dict) -> str:
+    """Optional graph inside `## Write contention` (else `## High resource usage investigation`)."""
+    if not findings or not config.get("concurrency_graphs_enabled", True):
+        return report_md
+    from .resource_investigation import SECTION_RE
+    for section_re in (CONTENTION_SECTION_RE, SECTION_RE):
+        if section_re.search(report_md):
+            block = _contention_graph(current, findings, host_dir)
+            return (_insert_in_section(report_md, section_re, block) or report_md) if block else report_md
+    return report_md
+
+
+def _keep_windows(analysis, findings):
+    """Occurrence windows kept in full while shrinking: resource episodes + contention incident windows."""
+    from datetime import timedelta
+    from . import resource_investigation as ri
+    windows = ri.episode_windows(analysis) if analysis is not None else []
+    for w in (findings or {}).get("incident_windows") or []:
+        a, b = ri._ts(w["start_utc"]), ri._ts(w["end_utc"])
+        if a and b:
+            windows.append((a - timedelta(minutes=5), b + timedelta(minutes=6)))
+    return windows
 
 
 def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name, max_chars,
@@ -258,6 +355,15 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     if metrics_payload is not None and config.get("resource_investigation_enabled", True):
         analysis = ri.analyze(metrics_payload, current, config)
         logger.info("Resource investigation node=%s triggered=%s", host_dir, analysis["triggered"])
+    findings = None
+    if config.get("concurrency_findings_enabled", True):
+        from . import concurrency_findings
+        # Computed on the FULL extract: the reduction ladder below drops the minute timeline and samples.
+        findings = concurrency_findings.summarize(current, config)
+        if findings and findings.get("status") == "ok":
+            logger.info("Concurrency findings node=%s contention_detected=%s windows=%d hot_documents=%d",
+                        host_dir, findings["contention_detected"], len(findings["incident_windows"]),
+                        len(findings["hot_documents"]))
     configured_max = max_chars
     max_chars = resolve_max_input_chars(configured_max, analysis is not None)
     logger.info("Report input limit node=%s max_chars=%d (%s)", host_dir, max_chars,
@@ -295,6 +401,9 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
         if analysis is not None:
             docs.append(_doc("resource_investigation", {"node": host_dir},
                              json.dumps(analysis, separators=(",", ":"), default=str)))
+        if findings is not None:
+            docs.append(_doc("concurrency_findings", {"node": host_dir},
+                             json.dumps(findings, separators=(",", ":"), default=str)))
         for label, key in (("index_stats", layout.index_stats(log_date, host_dir)),
                            ("query_stats", layout.query_stats(log_date, host_dir))):
             if raw_docs["enabled"] and store.exists(key):
@@ -315,13 +424,15 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
                   f"{', '.join(d['label'] for d in diffs) or 'none -- omit historical-comparison claims'}.")
         if analysis is not None:
             header += "\n\n" + RESOURCE_INSTRUCTIONS
+        if findings is not None:
+            header += "\n\n" + CONCURRENCY_INSTRUCTIONS
         return header + "\n\n" + "\n\n".join(docs)
 
     user = assemble(current, current_file, baselines)
     if analysis is not None:
         # Metrics present: the whole report stays on the occurrence extract (never extractionshort.json).
         # Shrink by trimming occurrences outside the high-resource episode windows first.
-        windows = ri.episode_windows(analysis)
+        windows = _keep_windows(analysis, findings)
         for keep in (200, 50, 10, 0):
             if len(user) <= max_chars:
                 break
@@ -363,7 +474,7 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
         current_file += ", raw index/query stats omitted"
         base_payloads = [(l, d, s_, _compact(p)) for l, d, s_, p in baselines]
         if analysis is not None:
-            user = assemble(ri.trim_occurrences(current, ri.episode_windows(analysis), 0, max_groups=60),
+            user = assemble(ri.trim_occurrences(current, _keep_windows(analysis, findings), 0, max_groups=60),
                             current_file, base_payloads)
         else:
             user = assemble(_compact(_load_extract(store, layout, log_date, host_dir, log_name,
@@ -377,7 +488,7 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
         baselines = []
         current_file = f"{current_file.split(' (')[0]} (groups capped at {groups}, baselines and raw stats omitted)"
         if analysis is not None:
-            reduced = ri.trim_occurrences(current, ri.episode_windows(analysis), 0, max_groups=groups)
+            reduced = ri.trim_occurrences(current, _keep_windows(analysis, findings), 0, max_groups=groups)
         else:
             reduced = _load_extract(store, layout, log_date, host_dir, log_name, "extractionshort.json")[0] or current
         user = assemble(_compact(reduced, max_groups=groups), current_file, [])
@@ -396,6 +507,10 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
         logger.warning("Model omitted the resource investigation section node=%s; adding deterministic fallback",
                        host_dir)
         report_md = report_md.rstrip() + "\n\n" + ri.render_markdown(analysis)
+    if findings and findings.get("contention_detected") and not CONTENTION_SECTION_RE.search(report_md):
+        from . import concurrency_findings
+        logger.warning("Model omitted the write contention section node=%s; adding deterministic fallback", host_dir)
+        report_md = report_md.rstrip() + "\n\n" + concurrency_findings.render_markdown(findings)
     from .report_shape_mapping import append_reported_shapes
     stats_key = layout.query_stats(log_date, host_dir)
     report_md = append_reported_shapes(
@@ -412,6 +527,8 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     # placed ahead of APPENDIX 3 (query forms), after the internal-content filter so the embedded
     # base64 image is never altered (the advisor renderer already omits system namespaces).
     report_md = _add_appendices(report_md, store, layout, log_date, host_dir, metrics_payload, config)
+    # Optional write-contention graph (base64 PNG) inside its section, also after the internal filter.
+    report_md = _add_contention_graph(report_md, current, findings, host_dir, config)
     report_md, removed_cves = _redact_unvetted_cves(report_md, {m["cve"] for m in offline_cves["matches"]})
     if removed_cves:
         logger.warning("Removed %d CVE ID(s) not in the reviewed offline matches node=%s: %s",
@@ -422,12 +539,17 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
         uploads["resource_investigation"] = store.put_text(
             layout.report(log_date, host_dir, log_name, "resource-investigation.json"),
             json.dumps(analysis, indent=2, default=str), "application/json")
+    if findings is not None:
+        uploads["concurrency_findings"] = store.put_text(
+            layout.report(log_date, host_dir, log_name, "concurrency-findings.json"),
+            json.dumps(findings, indent=2, default=str), "application/json")
     if diffs:
         uploads["diff"] = store.put_text(layout.report(log_date, host_dir, log_name, "diff.json"),
                                          json.dumps(diff_doc, indent=2), "application/json")
     return {"node": host_dir, "log_name": log_name, "current_file": current_file, "max_input_chars": max_chars,
             "baselines": [b[0] for b in baselines], "offline_driver_cves": offline_cves,
             "resource_investigation": analysis["triggered"] if analysis is not None else None,
+            "contention_detected": bool(findings and findings.get("contention_detected")),
             "uploads": uploads, "report_md": report_md}
 
 

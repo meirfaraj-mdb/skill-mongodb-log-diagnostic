@@ -108,7 +108,8 @@ Before interpreting the JSON, read `references/extracted-signal-reference.md`. I
 - Use `extractionOccurence.json` as the authoritative file when both files are present. It contains aggregate data plus `occurrence_timestamps` for error groups and slow-operation groups.
 - `extractionshort.json` contains the same aggregate data and removes only `occurrence_timestamps`. Missing occurrence arrays in this file are intentional and must not be interpreted as zero occurrences.
 - `slow_operations` is an alias of `slow.operations`; never add the two arrays together.
-- Use group-level fields for conclusions and occurrence arrays for recurrence and time distribution.
+- Use group-level fields for conclusions and occurrence arrays for recurrence and time distribution. When a slow group has `occurrences_truncated: true`, its occurrence array is a sample of `occurrences_recorded` records (parser 1.7: time-stratified across the day, see `occurrence_sampling`; parser 1.6: only the first records); take start, peak, and end times from `timeline` and the group `first_seen`/`last_seen`. In the agent pipeline a `concurrency_findings` document (computed from the full extract) has precedence for incident windows, hot documents and contention verdicts.
+- Use `concurrency` and `timeline` (parser 1.6) for write conflicts, lock wait, transaction outcomes, and hot write targets. A `hot_write_target` candidate means many logged writes addressed the same document; evaluate it before attributing a write slowdown to CPU saturation or general load, and state that log-side counts are a lower bound because fast writes are not logged.
 - Preserve missing values as unknown. Do not reconstruct redacted values or invent absent metrics.
 
 Use normalized UTC ISO timestamps for ordinary timestamps:
@@ -121,6 +122,7 @@ Use the compact occurrence formats exactly:
 
 - Error occurrences: `YYYYMMDD` → `HHHMM` → `{ "occur": number }`, where `H` is a literal separator and the value is a UTC minute bucket.
 - Slow occurrences: `YYYYMMDD` → `HH:MM:SS.cc` → metric object, where `cc` is centiseconds and the time is UTC.
+- Timeline, hot-target, and FTDC-concurrency occurrences: `YYYYMMDD` → `HHHMM` → metric object (minute bucket, UTC).
 
 Do not silently convert these keys into local time or confuse error minute buckets with exact slow-operation timestamps.
 

@@ -27,7 +27,7 @@ Only measurements needed by the selected groups are requested (repeated `m` para
 
 ## Report input size
 
-* `MONGODB_LOG_DIAG_REPORT_MAX_INPUT_CHARS`: unset by default. Per node: 60,000 characters, or 90,000 when the node has metrics and the resource investigation runs (`MONGODB_LOG_DIAG_RESOURCE_INVESTIGATION_ENABLED`, default true). An explicit positive value applies to every node. Larger inputs are reduced (occurrences outside resource episodes, baselines, raw stats, then a bounded per-document reduction), never truncated mid-JSON.
+* `MONGODB_LOG_DIAG_REPORT_MAX_INPUT_CHARS`: unset by default. Per node: 80,000 characters, or 200,000 when the node has metrics and the resource investigation runs (`MONGODB_LOG_DIAG_RESOURCE_INVESTIGATION_ENABLED`, default true), so a busy node keeps every occurrence inside its high-resource episodes and hot-document windows. Lower it for models with a small context window. An explicit positive value applies to every node. Larger inputs are reduced (occurrences outside resource episodes, baselines, raw stats, then a bounded per-document reduction), never truncated mid-JSON.
 
 ## Cluster summary: new or sharply increasing issues
 
@@ -51,6 +51,8 @@ Every rule is evaluated on the average series (`SYSTEM_NORMALIZED_CPU_*`, `DISK_
 
 Each triggered episode is correlated (±5 min) with slow-operation and error occurrences of the extract. The deterministic result is written as `resource-investigation.json` next to `report.md` and, if the model omits the section, rendered as a fallback.
 
+* `MONGODB_LOG_DIAG_CONCURRENCY_FINDINGS_ENABLED`: true/false (default true). Computes the `concurrency_findings` document from the FULL `extractionOccurence.json` (parser >= 1.6: uncapped minute timeline, hot write targets) before any size reduction: incident windows, hot documents and a verdict per window (`hot_document_contention_likely`, `hot_document_possible`, `no_contention_evidence`). The report gets `## Write contention (hot document)` (P1) when contention is detected (deterministic fallback when the model omits it); every resource episode gets a `contention` entry. Stored as `concurrency-findings.json` next to `report.md`. Thresholds: `MONGODB_LOG_DIAG_CONCURRENCY_THRESHOLDS` (JSON, keys of `agent/concurrency_findings.DEFAULT_THRESHOLDS`).
+* `MONGODB_LOG_DIAG_CONCURRENCY_GRAPHS_ENABLED`: true/false (default true). Embeds `### Write contention timeline (log)` as a base64 PNG inside the write contention section (or the high resource usage section when no contention is detected but load bursts exist): whole-day slow operations/min and write conflicts/min with incident windows shaded, plus one zoom panel per window with writes/min to the hot document. Needs matplotlib; without it a one-line note replaces the graph. Works without Atlas metrics.
 * `MONGODB_LOG_DIAG_RESOURCE_INVESTIGATION_ENABLED`: true/false (default true). Also requests the extra CPU/memory/connection/cursor/queue measurements and the disk IOPS/latency measurements. The CPU and disk-queue groups are graphed even when this is off.
 * `MONGODB_LOG_DIAG_RESOURCE_THRESHOLDS`: optional JSON overriding `cpu_peak_percent` (90), `cpu_sustained_percent` (70), `cpu_sustained_minutes` (20), `memory_percent` (75), `disk_queue_depth` (10), `disk_min_points` (3), `connection_memory_mb` (1), `correlation_margin_minutes` (5), `top_groups` (10).
 

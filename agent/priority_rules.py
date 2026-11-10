@@ -48,6 +48,9 @@ def validate_rules(rules: dict) -> None:
     slow = body.get("slow_low_volume", {})
     if slow.get("enabled") and slow.get("priority") not in PRIORITIES:
         raise ValueError("priority rules: slow_low_volume.priority must be P0-P3")
+    hot = body.get("hot_document_contention", {})
+    if hot.get("enabled") and hot.get("priority") not in PRIORITIES:
+        raise ValueError("hot_document_contention.priority must be one of P0-P3")
     auth = body.get("auth_failures", {})
     if auth.get("enabled"):
         bands = auth.get("bands") or []
@@ -248,7 +251,27 @@ def _auth_decisions(extraction: dict, rules: dict) -> list[dict]:
     return decisions
 
 
-def evaluate(extraction: dict, rules: dict, diffs=None) -> dict:
+def _contention_decisions(findings, rules: dict) -> list[dict]:
+    """One decision per incident window of ``concurrency_findings.summarize`` meeting the rule."""
+    rule = rules["rules"].get("hot_document_contention", {})
+    if not rule.get("enabled") or not isinstance(findings, dict):
+        return []
+    out = []
+    for w in findings.get("incident_windows") or []:
+        top = (w.get("hot_documents_in_window") or [None])[0]
+        conflicts = _num((w.get("totals") or {}).get("writeConflicts")) or 0
+        share = _num((top or {}).get("share_of_window_conflicts")) or 0
+        if not top or conflicts < rule.get("min_window_write_conflicts", 1000) or share < rule.get("min_target_share", 0.5):
+            continue
+        out.append({"rule": "hot_document_contention", "start_utc": w.get("start_utc"), "end_utc": w.get("end_utc"),
+                    "namespace": top.get("namespace"), "target_id": top.get("target_id"),
+                    "write_conflicts": conflicts, "share_of_window_conflicts": share,
+                    "priority": rule["priority"], "placement": ISSUES,
+                    "reason": f"{share:.0%} of {conflicts:,.0f} window write conflicts on one document -> {rule['priority']}."})
+    return out
+
+
+def evaluate(extraction: dict, rules: dict, diffs=None, concurrency=None) -> dict:
     trends = _trend_map(diffs)
     ops = _get(extraction, "slow", "operations")
     if ops is None:
@@ -273,7 +296,8 @@ def evaluate(extraction: dict, rules: dict, diffs=None) -> dict:
         notes.append(f"Log covers {coverage['hours']} h, not a full day; thresholds are applied to raw counts.")
     return {"rules_version": rules.get("version"), "basis": "per node, per log day",
             "log_coverage": coverage, "slow_operations": slow[:_MAX_SLOW_DECISIONS],
-            "auth_failures": _auth_decisions(extraction, rules), "notes": notes}
+            "auth_failures": _auth_decisions(extraction, rules),
+            "hot_document_contention": _contention_decisions(concurrency, rules), "notes": notes}
 
 
 # --------------------------------------------------------------------------- prompt
@@ -319,6 +343,8 @@ def render_prompt(rules: dict) -> str:
         if not rule.get("enabled"):
             continue
         values = dict(rule)
+        if "min_target_share" in rule:
+            values["min_target_share"] = float(rule["min_target_share"])
         if "total_duration_ms_lt" in rule:
             values["total_duration_hours"] = rule["total_duration_ms_lt"] / 3_600_000
         lines.append(f"Rule {rule_id}:")
