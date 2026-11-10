@@ -181,6 +181,15 @@ larger than cache.
   - **Ticket depletion is a consequence, not a cause.** Look for the bottleneck: disk (§4), CPU (§2), cache
     above 95% (§3), bad query targeting, many scan-and-order operations.
   - In slow logs, high `queues.execution.totalTimeQueuedMicros` means admission wait.
+  - **Write conflicts / hot documents.** A burst of write conflicts on one document (see
+    `concurrency.hot_write_targets` and the `hot_write_target` candidate) also exhausts write tickets and raises
+    CPU: each conflict is a retry, and writers to the same document serialize. When CPU is high, every write path
+    slows at once, and `timeline.writeConflicts` or FTDC `metrics.operation.writeConflicts` spikes in the same
+    minutes, report hot-document contention as the bottleneck rather than capacity. Do not recommend scaling until
+    the contention is excluded; scaling adds cores but does not remove serialization on one document.
+    In the agent pipeline each resource episode carries `contention` (verdict `hot_document_contention_likely`,
+    `hot_document_possible` or `no_contention_evidence`, computed from the uncapped minute timeline), and the
+    `concurrency_findings` document lists the incident windows: read them before ranking CPU causes.
 - **Connections.**
   - Each costs about 1 MB of RAM outside the cache.
   - Churn (open/close in batches) costs CPU, and TLS / SCRAM handshakes are expensive.
@@ -205,6 +214,8 @@ larger than cache.
 - **Oplog window / replication headroom.** When lag exceeds the window (headroom reaches 0), the secondary
   needs a full initial sync. Report headroom below a few hours as a P0/P1 risk on production.
 - In slow logs, `waitForWriteConcernDurationMillis` and flow-control fields tie query latency to replication.
+  Since parser 1.6, `timeline` gives per-minute `writeConcernWaitMs` and `flowControlMs`, and `ftdc.concurrency`
+  gives `flowControl.isLagged` and `timeAcquiringMicros`.
 
 ## 8. Correlation playbook (resource → cause)
 
@@ -216,6 +227,7 @@ larger than cache.
 | Write IOPS periodic spikes every 60 s only | latency, queue | checkpoints (expected) | not a finding |
 | Cache ≥ 95% or dirty ≥ 20% + latency | write rate, bulk jobs, long txns | cache pressure | P1 (P0 if replication affected) |
 | Tickets depleted / queued | disk, CPU, cache | downstream symptom | symptom, cite root cause |
+| CPU high with all write paths slow | `concurrency.write_conflicts`, `hot_write_targets`, `timeline.writeConflicts`, FTDC `metrics.operation.writeConflicts` | hot-document contention (conflict retries) | query/schema finding (query rules §5, §7), not capacity |
 | Connections spike + kernel CPU | app pool config, auth rate | connection churn | client configuration finding |
 | Replication lag rising + oplog GB/h spike | batch / bulk jobs, secondary resources | write burst or weak secondary | replication risk; headroom |
 | Swap used / available memory very low | connections, index size, sorts | memory exhaustion | capacity risk |

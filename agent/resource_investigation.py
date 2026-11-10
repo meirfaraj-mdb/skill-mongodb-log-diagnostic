@@ -14,6 +14,11 @@ C - Disk    DISK_QUEUE_DEPTH > 10 on at least ``disk_min_points`` samples (press
 
 Every rule uses the average series; MAX_* series (MAX_SYSTEM_NORMALIZED_CPU_*,
 MAX_DISK_QUEUE_DEPTH) are only reported as context.
+
+Every episode also carries ``contention`` (``concurrency_findings.episode_contention``): the
+write-conflict / hot-document evidence of the same window from the uncapped minute timeline
+(parser >= 1.6). A hot document makes CPU high *because of* conflict retries, so the report must
+check it before blaming CPU capacity or individual queries.
 """
 from __future__ import annotations
 
@@ -202,14 +207,23 @@ def _error_groups(extract):
 
 
 def correlate(extract, start, end, top=10):
-    """Slow-operation and error groups with occurrences inside [start, end] (UTC)."""
-    slow, errors = [], []
+    """Slow-operation and error groups with occurrences inside [start, end] (UTC).
+
+    ``unsampled_active_groups`` lists capped groups (``occurrences_truncated``) whose first/last
+    seen span covers the window although none of their retained samples falls in it: they may
+    have run in the window (extracts before parser 1.7 kept only the first 2,000 records)."""
+    slow, errors, unsampled = [], [], []
     for g in _slow_groups(extract):
         ns = str(g.get("namespace") or "")
         if _SYSTEM_NS.search(ns):
             continue
         hits = [(t, d) for t, d in _occurrence_times(g.get("occurrence_timestamps")) if start <= t <= end]
         if not hits:
+            first, last = _ts(g.get("first_seen")), _ts(g.get("last_seen"))
+            if g.get("occurrences_truncated") and first and last and first <= end and last >= start:
+                unsampled.append({"namespace": ns, "query_hash": g.get("query_hash"),
+                                  "plan_summary": g.get("plan_summary"), "count": g.get("count"),
+                                  "write_conflicts_total": (g.get("writeConflicts") or {}).get("total")})
             continue
         def total(field, *aliases):
             vals = [_num(next((d.get(f) for f in (field, *aliases) if d.get(f) is not None), None)) for _, d in hits]
@@ -239,7 +253,9 @@ def correlate(extract, start, end, top=10):
     return {"slow_operations": slow[:top], "slow_groups_in_window": len(slow),
             "slow_occurrences_in_window": sum(r["occurrences_in_window"] for r in slow),
             "errors": errors[:top], "error_groups_in_window": len(errors),
-            "error_occurrences_in_window": sum(r["occurrences_in_window"] for r in errors)}
+            "error_occurrences_in_window": sum(r["occurrences_in_window"] for r in errors),
+            **({"unsampled_active_groups": sorted(unsampled, key=lambda r: -(r["count"] or 0))[:top]}
+               if unsampled else {})}
 
 
 # ----------------------------------------------------------------------------- rules
@@ -273,11 +289,17 @@ def analyze(metrics_payload, extract, config=None) -> dict:
         result["notes"].append("Metrics are hourly averages: short peaks may be hidden and each sample "
                                "covers one hour of the sustained-CPU rule.")
 
+    from . import concurrency_findings as cf
+    timeline = cf.timeline_minutes(extract or {})
+
     def finish(episode, ctx_names):
         start, end = episode.pop("_start"), episode.pop("_end")
         episode["context_max_in_window"] = {n: round(v, 2) for n in ctx_names
                                             if (v := _window_max(series, n, start, end)) is not None}
         episode["correlated"] = correlate(extract or {}, start - margin, end + margin, top)
+        if timeline:
+            episode["contention"] = cf.episode_contention(
+                cf.window_stats(extract, start - margin, end + margin, config, timeline))
         return episode
 
     # A - CPU
@@ -458,10 +480,23 @@ def _fmt_corr(corr):
                      f"docs examined {r.get('docs_examined_total')}")
     for r in corr.get("errors", [])[:3]:
         lines.append(f"  - Error/warning `{r['fingerprint'][:80]}`: {r['occurrences_in_window']} occurrence(s)")
+    for r in corr.get("unsampled_active_groups", [])[:3]:
+        lines.append(f"  - Capped group `{r['namespace']}` hash `{r.get('query_hash')}` ({r['count']} records) was active "
+                     "around this window but none of its retained samples falls in it")
     if not lines:
         lines.append("  - No slow-operation or error occurrence in the extract falls inside this window; "
                      "source not identified from the available evidence.")
     return lines
+
+
+def _fmt_contention(ep):
+    c = ep.get("contention") or {}
+    if c.get("verdict") == "hot_document_contention_likely":
+        return [f"  - **Write contention (P1)**: {c['reason']}; check the application write pattern "
+                "before CPU capacity or individual queries."]
+    if c.get("verdict") == "hot_document_possible":
+        return [f"  - Possible hot document: {c['reason']}."]
+    return []
 
 
 def render_markdown(analysis) -> str:
@@ -484,7 +519,7 @@ def render_markdown(analysis) -> str:
                            + ("**pressure**" if part["pressure"] else "no pressure"))
                 for ep in part["episodes"]:
                     out.append(f"  - {ep['start_utc'][:16]}–{ep['end_utc'][11:16]} UTC, peak {ep['peak']}")
-                    out.extend("  " + x for x in _fmt_corr(ep["correlated"]))
+                    out.extend("  " + x for x in _fmt_contention(ep) + _fmt_corr(ep["correlated"]))
             out.append("")
             continue
         mx = sec.get("max_series_max_percent")
@@ -504,6 +539,7 @@ def render_markdown(analysis) -> str:
                     out.append(f"  - At peak: {a.get('connections')} connections ≈ {a.get('connection_memory_estimate_mb')} MB "
                                f"({a.get('connection_memory_share_percent')}% of RAM), {a.get('cursors_open')} open cursors, "
                                f"global lock queue {a.get('global_lock_queue_total')}")
+                out.extend(_fmt_contention(ep))
                 out.extend(_fmt_corr(ep["correlated"]))
         out.append("")
     return "\n".join(out).rstrip() + "\n"

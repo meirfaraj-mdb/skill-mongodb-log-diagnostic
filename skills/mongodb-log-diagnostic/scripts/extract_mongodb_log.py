@@ -25,7 +25,7 @@ except ModuleNotFoundError:
     from ftdc_decoder import decode_ftdc_bytes, emit_source_debug
     from driver_compatibility import DriverCompatibilityAccumulator, extract_driver_compatibility
 
-VERSION = "1.5"
+VERSION = "1.7"
 
 
 def _select_fast_loads():
@@ -71,6 +71,8 @@ ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2
 
 CATEGORY_PATTERNS = {
     "fatal_assertion": re.compile(r"assert|invariant|panic|crash|fassert|corrupt|fatal", re.I),
+    # 1.6: write-conflict / transaction-abort / lock-timeout language (checked before the generic categories).
+    "concurrency_conflict": re.compile(r"write.?conflict|transienttransactionerror|nosuchtransaction|lock.?timeout|temporarily.?unavailable|prepare.?conflict|transaction.{0,40}abort|abort.{0,40}transaction", re.I),
     "availability_replication": re.compile(r"election|heartbeat|rollback|step.?down|sync.?source|replication lag|majority|flow.?control", re.I),
     "storage_resource": re.compile(r"wiredtiger|checkpoint|journal|cache|disk|filesystem|out of memory|memory pressure|resource", re.I),
     "connection_network": re.compile(r"handshake|authentication|auth failed|tls|timeout|connection|socket|network", re.I),
@@ -89,6 +91,60 @@ FTDC_EXCLUDED_TOKENS = {
     "operation", "operations",
 }
 FTDC_TIME_KEYS = {"t", "ts", "timestamp", "time", "wall", "date", "start"}
+# 1.6: serverStatus concurrency counters. The generic resource filter excludes the "operation"/"connection"
+# tokens, which silently dropped metrics.operation.writeConflicts; these are analyzed in ftdc.concurrency.
+FTDC_CONCURRENCY_RE = re.compile(
+    r"(?:^|\.)(?:metrics\.operation\.(?:writeConflicts|temporarilyUnavailableErrors[A-Za-z]*)"
+    r"|transactions\.(?:totalAborted|totalCommitted|totalStarted|totalPrepared|totalPreparedThenAborted|totalPreparedThenCommitted|currentActive|currentInactive|currentOpen|currentPrepared)"
+    r"|flowControl\.(?:timeAcquiringMicros|isLagged|isLaggedCount|targetRateLimit)"
+    r"|locks\.[A-Za-z]+\.(?:timeAcquiringMicros|acquireWaitCount|deadlockCount)\.[A-Za-z]+"
+    r"|(?:wiredTiger\.concurrentTransactions|queues\.execution)\.(?:read|write)\.(?:out|available|totalTimeQueuedMicros))$"
+)
+FTDC_CONCURRENCY_GAUGES = re.compile(r"\.(?:current[A-Za-z]+|out|available|isLagged|targetRateLimit)$")
+
+
+def _short_metric(name: str) -> str:
+    """Drop the serverStatus. prefix so per-minute keys stay short but unambiguous."""
+    return name.split("serverStatus.", 1)[-1]
+
+
+def _ftdc_concurrency(timed_samples: list[tuple[float, str, dict[str, float]]]) -> dict[str, Any]:
+    """Per-minute deltas (cumulative counters) and maxima (gauges) of FTDC concurrency counters."""
+    timed_samples.sort(key=lambda item: item[0])
+    previous: dict[str, float] = {}
+    minutes: dict[str, dict[str, dict[str, float]]] = collections.defaultdict(dict)
+    peaks: dict[str, dict[str, Any]] = {}
+    found: set[str] = set()
+    for _, timestamp, metrics in timed_samples:
+        compact = _compact_timestamp(timestamp)
+        if not compact:
+            continue
+        day, minute = compact[0], compact[1][:2] + "H" + compact[1][3:5]
+        for name, value in metrics.items():
+            short = _short_metric(name)
+            found.add(short)
+            if FTDC_CONCURRENCY_GAUGES.search(name):
+                observed = value
+            else:
+                before = previous.get(name)
+                previous[name] = value
+                if before is None or value < before:  # first sample or counter reset (restart)
+                    continue
+                observed = value - before
+            if not observed:
+                continue
+            if len(minutes) >= 14 and day not in minutes:  # 14 UTC days, same horizon as the log timeline
+                continue
+            bucket = minutes[day].setdefault(minute, {})
+            if FTDC_CONCURRENCY_GAUGES.search(name):
+                bucket[short] = max(bucket.get(short, observed), observed)
+            else:
+                bucket[short] = bucket.get(short, 0.0) + observed
+            peak = peaks.get(short)
+            if peak is None or observed > peak["max"]:
+                peaks[short] = {"max": observed, "at": timestamp, "kind": "gauge" if FTDC_CONCURRENCY_GAUGES.search(name) else "delta"}
+    occurrences = {day: [{minute: values} for minute, values in sorted(items.items())] for day, items in sorted(minutes.items())}
+    return {"metrics_found": sorted(found)[:200], "peaks": dict(sorted(peaks.items())), "occurrence_timestamps": occurrences}
 
 
 def _ftdc_paths(paths: list[Path]) -> list[Path]:
@@ -173,6 +229,7 @@ def analyze_ftdc(paths: list[Path] | None, event_window: Iterable[dict[str, Any]
         "timeline_status": "matched" if log_epochs else "unavailable",
         "filtered_outside_log_timeline": 0,
         "filtered_without_timestamp": 0,
+        "concurrency": {"metrics_found": [], "peaks": {}, "occurrence_timestamps": {}},
     }
     if not paths:
         return {"status": "not_provided", **base}
@@ -204,6 +261,7 @@ def analyze_ftdc(paths: list[Path] | None, event_window: Iterable[dict[str, Any]
         print(f"Loading FTDC {path.name}: {elapsed:.3f}s", file=sys.stderr)
 
     samples = []
+    concurrency_samples: list[tuple[float, str, dict[str, float]]] = []
     in_timeline_by_file: dict[str, int] = collections.defaultdict(int)
     filtered_outside = 0
     filtered_without_timestamp = 0
@@ -220,7 +278,11 @@ def analyze_ftdc(paths: list[Path] | None, event_window: Iterable[dict[str, Any]
         if record_epoch < log_start or record_epoch > log_end:
             filtered_outside += 1
             continue
-        metrics = {name: value for name, value in _numeric_metrics(record).items() if _is_resource_metric(name)}
+        all_metrics = _numeric_metrics(record)
+        concurrency = {name: value for name, value in all_metrics.items() if FTDC_CONCURRENCY_RE.search(name)}
+        if concurrency:
+            concurrency_samples.append((record_epoch, timestamp, concurrency))
+        metrics = {name: value for name, value in all_metrics.items() if _is_resource_metric(name)}
         if not metrics:
             continue
         samples.append({"timestamp": timestamp, "metrics": metrics})
@@ -274,6 +336,7 @@ def analyze_ftdc(paths: list[Path] | None, event_window: Iterable[dict[str, Any]
         "ftdc_time_range": {"first": min(sample_timestamps, default=None), "last": max(sample_timestamps, default=None)},
         "filtered_outside_log_timeline": filtered_outside,
         "filtered_without_timestamp": filtered_without_timestamp,
+        "concurrency": _ftdc_concurrency(concurrency_samples),
     })
     return base
 
@@ -551,7 +614,7 @@ def _message_info(msg: str) -> tuple[str, dict[str, Any], bool, str | None]:
     info = _MSG_CACHE.get(msg)
     if info is None:
         category = None
-        for name in ("fatal_assertion", "availability_replication", "storage_resource", "connection_network", "sharding_topology"):
+        for name in ("fatal_assertion", "concurrency_conflict", "availability_replication", "storage_resource", "connection_network", "sharding_topology"):
             if CATEGORY_PATTERNS[name].search(msg):
                 category = name
                 break
@@ -674,6 +737,93 @@ def parse_line(line: str) -> tuple[dict[str, Any] | None, str | None]:
         return _legacy_event(text)
 
 
+def _wait_totals(value: Any) -> tuple[float | None, float | None]:
+    """(timeAcquiringMicros total, acquireWaitCount total) across every lock resource and mode."""
+    if not isinstance(value, dict):
+        return None, None
+    micros = waits = 0.0
+    seen = False
+    for resource in value.values():
+        if not isinstance(resource, dict):
+            continue
+        for key, total in (("timeAcquiringMicros", "micros"), ("acquireWaitCount", "waits")):
+            modes = resource.get(key)
+            if isinstance(modes, dict):
+                for mode_value in modes.values():
+                    if isinstance(mode_value, (int, float)) and not isinstance(mode_value, bool):
+                        seen = True
+                        if total == "micros": micros += mode_value
+                        else: waits += mode_value
+    return (micros, waits) if seen else (None, None)
+
+
+_TARGET_KEY = os.environ.get("MONGODB_LOG_DIAG_TARGET_KEY", "mongodb-log-diagnostic").encode()
+_VALUE_WRAPPERS = frozenset({"$oid", "$numberLong", "$numberInt", "$numberDouble", "$numberDecimal", "$date", "$uuid", "$binary", "$timestamp"})
+_WRITE_TYPES = frozenset({"update", "remove", "delete", "findandmodify"})
+
+
+def _equality_value(value: Any) -> tuple[bool, Any]:
+    """(is equality, comparable value) for one filter value; operators other than $eq are not equality."""
+    if isinstance(value, dict):
+        keys = list(value)
+        if len(keys) == 1 and keys[0] in _VALUE_WRAPPERS and isinstance(value[keys[0]], (str, int, float)):
+            return True, f"{keys[0]}:{value[keys[0]]}"  # canonical string keeps the hashing fast path
+        if keys and all(str(k) in _VALUE_WRAPPERS for k in keys):
+            return True, value
+        if keys == ["$eq"]:
+            return _equality_value(value["$eq"])
+        if any(str(k).startswith("$") for k in keys):
+            return False, None
+        return True, value  # embedded-document equality
+    if isinstance(value, list):
+        return False, None
+    return True, value
+
+
+def write_target(namespace: Any, filter_doc: Any) -> dict[str, Any] | None:
+    """Redacted identity of the document(s) a write addresses: equality field names plus a keyed hash of
+    their values. Literal values are never emitted; set MONGODB_LOG_DIAG_TARGET_KEY to change the key."""
+    if not isinstance(filter_doc, dict) or not filter_doc:
+        return None
+    fields: dict[str, Any] = {}
+    for key, value in filter_doc.items():
+        name = str(key)
+        if name.startswith("$"):
+            continue
+        equal, comparable = _equality_value(value)
+        if equal:
+            fields[name] = comparable
+    if not fields:
+        return None
+    names = sorted(fields)[:5]
+    values = [fields[n] if isinstance(fields[n], str) or isinstance(fields[n], (dict, list)) else f"#{type(fields[n]).__name__}:{fields[n]}" for n in names]
+    if all(isinstance(v, str) for v in values):
+        material = "\x1f".join([str(namespace), *names, "\x1e", *values])  # fast path: plain string values
+    else:
+        material = json.dumps([str(namespace), names, values], sort_keys=True, separators=(",", ":"), default=str)
+    digest = hashlib.blake2b(material.encode(), key=_TARGET_KEY[:64], digest_size=8).hexdigest()
+    return {"id": digest, "fields": names}
+
+
+_STATEMENT_KEYS = frozenset({"q", "u", "multi", "upsert", "arrayFilters", "hint", "collation", "limit", "c"})
+
+
+def _write_filter(attr: dict[str, Any], command: dict[str, Any]) -> tuple[str | None, Any]:
+    """(write type, filter) for update/delete/findAndModify records, else (None, None)."""
+    op_type = str(attr.get("type") or "").lower()
+    if "findAndModify" in command or "findandmodify" in command:
+        return "findAndModify", command.get("query")
+    for key, kind, statement_key in (("updates", "update", "q"), ("deletes", "delete", "q")):
+        statements = command.get(key)
+        if isinstance(statements, list):
+            if len(statements) == 1 and isinstance(statements[0], dict):
+                return kind, statements[0].get(statement_key)
+            return kind, None
+    if op_type in _WRITE_TYPES:
+        return op_type, command.get("q") if "q" in command else command.get("query")
+    return None, None
+
+
 def _full_event(obj: dict[str, Any], text: str, msg: str | None = None, info: tuple | None = None,
                 timestamp: tuple[str | None, bool] | None = None) -> dict[str, Any]:
     """Every field of one structured record (used for error, slow and other non-routine lines)."""
@@ -686,6 +836,11 @@ def _full_event(obj: dict[str, Any], text: str, msg: str | None = None, info: tu
         command = attr.get("command") if isinstance(attr.get("command"), dict) else {}
         command_names = [str(key) for key in command if str(key) not in {"$db", "lsid", "$clusterTime"}]
         index_entries = command.get("indexes") if isinstance(command.get("indexes"), list) else []
+        nested_error = attr.get("error") if isinstance(attr.get("error"), dict) else {}
+        lock_micros, lock_waits = _wait_totals(attr.get("locks"))
+        flow = attr.get("flowControl") if isinstance(attr.get("flowControl"), dict) else {}
+        write_kind, write_filter = _write_filter(attr, command)
+        txn = "terminationCause" in attr
         event = {
             "timestamp": timestamp[0],
             "_ts_ok": timestamp[1],
@@ -725,12 +880,33 @@ def _full_event(obj: dict[str, Any], text: str, msg: str | None = None, info: tu
             "has_sort_stage": bool(attr.get("hasSortStage", False)),
             "queue_time_us": scalar(attr.get("queues", {}).get("execution", {}).get("totalTimeQueuedMicros")) if isinstance(attr.get("queues"), dict) else None,
             "app_name": scalar(attr.get("appName")),
+            # 1.6 concurrency evidence (write conflicts, transaction outcome, lock/flow-control waits, write target).
+            "write_conflicts": scalar(attr["writeConflicts"]) if "writeConflicts" in attr else None,
+            "temporarily_unavailable_errors": scalar(attr["temporarilyUnavailableErrors"]) if "temporarilyUnavailableErrors" in attr else None,
+            "prepare_read_conflicts": scalar(attr["prepareReadConflicts"]) if "prepareReadConflicts" in attr else None,
+            "prepare_conflict_duration_millis": scalar(attr["prepareConflictDurationMillis"]) if "prepareConflictDurationMillis" in attr else None,
+            "lock_wait_micros": lock_micros,
+            "lock_wait_count": lock_waits,
+            "flow_control_micros": scalar(flow.get("timeAcquiringMicros")) if flow else None,
+            "flow_control_wait_count": scalar(flow.get("acquireWaitCount")) if flow else None,
+            "op_type": scalar(attr.get("type")),
+            "write_kind": write_kind,
+            "write_target": write_target(attr.get("ns"), write_filter) if write_kind else None,
+            "termination_cause": scalar(attr.get("terminationCause")) if txn else None,
+            "abort_cause": scalar(attr.get("abortCause")) if txn else None,
+            "was_prepared": attr.get("wasPrepared") if txn and isinstance(attr.get("wasPrepared"), bool) else None,
+            "time_active_micros": scalar(attr.get("timeActiveMicros")) if txn else None,
+            "time_inactive_micros": scalar(attr.get("timeInactiveMicros")) if txn else None,
             "query_shape": _command_shape(attr),
             # Raw-text pre-check: the key can only be present if "$changeStream" (or an escape) is in the line.
             "is_change_stream": ("$changeStream" in text or "\\u" in text) and (_contains_change_stream(attr.get("command")) or _contains_change_stream(attr.get("originatingCommand"))),
-            "operation_name": scalar(attr.get("commandName") or attr.get("operation") or attr.get("op")) or (command_names[0] if command_names else inferred.get("operation_name")),
-            "error_code": scalar(attr.get("code")) or inferred.get("error_code"),
-            "error_code_name": scalar(attr.get("codeName")) or inferred.get("error_code_name"),
+            "operation_name": scalar(attr.get("commandName") or attr.get("operation") or attr.get("op")) or (
+                # 1.7: a WRITE-component update/remove record logs the statement ({q, u, multi, ...}), not the
+                # command; its first key is a statement field, so use the record type instead of "q".
+                scalar(attr.get("type")) if command_names and command_names[0] in _STATEMENT_KEYS and attr.get("type")
+                else command_names[0] if command_names else inferred.get("operation_name")),
+            "error_code": scalar(attr.get("code")) or scalar(nested_error.get("code")) or scalar(attr.get("errCode")) or inferred.get("error_code"),
+            "error_code_name": scalar(attr.get("codeName")) or scalar(nested_error.get("codeName")) or scalar(attr.get("errName")) or inferred.get("error_code_name"),
             "index_name": scalar(attr.get("indexName")) or inferred.get("index_name"),
             "index_names": [str(item.get("name")) for item in index_entries if isinstance(item, dict) and item.get("name")][:20],
             "duplicate_key_fields": list(inferred.get("duplicate_key_fields", [])),
@@ -829,7 +1005,7 @@ def parse_record(line: str, slow_ms: float) -> tuple[dict[str, Any] | None, str 
     error = severity in {"E", "F"} or info[2]
     lowered = msg.strip().lower()
     slow = lowered == "slow query" or lowered.startswith("slow query ") or (duration is not None and float(duration) >= slow_ms)
-    if error or slow:
+    if error or slow or "writeConflicts" in attr or "terminationCause" in attr or "temporarilyUnavailableErrors" in attr:
         return _full_event(obj, text, msg, info, timestamp), None, error, slow
     inferred = info[1]
     operation = scalar(attr.get("commandName") or attr.get("operation") or attr.get("op"))
@@ -881,6 +1057,8 @@ def category_for(event: dict[str, Any]) -> str | None:
         return "fatal_assertion"
     if message_category:
         return message_category
+    if (event.get("write_conflicts") or 0) > 0 or (event.get("temporarily_unavailable_errors") or 0) > 0 or str(event.get("error_code_name") or "") in CONFLICT_ERROR_NAMES:
+        return "concurrency_conflict"
     duration = event.get("duration_ms")
     plan = str(event.get("plan_summary") or "")
     examined = max(float(event.get("keys_examined") or 0), float(event.get("docs_examined") or 0))
@@ -890,6 +1068,28 @@ def category_for(event: dict[str, Any]) -> str | None:
     if sev == "W":
         return "warning_pattern"
     return None
+
+
+# Error code names that indicate concurrency conflicts or transaction retries (MongoDB error codes).
+CONFLICT_ERROR_NAMES = frozenset({"WriteConflict", "NoSuchTransaction", "LockTimeout", "LockBusy", "TemporarilyUnavailable", "TransactionTooOld", "TransientTransactionError", "PreparedTransactionInProgress"})
+CONFLICT_ERROR_CODES = {"112": "WriteConflict", "251": "NoSuchTransaction", "24": "LockTimeout", "46": "LockBusy", "365": "TemporarilyUnavailable", "225": "TransactionTooOld", "267": "PreparedTransactionInProgress"}
+
+
+def _conflict_error_name(event: dict[str, Any]) -> str | None:
+    name = event.get("error_code_name")
+    if name and str(name) in CONFLICT_ERROR_NAMES:
+        return str(name)
+    code = event.get("error_code")
+    if code is not None and str(code) in CONFLICT_ERROR_CODES:
+        return CONFLICT_ERROR_CODES[str(code)]
+    if _message_info(str(event.get("message") or ""))[3] == "concurrency_conflict":
+        return "message:" + _message_info(str(event.get("message") or ""))[0]
+    return None
+
+
+def _minute_key(event: dict[str, Any]) -> tuple[str, str] | None:
+    compact = _compact_event(event)
+    return (compact[0], compact[1][:2] + "H" + compact[1][3:5]) if compact else None
 
 
 def bucket(timestamp: str | None, minutes: int) -> str | None:
@@ -975,8 +1175,20 @@ def _slow_occurrence(event: dict[str, Any]) -> tuple[str, str, dict[str, Any]] |
         ("ninserted", "ninserted"), ("keys_inserted", "keysInserted"), ("n_matched", "nMatched"), ("n_modified", "nModified"),
         ("n_upserted", "nUpserted"), ("keys_deleted", "keysDeleted"), ("ordered", "ordered"), ("docs_examined", "docs_examined"),
         ("keys_examined", "keys_examined"), ("n_returned", "n_returned"), ("n_batches", "nBatches"), ("cursor_id", "cursorid"), ("plan_cache_shape_hash", "planCacheShapeHash"), ("plan_cache_key", "planCacheKey"), ("query_framework", "queryFramework"),
+        # 1.6 concurrency metrics
+        ("write_conflicts", "writeConflicts"), ("temporarily_unavailable_errors", "temporarilyUnavailableErrors"),
+        ("prepare_read_conflicts", "prepareReadConflicts"), ("prepare_conflict_duration_millis", "prepareConflictDurationMillis"),
+        ("lock_wait_micros", "lockWaitMicros"), ("lock_wait_count", "lockWaitCount"), ("flow_control_micros", "flowControlMicros"),
+        ("queue_time_us", "queueTimeMicros"), ("op_type", "opType"), ("termination_cause", "terminationCause"),
     )
     detail = {dest: event[src] for src, dest in fields if event.get(src) is not None}
+    # Zero-valued wait/conflict counters carry no evidence; drop them to keep occurrences compact.
+    for name in ("writeConflicts", "temporarilyUnavailableErrors", "prepareReadConflicts", "prepareConflictDurationMillis", "lockWaitMicros", "lockWaitCount", "flowControlMicros", "queueTimeMicros"):
+        if detail.get(name) == 0:
+            del detail[name]
+    target = event.get("write_target")
+    if target:
+        detail["target"] = target["id"]
     # 1.5: lossless trimming. namespace is part of the group key; a false has_sort_stage equals "absent";
     # durationMillis is a duplicate of duration_ms whenever the two are equal.
     if event.get("has_sort_stage"):
@@ -989,7 +1201,7 @@ def _slow_occurrence(event: dict[str, Any]) -> tuple[str, str, dict[str, Any]] |
     return compact[0], compact[1], detail
 
 
-GROUP_LEVEL_OCCURRENCE_FIELDS = ("planCacheShapeHash", "planCacheKey", "queryFramework")
+GROUP_LEVEL_OCCURRENCE_FIELDS = ("planCacheShapeHash", "planCacheKey", "queryFramework", "opType")
 
 
 def _slow_group_occurrences(state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1036,6 +1248,168 @@ class StreamingSummary:
         self.parsed_records = 0
         self.error_events = 0
         self.find_events: list[dict[str, Any]] = []
+        # 1.6: bounded concurrency and per-minute timeline state.
+        self.timeline: dict[str, dict[str, collections.Counter]] = collections.defaultdict(dict)
+        self.timeline_dropped = 0
+        self.targets: dict[tuple[Any, str], dict[str, Any]] = {}
+        self.target_pruned = 0
+        self.target_cells = 0
+        self.namespace_writes = collections.Counter()
+        self.concurrency = {"records_with_write_conflicts": 0, "write_conflicts_total": 0.0, "temporarily_unavailable_total": 0.0,
+                            "prepare_read_conflicts_total": 0.0, "lock_wait_micros_total": 0.0, "lock_wait_records": 0,
+                            "flow_control_micros_total": 0.0, "flow_control_records": 0, "queue_time_micros_total": 0.0,
+                            "conflict_errors": collections.Counter(), "write_conflicts_by_namespace": collections.Counter(),
+                            "write_conflicts_by_operation": collections.Counter(), "write_conflicts_by_app": collections.Counter(),
+                            "write_conflicts_stat": {}, "first_conflict": None, "last_conflict": None}
+        self.transactions = {"records": 0, "termination_causes": collections.Counter(), "abort_causes": collections.Counter(),
+                             "prepared": 0, "stats": {}, "first_seen": None, "last_seen": None}
+
+    MAX_TIMELINE_MINUTES = 20160  # 14 days of UTC minutes
+    MAX_TARGETS = 10000
+    MAX_TARGET_MINUTES = 1440
+    MAX_TARGET_CELLS = 200000  # global budget of (target, minute) cells across all tracked targets
+    KEEP_MINUTES_FOR_TOP = 100
+
+    def _minute(self, event: dict[str, Any]) -> collections.Counter | None:
+        key = _minute_key(event)
+        if key is None:
+            return None
+        day = self.timeline[key[0]]
+        counter = day.get(key[1])
+        if counter is None:
+            if sum(len(v) for v in self.timeline.values()) >= self.MAX_TIMELINE_MINUTES:
+                self.timeline_dropped += 1
+                return None
+            counter = day[key[1]] = collections.Counter()
+        return counter
+
+    def _track_target(self, event: dict[str, Any], minute: tuple[str, str] | None) -> None:
+        target = event.get("write_target")
+        namespace = event.get("namespace")
+        if not target:
+            return
+        key = (namespace, target["id"])
+        state = self.targets.get(key)
+        if state is None:
+            if len(self.targets) >= self.MAX_TARGETS:
+                # Keep the heaviest half (Misra-Gries style); counts for later-seen targets become lower bounds.
+                keep = sorted(self.targets.items(), key=lambda item: -item[1]["count"])[: self.MAX_TARGETS // 2]
+                self.target_pruned += len(self.targets) - len(keep)
+                self.targets = dict(keep)
+                self.target_cells = sum(len(item["minutes"]) for item in self.targets.values())
+            # Light state: sums/maxima only (no median sample lists) so many distinct targets stay cheap.
+            state = self.targets[key] = {"namespace": namespace, "target_id": target["id"], "filter_fields": target["fields"], "count": 0,
+                                         "write_conflicts": 0.0, "records_with_write_conflicts": 0, "write_kinds": {},
+                                         "app_names": set(), "query_hashes": set(), "plan_summaries": set(),
+                                         "duration_total": 0.0, "duration_max": 0.0, "cpu_total": 0.0, "cpu_max": 0.0,
+                                         "first_seen": None, "last_seen": None, "minutes": {}, "minutes_partial": False, "seen_after_pruning": self.target_pruned > 0}
+        state["count"] += 1
+        conflicts = float(event.get("write_conflicts") or 0)
+        if conflicts > 0:
+            state["write_conflicts"] += conflicts
+            state["records_with_write_conflicts"] += 1
+        kind = str(event.get("write_kind"))
+        state["write_kinds"][kind] = state["write_kinds"].get(kind, 0) + 1
+        for field, value in (("app_names", event.get("app_name")), ("query_hashes", event.get("query_hash")), ("plan_summaries", event.get("plan_summary"))):
+            if value is not None and len(state[field]) < 10: state[field].add(str(value))
+        duration, cpu = event.get("duration_ms"), event.get("cpu_nanos")
+        if duration is not None:
+            state["duration_total"] += float(duration); state["duration_max"] = max(state["duration_max"], float(duration))
+        if cpu is not None:
+            state["cpu_total"] += float(cpu); state["cpu_max"] = max(state["cpu_max"], float(cpu))
+        timestamp = event.get("timestamp")
+        if timestamp and (state["first_seen"] is None or timestamp < state["first_seen"]): state["first_seen"] = timestamp
+        if timestamp and (state["last_seen"] is None or timestamp > state["last_seen"]): state["last_seen"] = timestamp
+        if minute:
+            label = minute[0] + " " + minute[1]
+            bucket = state["minutes"].get(label)
+            if bucket is None:
+                if self.target_cells >= self.MAX_TARGET_CELLS:
+                    self._compact_target_minutes()
+                if len(state["minutes"]) < self.MAX_TARGET_MINUTES and self.target_cells < self.MAX_TARGET_CELLS:
+                    bucket = state["minutes"][label] = [0, 0.0]
+                    self.target_cells += 1
+                else:
+                    state["minutes_partial"] = True
+            if bucket is not None:
+                bucket[0] += 1
+                bucket[1] += conflicts
+
+    def _compact_target_minutes(self) -> None:
+        """Keep per-minute detail only for the heaviest targets once the global cell budget is reached."""
+        top = {id(item) for item in sorted(self.targets.values(), key=lambda item: -item["count"])[: self.KEEP_MINUTES_FOR_TOP]}
+        for item in self.targets.values():
+            if id(item) not in top and item["minutes"]:
+                item["minutes"] = {}
+                item["minutes_partial"] = True
+        self.target_cells = sum(len(item["minutes"]) for item in self.targets.values())
+
+    def _concurrency(self, event: dict[str, Any], error: bool, slow: bool) -> None:
+        """Fold one record into write-conflict, transaction, lock-wait and per-minute state."""
+        get = event.get
+        conflicts = get("write_conflicts")
+        unavailable = get("temporarily_unavailable_errors")
+        termination = get("termination_cause")
+        conflict_error = _conflict_error_name(event) if (error or get("error_code") is not None or get("severity") == "W" or _message_info(str(get("message") or ""))[3] == "concurrency_conflict") else None
+        if not (slow or conflict_error or termination or conflicts or unavailable):
+            return
+        lock_micros = get("lock_wait_micros")
+        flow_micros = get("flow_control_micros")
+        minute_key = _minute_key(event)
+        minute = self._minute(event)
+        c = self.concurrency
+        if slow and minute is not None:
+            minute["slow"] += 1
+            if get("cpu_nanos") is not None: minute["slowCpuMs"] += float(get("cpu_nanos")) / 1e6
+            if get("duration_ms") is not None: minute["slowDurationMs"] += float(get("duration_ms"))
+            if get("wait_for_write_concern_duration_millis") is not None: minute["writeConcernWaitMs"] += float(get("wait_for_write_concern_duration_millis"))
+        if conflicts:
+            n = float(conflicts)
+            c["records_with_write_conflicts"] += 1
+            c["write_conflicts_total"] += n
+            _add_stat(c["write_conflicts_stat"], "writeConflicts", n)
+            c["write_conflicts_by_namespace"][str(get("namespace"))] += n
+            c["write_conflicts_by_operation"][str(get("operation_name") or get("op_type"))] += n
+            if get("app_name"): c["write_conflicts_by_app"][str(get("app_name"))] += n
+            ts = get("timestamp")
+            if ts and (c["first_conflict"] is None or ts < c["first_conflict"]): c["first_conflict"] = ts
+            if ts and (c["last_conflict"] is None or ts > c["last_conflict"]): c["last_conflict"] = ts
+            if minute is not None:
+                minute["writeConflicts"] += n
+                minute["conflictRecords"] += 1
+        if unavailable:
+            c["temporarily_unavailable_total"] += float(unavailable)
+            if minute is not None: minute["temporarilyUnavailable"] += float(unavailable)
+        if get("prepare_read_conflicts"):
+            c["prepare_read_conflicts_total"] += float(get("prepare_read_conflicts"))
+        if lock_micros:
+            c["lock_wait_micros_total"] += float(lock_micros); c["lock_wait_records"] += 1
+            if minute is not None: minute["lockWaitMs"] += float(lock_micros) / 1000
+        if flow_micros:
+            c["flow_control_micros_total"] += float(flow_micros); c["flow_control_records"] += 1
+            if minute is not None: minute["flowControlMs"] += float(flow_micros) / 1000
+        if get("queue_time_us"):
+            c["queue_time_micros_total"] += float(get("queue_time_us"))
+            if minute is not None: minute["queueMs"] += float(get("queue_time_us")) / 1000
+        if conflict_error:
+            c["conflict_errors"][conflict_error] += 1
+            if minute is not None: minute["conflictErrors"] += 1
+        if termination:
+            t = self.transactions
+            t["records"] += 1
+            t["termination_causes"][str(termination)] += 1
+            if get("abort_cause"): t["abort_causes"][redact_message(str(get("abort_cause")))[:120]] += 1
+            if get("was_prepared"): t["prepared"] += 1
+            for name, value in (("duration_ms", get("duration_ms")), ("timeActiveMicros", get("time_active_micros")), ("timeInactiveMicros", get("time_inactive_micros"))):
+                _add_stat(t["stats"], name, value)
+            ts = get("timestamp")
+            if ts and (t["first_seen"] is None or ts < t["first_seen"]): t["first_seen"] = ts
+            if ts and (t["last_seen"] is None or ts > t["last_seen"]): t["last_seen"] = ts
+            if minute is not None:
+                minute["txnCommitted" if str(termination).lower() == "committed" else "txnAborted"] += 1
+        if get("write_kind"):
+            self.namespace_writes[str(get("namespace"))] += 1
+            self._track_target(event, minute_key)
 
     @staticmethod
     def _limited_set(state: set[str], value: Any, limit: int = 100) -> None:
@@ -1126,23 +1500,35 @@ class StreamingSummary:
                 if severity == "W": counts["warnings"] += 1
                 if slow: counts["slow_operations"] += 1
                 if category: counts[category] += 1
+                conflicts = get("write_conflicts")
+                if conflicts: counts["write_conflicts"] += int(conflicts)
         operation = get("operation_name")
         if operation and len(self.find_events) < 200 and "find" in str(operation).lower():
             self.find_events.append({"timestamp": timestamp, "message": get("message"), "severity": severity, "component": component})
+        self._concurrency(event, bool(error), bool(slow))
         if not slow: return
         self.slow_global["count"] += 1
         if "COLLSCAN" in str(event.get("plan_summary") or "").upper(): self.slow_global["collscan_count"] += 1
         if event.get("is_change_stream"): self.slow_global["change_stream_count"] += 1
         _add_stat(self.slow_global["stats"], "duration_ms", event.get("duration_ms"))
         _add_stat(self.slow_global["stats"], "cpuNanos", event.get("cpu_nanos"))
+        if event.get("write_conflicts"): _add_stat(self.slow_global["stats"], "writeConflicts", event["write_conflicts"])  # non-zero only
         key = (event.get("namespace"), event.get("plan_summary"), event.get("query_hash"))
         state = self.slow_groups.get(key)
         if state is None:
             if len(self.slow_groups) >= self.MAX_GROUPS: return
-            state = self.slow_groups[key] = {"namespace": key[0], "plan_summary": key[1], "query_hash": key[2], "count": 0, "app_names": set(), "stats": {}, "first_seen": None, "last_seen": None, "sample_query_shape": event.get("query_shape"), "sample_message": _slow_message_after_plan_summary(event.get("message")), "collscan_count": 0, "sort_stage_count": 0, "ratio_max": 0.0, "occurrences": collections.defaultdict(list)}
+            state = self.slow_groups[key] = {"namespace": key[0], "plan_summary": key[1], "query_hash": key[2], "count": 0, "app_names": set(), "stats": {}, "first_seen": None, "last_seen": None, "sample_query_shape": event.get("query_shape"), "sample_message": _slow_message_after_plan_summary(event.get("message")), "collscan_count": 0, "sort_stage_count": 0, "ratio_max": 0.0, "occurrences": collections.defaultdict(list), "write_conflict_records": 0, "targets": collections.Counter(),
+                                                    "occ_kept": collections.Counter(), "occ_total": 0, "occ_cap": self.MAX_OCCURRENCES_PER_GROUP, "occ_minute_thinning": 0}
         state["count"] += 1
         self._limited_set(state["app_names"], event.get("app_name"))
-        for name, value in (("duration_ms", event.get("duration_ms")), ("cpuNanos", event.get("cpu_nanos")), ("keys_examined", event.get("keys_examined")), ("docs_examined", event.get("docs_examined")), ("n_returned", event.get("n_returned"))): _add_stat(state["stats"], name, value)
+        for name, value in (("duration_ms", event.get("duration_ms")), ("cpuNanos", event.get("cpu_nanos")), ("keys_examined", event.get("keys_examined")), ("docs_examined", event.get("docs_examined")), ("n_returned", event.get("n_returned")), ): _add_stat(state["stats"], name, value)
+        if event.get("write_conflicts"): _add_stat(state["stats"], "writeConflicts", event["write_conflicts"])  # non-zero only
+        if event.get("lock_wait_micros"): _add_stat(state["stats"], "lockWaitMicros", event["lock_wait_micros"])  # non-zero only
+        if (event.get("write_conflicts") or 0) > 0: state["write_conflict_records"] += 1
+        if event.get("write_target"):
+            targets = state["targets"]
+            targets[event["write_target"]["id"]] += 1
+            if len(targets) > 2000: state["targets"] = collections.Counter(dict(targets.most_common(1000)))
         if "COLLSCAN" in str(event.get("plan_summary") or "").upper(): state["collscan_count"] += 1
         if event.get("has_sort_stage"): state["sort_stage_count"] += 1
         examined = max(float(event.get("keys_examined") or 0), float(event.get("docs_examined") or 0))
@@ -1151,8 +1537,107 @@ class StreamingSummary:
         if timestamp and (state["first_seen"] is None or timestamp < state["first_seen"]): state["first_seen"] = timestamp
         if timestamp and (state["last_seen"] is None or timestamp > state["last_seen"]): state["last_seen"] = timestamp
         occurrence = _slow_occurrence(event)
-        if occurrence and sum(len(items) for items in state["occurrences"].values()) < self.MAX_OCCURRENCES_PER_GROUP:
-            state["occurrences"][occurrence[0]].append({occurrence[1]: occurrence[2]})
+        if occurrence:
+            self._keep_occurrence(state, occurrence)
+
+    def _keep_occurrence(self, state: dict[str, Any], occurrence: tuple) -> None:
+        """1.7 time-stratified occurrence sample (replaces "first 2,000 records").
+
+        Every UTC minute may keep at most ``occ_cap`` occurrences. When the group exceeds
+        MAX_OCCURRENCES_PER_GROUP the per-minute cap is halved and every minute is trimmed to it, so
+        a burst late in the day keeps samples instead of being invisible after an early-day cap.
+        When the cap is already 1 and the group spans more minutes than the budget, every other
+        retained minute is dropped (uniform thinning)."""
+        minute = occurrence[0] + occurrence[1][:5]
+        kept = state["occ_kept"]
+        if kept[minute] >= state["occ_cap"]:
+            return
+        state["occurrences"][occurrence[0]].append({occurrence[1]: occurrence[2]})
+        kept[minute] += 1
+        state["occ_total"] += 1
+        if state["occ_total"] > self.MAX_OCCURRENCES_PER_GROUP:
+            self._thin_occurrences(state)
+
+    def _thin_occurrences(self, state: dict[str, Any]) -> None:
+        while state["occ_total"] > self.MAX_OCCURRENCES_PER_GROUP:
+            kept = state["occ_kept"]
+            if state["occ_cap"] > 1:
+                state["occ_cap"] = max(1, min(state["occ_cap"] // 2, max(kept.values()) // 2))
+                keep_minute = None
+            else:
+                state["occ_minute_thinning"] += 1
+                keep_minute = set(sorted(kept)[::2])
+            new_kept, total = collections.Counter(), 0
+            for day in list(state["occurrences"]):
+                retained = []
+                for entry in state["occurrences"][day]:
+                    minute = day + next(iter(entry))[:5]
+                    if (keep_minute is None or minute in keep_minute) and new_kept[minute] < state["occ_cap"]:
+                        new_kept[minute] += 1
+                        retained.append(entry)
+                if retained:
+                    state["occurrences"][day] = retained
+                else:
+                    del state["occurrences"][day]
+                total += len(retained)
+            state["occ_kept"], state["occ_total"] = new_kept, total
+
+    def _timeline_output(self) -> dict[str, Any]:
+        def clean(counter: collections.Counter) -> dict[str, float]:
+            return {k: (round(v, 2) if isinstance(v, float) else v) for k, v in sorted(counter.items()) if v}
+        occurrences = {day: [{minute: clean(counter)} for minute, counter in sorted(minutes.items())] for day, minutes in sorted(self.timeline.items())}
+        flat = [(day + " " + minute, counter) for day, minutes in self.timeline.items() for minute, counter in minutes.items()]
+        def top(metric: str) -> list[dict[str, Any]]:
+            ranked = sorted((item for item in flat if item[1].get(metric)), key=lambda item: (-item[1][metric], item[0]))[:10]
+            return [{"minute": label, metric: round(counter[metric], 2), "slow": counter.get("slow", 0)} for label, counter in ranked]
+        return {"bucket": "minute", "minutes": len(flat), "dropped_records": self.timeline_dropped,
+                "peak_minutes": {"slow": top("slow"), "slowCpuMs": top("slowCpuMs"), "writeConflicts": top("writeConflicts"), "lockWaitMs": top("lockWaitMs"), "txnAborted": top("txnAborted")},
+                "occurrence_timestamps": occurrences}
+
+    def _concurrency_output(self) -> dict[str, Any]:
+        c, t = self.concurrency, self.transactions
+        targets = sorted(self.targets.values(), key=lambda item: (-item["count"], -item["write_conflicts"], str(item["namespace"]), item["target_id"]))[:20]
+        hot = []
+        for state in targets:
+            minutes = state["minutes"]
+            peak = min(minutes.items(), key=lambda item: (-item[1][0], item[0]), default=(None, [0, 0.0]))  # earliest peak on ties
+            occurrences: dict[str, list] = collections.defaultdict(list)
+            for label, (count, conflicts) in sorted(minutes.items()):
+                day, minute = label.split(" ")
+                entry = {"occur": count}
+                if conflicts: entry["writeConflicts"] = conflicts
+                occurrences[day].append({minute: entry})
+            hot.append({"namespace": state["namespace"], "target_id": state["target_id"], "filter_fields": state["filter_fields"], "count": state["count"],
+                        "share_of_namespace_writes": round(state["count"] / max(self.namespace_writes[str(state["namespace"])], 1), 4),
+                        "write_conflicts": state["write_conflicts"], "records_with_write_conflicts": state["records_with_write_conflicts"],
+                        "write_kinds": dict(state["write_kinds"]), "app_names": sorted(state["app_names"]), "query_hashes": sorted(state["query_hashes"]),
+                        "plan_summaries": sorted(state["plan_summaries"]),
+                        "duration_ms": {"avg": round(state["duration_total"] / state["count"], 2), "max": state["duration_max"], "total": state["duration_total"]} if state["duration_total"] else None,
+                        "cpuNanos": {"avg": round(state["cpu_total"] / state["count"], 2), "max": state["cpu_max"], "total": state["cpu_total"]} if state["cpu_total"] else None,
+                        "first_seen": state["first_seen"], "last_seen": state["last_seen"], "peak_minute": peak[0], "max_per_minute": peak[1][0],
+                        "count_is_lower_bound": state["seen_after_pruning"], "minutes_partial": state["minutes_partial"],
+                        "occurrence_timestamps": dict(occurrences)})
+        tx_stats = {name: _render_stat(value) for name, value in t["stats"].items()}
+        return {
+            "write_conflicts": {"total": c["write_conflicts_total"], "records_with_write_conflicts": c["records_with_write_conflicts"],
+                                "per_record": _render_stat(c["write_conflicts_stat"].get("writeConflicts")),
+                                "first_seen": c["first_conflict"], "last_seen": c["last_conflict"],
+                                "by_namespace": c["write_conflicts_by_namespace"].most_common(20), "by_operation": c["write_conflicts_by_operation"].most_common(20),
+                                "by_app": c["write_conflicts_by_app"].most_common(20)},
+            "temporarily_unavailable_errors_total": c["temporarily_unavailable_total"],
+            "prepare_read_conflicts_total": c["prepare_read_conflicts_total"],
+            "lock_wait": {"micros_total": c["lock_wait_micros_total"], "records": c["lock_wait_records"]},
+            "flow_control": {"micros_total": c["flow_control_micros_total"], "records": c["flow_control_records"]},
+            "queue_time_micros_total": c["queue_time_micros_total"],
+            "conflict_errors": dict(c["conflict_errors"].most_common(20)),
+            "transactions": {"records": t["records"], "termination_causes": dict(t["termination_causes"]), "abort_causes": t["abort_causes"].most_common(10),
+                             "prepared": t["prepared"], "duration_ms": tx_stats.get("duration_ms"), "timeActiveMicros": tx_stats.get("timeActiveMicros"),
+                             "timeInactiveMicros": tx_stats.get("timeInactiveMicros"), "first_seen": t["first_seen"], "last_seen": t["last_seen"]},
+            "write_target_tracking": {"logged_write_records": sum(self.namespace_writes.values()), "tracked_targets": len(self.targets),
+                                      "pruned_targets": self.target_pruned, "max_tracked_targets": self.MAX_TARGETS,
+                                      "scope": "update/delete/findAndModify records present in the log (slow or conflict-bearing); unlogged fast writes are not counted"},
+            "hot_write_targets": hot,
+        }
 
     def _operation_details(self, operation: dict[str, Any]) -> dict[str, Any] | None:
         if not operation: return None
@@ -1179,18 +1664,45 @@ class StreamingSummary:
             stats = {name: _render_stat(value) for name, value in state["stats"].items()}
             hoisted, occurrences = _slow_group_occurrences(state)
             item = {"namespace": state["namespace"], "plan_summary": state["plan_summary"], "query_hash": state["query_hash"], "app_names": sorted(state["app_names"]), "count": state["count"], "duration_ms": stats.get("duration_ms"), "cpuNanos": ({**stats["cpuNanos"], "total": state["stats"]["cpuNanos"]["total"]} if stats.get("cpuNanos") else None), "keys_examined": stats.get("keys_examined"), "docs_examined": stats.get("docs_examined"), "n_returned": stats.get("n_returned"), "collscan_count": state["collscan_count"], "sort_stage_count": state["sort_stage_count"], "examined_returned_ratio_max": round(state["ratio_max"], 2), "first_seen": state["first_seen"], "last_seen": state["last_seen"], "sample_query_shape": state["sample_query_shape"], "sample_message": state["sample_message"], **hoisted, "occurrence_timestamps": occurrences}
+            recorded = sum(len(items) for items in state["occurrences"].values())
+            if recorded < state["count"]:
+                # 1.6: make the per-group occurrence cap explicit; use the top-level `timeline` for the full time series.
+                item["occurrences_recorded"] = recorded
+                item["occurrences_truncated"] = True
+                # 1.7: the retained occurrences are a time-stratified sample, not the first N records.
+                item["occurrence_sampling"] = {"method": "time_stratified", "per_minute_cap": state["occ_cap"],
+                                               "minute_thinning_rounds": state["occ_minute_thinning"]}
+            if stats.get("writeConflicts"):
+                item["writeConflicts"] = {**stats["writeConflicts"], "total": state["stats"]["writeConflicts"]["total"]}
+                item["write_conflict_records"] = state["write_conflict_records"]
+            if stats.get("lockWaitMicros"):
+                item["lockWaitMicros"] = {**stats["lockWaitMicros"], "total": state["stats"]["lockWaitMicros"]["total"]}
+            if state["targets"]:
+                item["distinct_write_targets"] = len(state["targets"])
+                item["top_write_targets"] = [{"target_id": tid, "count": count} for tid, count in state["targets"].most_common(3)]
             slow_output.append(item)
         by_category = {}
         for category, detail in self.category_details.items():
             by_category[category] = {"count": detail["count"], "first_seen": detail["first_seen"], "last_seen": detail["last_seen"], "components": sorted(detail["components"]), "namespaces": sorted(detail["namespaces"])[:20], "fingerprints": detail["fingerprints"].most_common(10)}
+        concurrency = self._concurrency_output()
         candidates = [{"category": category, **data} for category, data in by_category.items()] + [{"category": "repeated_error", **item} for item in repeated]
+        hot_candidates = []
+        for target in concurrency["hot_write_targets"]:
+            if target["count"] >= 50 and (target["share_of_namespace_writes"] >= 0.2 or target["write_conflicts"] > 0 or target["max_per_minute"] >= 100):
+                hot_candidates.append({"category": "hot_write_target", "count": target["count"], "first_seen": target["first_seen"], "last_seen": target["last_seen"],
+                                   "namespaces": [target["namespace"]], "target_id": target["target_id"], "filter_fields": target["filter_fields"],
+                                   "write_conflicts": target["write_conflicts"], "max_per_minute": target["max_per_minute"], "peak_minute": target["peak_minute"],
+                                   "share_of_namespace_writes": target["share_of_namespace_writes"]})
+        # 1.7: contention candidates first (hot documents, then conflicts): downstream consumers cap this list.
+        conflict = [c for c in candidates if c["category"] == "concurrency_conflict"]
+        candidates = hot_candidates + conflict + [c for c in candidates if c["category"] != "concurrency_conflict"]
         global_stats = {"count": self.slow_global["count"], "collscan_count": self.slow_global["collscan_count"], "change_stream_count": self.slow_global["change_stream_count"]}
         for name, value in self.slow_global["stats"].items():
             rendered = _render_stat(value)
             if rendered:
                 rendered["total"] = value["total"]
             global_stats[name] = rendered
-        return {"summary": {"severity_counts": dict(self.severity), "component_counts": dict(self.components), "category_counts": dict(self.categories), "top_message_fingerprints": [{"fingerprint": key, "count": count} for key, count in self.messages.most_common(20)], "repeated_error_groups": len(repeated), "repeated_error_events": sum(item["count"] for item in repeated)}, "error_scan": {"total_error_events": self.error_events, "unique_error_groups": len(errors), "repeated_error_groups": len(repeated), "groups": errors}, "repeated_errors": repeated, "slow": {"operations": slow_output, "global_stats": global_stats}, "slow_operations": slow_output, "issue_candidates": candidates, "trends": [{"bucket_start": key, **dict(sorted(value.items()))} for key, value in sorted(self.buckets.items())]}
+        return {"summary": {"severity_counts": dict(self.severity), "component_counts": dict(self.components), "category_counts": dict(self.categories), "top_message_fingerprints": [{"fingerprint": key, "count": count} for key, count in self.messages.most_common(20)], "repeated_error_groups": len(repeated), "repeated_error_events": sum(item["count"] for item in repeated)}, "error_scan": {"total_error_events": self.error_events, "unique_error_groups": len(errors), "repeated_error_groups": len(repeated), "groups": errors}, "repeated_errors": repeated, "slow": {"operations": slow_output, "global_stats": global_stats}, "slow_operations": slow_output, "concurrency": concurrency, "timeline": self._timeline_output(), "issue_candidates": candidates, "trends": [{"bucket_start": key, **dict(sorted(value.items()))} for key, value in sorted(self.buckets.items())]}
 
 
 def summarize(stream: Iterable[dict[str, Any]], slow_ms: float, bucket_minutes: int) -> dict[str, Any]:

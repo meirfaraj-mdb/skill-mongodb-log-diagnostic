@@ -1,9 +1,17 @@
 {
-  "version": "2026-10-25.1",
+  "version": "2026-11-10.1",
   "description": "Report priority and placement rules. Applied per node to one log day (24h, project timezone). agent/priority_rules.py evaluates them deterministically, passes the decisions to the report model, and enforces suppressions on the generated Markdown.",
-  "excluded_namespace_prefixes": ["admin.", "config.", "local."],
-  "change_stream_allowed_namespaces": ["admin.$cmd.aggregate"],
-  "excluded_namespace_markers": ["__mdb_internal"],
+  "excluded_namespace_prefixes": [
+    "admin.",
+    "config.",
+    "local."
+  ],
+  "change_stream_allowed_namespaces": [
+    "admin.$cmd.aggregate"
+  ],
+  "excluded_namespace_markers": [
+    "__mdb_internal"
+  ],
   "rules": {
     "change_stream_collscan": {
       "enabled": true,
@@ -35,28 +43,71 @@
       "types": {
         "authentication": {
           "label": "Failed to authenticate",
-          "message_patterns": ["\\bauthentication failed\\b", "\\bfailed to authenticate\\b", "\\bAuthenticationFailed\\b"],
-          "error_code_names": ["AuthenticationFailed"],
-          "error_codes": ["18"],
+          "message_patterns": [
+            "\\bauthentication failed\\b",
+            "\\bfailed to authenticate\\b",
+            "\\bAuthenticationFailed\\b"
+          ],
+          "error_code_names": [
+            "AuthenticationFailed"
+          ],
+          "error_codes": [
+            "18"
+          ],
           "report_keywords": "authenticat"
         },
         "authorization": {
           "label": "Authorization failures",
-          "message_patterns": ["\\bauthori[sz]ation failures?\\b", "\\bchecking authori[sz]ation failed\\b", "\\bnot authori[sz]ed\\b", "\\bunauthori[sz]ed\\b"],
-          "error_code_names": ["Unauthorized"],
-          "error_codes": ["13"],
+          "message_patterns": [
+            "\\bauthori[sz]ation failures?\\b",
+            "\\bchecking authori[sz]ation failed\\b",
+            "\\bnot authori[sz]ed\\b",
+            "\\bunauthori[sz]ed\\b"
+          ],
+          "error_code_names": [
+            "Unauthorized"
+          ],
+          "error_codes": [
+            "13"
+          ],
           "report_keywords": "authori[sz]|unauthori[sz]"
         }
       },
       "bands": [
-        {"lt": 100, "placement": "appendix_only"},
-        {"lt": 1000, "priority": "P3", "placement": "issues_and_actions"},
-        {"lt": 5000, "priority": "P2", "placement": "issues_and_actions"},
-        {"priority": "P1", "placement": "issues_and_actions"}
+        {
+          "lt": 100,
+          "placement": "appendix_only"
+        },
+        {
+          "lt": 1000,
+          "priority": "P3",
+          "placement": "issues_and_actions"
+        },
+        {
+          "lt": 5000,
+          "priority": "P2",
+          "placement": "issues_and_actions"
+        },
+        {
+          "priority": "P1",
+          "placement": "issues_and_actions"
+        }
       ],
       "guidance": [
         "Count each type separately for the log day on this node by summing the matching error_scan groups.",
         "Do not recommend raising timeouts or pool sizes. Possible checks: failing users, mechanisms and databases from the redacted samples, recent credential or role changes, misconfigured clients. Validate with the next day's count."
+      ]
+    },
+    "hot_document_contention": {
+      "enabled": true,
+      "priority": "P1",
+      "min_window_write_conflicts": 1000,
+      "min_target_share": 0.5,
+      "guidance": [
+        "A concurrency_findings incident window with verdict hot_document_contention_likely (at least {min_window_write_conflicts:,} write conflicts in the window and at least {min_target_share:.0%} of them on one hashed write target) is {priority}: one document is written by many concurrent operations.",
+        "Rank it above CPU-capacity, index and individual-query findings in the same window: each write conflict is a retry that burns CPU and holds a write ticket, so unrelated operations on the node slow down too. Never recommend a larger tier or a new index as the fix.",
+        "Possible checks: which application flow updates the document concurrently (apps and query hashes in the finding), retry/backoff behaviour, transactions touching it. Fixes: serialize or queue writes per document, move counters/appended arrays to separate documents, keep transactions short. Validate with a concurrent-write load test and FTDC metrics.operation.writeConflicts.",
+        "Never try to reveal the hashed target value; quote target_id, namespace and filter field names only."
       ]
     }
   }

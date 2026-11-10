@@ -1,4 +1,4 @@
-"""REPORT_MAX_INPUT_CHARS: per-node default 60k chars, 90k with resource investigation; explicit wins."""
+"""REPORT_MAX_INPUT_CHARS: per-node default 80k chars, 200k with resource investigation; explicit wins."""
 import json
 import os
 import sys
@@ -28,10 +28,10 @@ class InputLimitDefaultTests(unittest.TestCase):
 
     def test_resolver(self):
         r = self.rs.resolve_max_input_chars
-        self.assertEqual(r(None, False), 60_000)
-        self.assertEqual(r(None, True), 90_000)
-        self.assertEqual(r("", True), 90_000)
-        self.assertEqual(r(0, False), 60_000)  # non-positive -> default
+        self.assertEqual(r(None, False), 80_000)
+        self.assertEqual(r(None, True), 200_000)
+        self.assertEqual(r("", True), 200_000)
+        self.assertEqual(r(0, False), 80_000)  # non-positive -> default
         self.assertEqual(r(250_000, False), 250_000)
         self.assertEqual(r("120000", True), 120_000)
         with self.assertRaises(ValueError):
@@ -51,19 +51,19 @@ class InputLimitDefaultTests(unittest.TestCase):
                                   "mongodb", configured, config=config)
         return out, seen["user"]
 
-    def test_default_without_metrics_is_60k(self):
+    def test_default_without_metrics_is_80k(self):
         out, _ = self.run_node()
-        self.assertEqual(out["max_input_chars"], 60_000)
+        self.assertEqual(out["max_input_chars"], 80_000)
 
-    def test_default_with_resource_investigation_is_90k(self):
+    def test_default_with_resource_investigation_is_200k(self):
         out, _ = self.run_node(metrics=payload([20] * 12 + [95, 96] + [20] * 10))
         self.assertIsNotNone(out["resource_investigation"])
-        self.assertEqual(out["max_input_chars"], 90_000)
+        self.assertEqual(out["max_input_chars"], 200_000)
 
-    def test_metrics_with_investigation_disabled_is_60k(self):
+    def test_metrics_with_investigation_disabled_is_80k(self):
         out, _ = self.run_node(metrics=payload([95, 95]), config={"resource_investigation_enabled": False})
         self.assertIsNone(out["resource_investigation"])
-        self.assertEqual(out["max_input_chars"], 60_000)
+        self.assertEqual(out["max_input_chars"], 80_000)
 
     def test_explicit_value_wins(self):
         out, _ = self.run_node(metrics=payload([95, 95]), configured=600_000)
@@ -81,8 +81,8 @@ class InputLimitDefaultTests(unittest.TestCase):
             return "# Report\n"
         out = self.rs.report_node(store, L, types.SimpleNamespace(generate=generate), "sys", DAY, "node",
                                   "mongodb", None)
-        self.assertEqual(out["max_input_chars"], 60_000)
-        self.assertLessEqual(len(seen["user"]), 60_000)
+        self.assertEqual(out["max_input_chars"], 80_000)
+        self.assertLessEqual(len(seen["user"]), 80_000)
 
     def test_run_uses_per_node_default_and_env_override(self):
         from agent import providers
@@ -94,7 +94,7 @@ class InputLimitDefaultTests(unittest.TestCase):
         llm = types.SimpleNamespace(generate=lambda s, u: "## Executive summary\n\nok" if "Cluster `" in u else "# R\n")
         m = self.rs.run({"prefix": "p", "cluster_name": "c", "expected_node_count": 2}, DAY, store=Store(dict(items)),
                         llm=llm)
-        self.assertEqual({r["node"]: r["max_input_chars"] for r in m["reports"]}, {"a": 60_000, "b": 90_000})
+        self.assertEqual({r["node"]: r["max_input_chars"] for r in m["reports"]}, {"a": 80_000, "b": 200_000})
         with patch.dict(os.environ, {"MONGODB_LOG_DIAG_REPORT_MAX_INPUT_CHARS": "150000"}, clear=True):
             env = providers._env_config()
         self.assertEqual(env["report_max_input_chars"], 150_000)

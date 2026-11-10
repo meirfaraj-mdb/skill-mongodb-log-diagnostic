@@ -47,7 +47,9 @@
 | `usedDisk` | false | §4 | a blocking stage spilled to disk |
 | `replanned` | false | §6 | cached plan evicted, plan instability |
 | high yields with long duration | — | §3 | long scans; also check cache pressure (resource rules) |
-| repeated `writeConflicts` | 0 | §7 | concurrent updates to the same documents |
+| repeated `writeConflicts` | 0 | §5, §7 | concurrent updates to the same documents; check `concurrency.hot_write_targets` |
+| one `target_id` holds most of a group's writes (`top_write_targets`, `share_of_namespace_writes`) | spread across many targets | §5, §7 | hot document |
+| `lockWaitMicros` / `flowControlMicros` high | ≈ 0 | resource rules | lock or replication-throttling wait, not query cost |
 | high storage bytes / time reading | low | resource rules | data read from disk into cache |
 | high admission queue / ticket wait | ≈ 0 | resource rules | saturated node: a symptom, not a query defect by itself |
 | high write-concern wait | low | §5 | secondaries slow to acknowledge |
@@ -193,6 +195,12 @@
 ## 5. Writes
 - **Slow single-document updates.** Check write conflicts (hot document), write-concern wait, the number of indexes
   touched, document growth (array pushes), and cache pressure.
+- **Hot document.** Evidence: a `hot_write_target` candidate, or a `concurrency.hot_write_targets` entry with a large
+  `count`, high `share_of_namespace_writes`, `write_conflicts > 0`, and a `max_per_minute` spike aligned with the
+  incident minutes in `timeline`. Concurrent writes to one document serialize; every write conflict is a retry that
+  costs CPU and keeps a write ticket, so latency and CPU rise for the whole node, not only for that document. The
+  plan is usually a perfect `IXSCAN`/`IDHACK`: an index does not fix it. Report the namespace, `filter_fields`,
+  query hash, application, peak minute, and conflicts; never try to reveal the hashed values.
 - **Unitary writes with high parallelism.** Propose unordered bulk writes when ordering is not required.
 - **Upserts** need an index, ideally unique, on the query predicate.
 - **Frequent retryable `findAndModify`** increases oplog churn (see resource rules).
@@ -218,7 +226,7 @@ Always present these as "pattern suggested by the signals", never as confirmed.
 | Massive number of collections | many low-traffic namespaces | consolidate with a discriminator field |
 | Case-insensitive search without collation | `/…/i` shapes with full scans | collation index (§2.8) |
 | Separating data accessed together | frequent `$lookup` between the same collections | embedding or extended reference |
-| Hot document / monotonic counter | repeated write conflicts on one shape | distribute writes, redesign the counter |
+| Hot document / monotonic counter | repeated write conflicts on one shape; one `target_id` dominating `hot_write_targets`; `$inc`/`$push` on the same document from many clients | distribute writes (bucketed or sharded counters), append-only event documents with periodic roll-up, cap pushed arrays, keep transactions on the hot document short, batch increments client-side |
 
 ## 8. Client options visible in shapes
 - **Secondary reads with majority or linearizable read concern on hot paths.** Check replication lag first.

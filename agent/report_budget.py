@@ -27,7 +27,11 @@ LABEL_RE = re.compile(r'\blabel="([^"]*)"')
 # Shrunk first -> last. ``current`` (the occurrence extract of the log day) is reduced last.
 SHRINK_ORDER = ("query_stats", "index_stats", "n-8", "n-1", "precomputed_diff", "offline_driver_cves",
                 "resource_investigation", "current")
-# Removed entirely only after every level failed, in this order. ``current`` is never dropped.
+# Small documents computed from the FULL extract (the only place the minute timeline and hot-document
+# evidence survive). Reduced only after every other document reached the last level.
+PROTECTED = ("concurrency_findings",)
+# Removed entirely only after every level failed, in this order. ``current`` and ``concurrency_findings``
+# are never dropped.
 DROP_ORDER = ("index_stats", "query_stats", "n-8", "n-1", "precomputed_diff")
 # (max list items, max occurrence entries per group, max string length, max correlated items)
 LEVELS = ((60, 50, 600, 10), (40, 20, 400, 5), (25, 10, 300, 5), (15, 5, 200, 3), (10, 2, 160, 3),
@@ -196,12 +200,21 @@ def fit_prompt(user: str, max_chars: int) -> tuple[str, dict]:
 
     for level_index in range(len(LEVELS)):
         for doc in order(SHRINK_ORDER):
+            if doc.label in PROTECTED:
+                continue
             doc.shrink(level_index)
             sizes[id(doc)] = doc.size()
             if total() <= max_chars:
                 break
         if total() <= max_chars:
             break
+    for level_index in range(len(LEVELS)):
+        if total() <= max_chars:
+            break
+        for doc in docs:
+            if doc.label in PROTECTED:
+                doc.shrink(level_index)
+                sizes[id(doc)] = doc.size()
     if total() > max_chars:
         for label in DROP_ORDER:
             for doc in docs:
