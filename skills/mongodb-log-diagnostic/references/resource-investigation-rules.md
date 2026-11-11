@@ -22,6 +22,12 @@
    - Assess sustained load with the average metrics.
    - Report a peak only when it aligns in time with latency or errors.
    - CPU occasionally touching 100% is not, by itself, a performance issue.
+   - **Exception: hourly/daily granularity** (PT1H / P1D, the only data Atlas keeps for older log days). One
+     sample averages a whole hour, so a 10-minute saturation can show as a modest average. The pipeline then
+     evaluates the peak rules on the MAX_* series and uses the average series to qualify each episode:
+     an **average spike** (≥ `avg_spike_ratio` × the day median and ≥ `avg_spike_min_delta_*` above it) or an
+     average over the threshold in the same hour means `sustained_load`; a max-only episode is a `short_peak`.
+     Report short peaks with lower confidence, and say hourly data cannot time a peak inside the hour.
 3. **Correlate in time.** A resource finding needs overlapping time windows with slow operations, errors or
    connection churn. Use the pipeline's `correlation_margin_minutes` (default 5). Temporal overlap shows
    correlation, not causation; say so.
@@ -40,6 +46,25 @@ These are configurable via `MONGODB_LOG_DIAG_RESOURCE_THRESHOLDS`.
 | `memory_percent` | 75 | system memory trigger |
 | `disk_queue_depth` (min `disk_min_points` points) | 10 (3) | disk saturation trigger |
 | `connection_memory_mb` | 1.0 | memory estimate per connection |
+| `avg_spike_ratio` / `avg_spike_min_delta_percent` / `avg_spike_min_delta_queue` | 2.0 / 15 / 3 | average spike vs day median (hourly/daily data) |
+| `workload_increase_ratio` / `workload_min_abs_increase` | 2.0 / 5 | opcounter / document-rate increase vs day median |
+
+**Evaluation basis by granularity.**
+
+| Granularity | Peak rules (CPU > 90%, memory > 75%, disk queue > 10) | Sustained CPU rule | Extra |
+|---|---|---|---|
+| seconds / minutes (PT10S, PT1M, PT5M) | average series; MAX_* context only | average | — |
+| hours / days (PT1H, P1D) | MAX_* series (`MAX_SYSTEM_NORMALIZED_CPU_*`, `MAX_SYSTEM_MEMORY_USED` / total RAM, `MAX_DISK_QUEUE_DEPTH`) | average | `confidence` per episode, `average_spikes` list; disk pressure also when one max sample is confirmed by the average |
+
+Without MAX_* data the average series is used and a note says short peaks may be hidden.
+
+**Workload context (every episode).** `workload` compares `OPCOUNTER_*` (query, getmore, insert, update,
+delete, command, TTL deletes, and `OPCOUNTER_REPL_*` applied on secondaries) and `DOCUMENT_METRICS_*`
+(returned / inserted / updated / deleted) in the window with the day median:
+- `volume_increase`: more operations or documents explain the resource rise; name the counters that rose.
+- `no_volume_change`: same traffic, higher cost per operation (scans, query targeting, cache misses) or
+  contention; rank query/plan causes first.
+- `docs_returned_per_read_op` rising: less selective reads or larger result sets.
 
 Interpretation bands below come from the KBs. Use them to *qualify* a triggered signal (good / watch / bad),
 not to invent triggers.

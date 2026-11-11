@@ -12,8 +12,23 @@ B - Memory  system memory used > 75% (used / (used + available)); context from c
             (~1 MB each), open cursors, global lock queue and errors in the same window.
 C - Disk    DISK_QUEUE_DEPTH > 10 on at least ``disk_min_points`` samples (pressure).
 
-Every rule uses the average series; MAX_* series (MAX_SYSTEM_NORMALIZED_CPU_*,
-MAX_DISK_QUEUE_DEPTH) are only reported as context.
+Evaluation basis depends on the metrics granularity:
+
+* seconds / minutes (PT10S, PT1M, PT5M ...): every rule uses the average series; MAX_* series
+  (MAX_SYSTEM_NORMALIZED_CPU_*, MAX_SYSTEM_MEMORY_USED, MAX_DISK_QUEUE_DEPTH) are context only.
+* hours / days (PT1H, P1D: log days older than the fine-grained retention): an hourly average hides
+  short peaks, so the peak rules (CPU > 90%, memory > 75%, disk queue > 10) are evaluated on the MAX_*
+  series (the peak inside each sample). The average series is still used: the sustained-CPU rule
+  stays on it, and an *average spike* (sample >= ``avg_spike_ratio`` x the day median and at least
+  ``avg_spike_min_delta_*`` above it) marks load sustained over the sample. Each max-basis episode
+  carries ``confidence``: ``sustained_load`` (average spike or average over the threshold in the same
+  window) or ``short_peak`` (max only). Average spikes outside any episode are listed separately.
+  Without MAX_* data the average series is used, with a note.
+
+Workload (opcounters + document metrics): every episode carries ``workload`` comparing OPCOUNTER_*
+(incl. OPCOUNTER_REPL_* applied on secondaries) and DOCUMENT_METRICS_* in the window with the day
+median. ``volume_increase`` means more operations/documents explain the resource rise;
+``no_volume_change`` points to a higher per-operation cost (scans, query targeting, cache) or contention.
 
 Every episode also carries ``contention`` (``concurrency_findings.episode_contention``): the
 write-conflict / hot-document evidence of the same window from the uncapped minute timeline
@@ -37,20 +52,35 @@ CPU_CONTEXT = ["PROCESS_NORMALIZED_CPU_USER", "PROCESS_NORMALIZED_CPU_KERNEL", "
                "TICKETS_AVAILABLE_READS", "TICKETS_AVAILABLE_WRITE"]
 DISK_CONTEXT_PROCESS = ["GLOBAL_LOCK_CURRENT_QUEUE_TOTAL", "CACHE_DIRTY_BYTES", "SYSTEM_NORMALIZED_CPU_IOWAIT",
                         "EXTRA_INFO_PAGE_FAULTS", "TICKETS_AVAILABLE_READS", "TICKETS_AVAILABLE_WRITE"]
-# MAX_* series are reported as context only; every rule is evaluated on the average series.
+# Fine granularity: MAX_* series are context only. Hourly/daily granularity: peak rules use them.
 MAX_CPU_COMPONENTS = ["MAX_" + n for n in CPU_COMPONENTS]
+MAX_MEMORY = ["MAX_SYSTEM_MEMORY_USED", "MAX_SYSTEM_MEMORY_AVAILABLE"]
+# Workload context of every episode: operation rates and document rates.
+OPCOUNTER_METRICS = ["OPCOUNTER_QUERY", "OPCOUNTER_GETMORE", "OPCOUNTER_INSERT", "OPCOUNTER_UPDATE",
+                     "OPCOUNTER_DELETE", "OPCOUNTER_CMD", "OPCOUNTER_TTL_DELETED",
+                     "OPCOUNTER_REPL_INSERT", "OPCOUNTER_REPL_UPDATE", "OPCOUNTER_REPL_DELETE", "OPCOUNTER_REPL_CMD"]
+DOCUMENT_METRICS = ["DOCUMENT_METRICS_RETURNED", "DOCUMENT_METRICS_INSERTED", "DOCUMENT_METRICS_UPDATED",
+                    "DOCUMENT_METRICS_DELETED"]
+WORKLOAD_METRICS = OPCOUNTER_METRICS + DOCUMENT_METRICS
 # Extra process measurements requested (besides the graph groups) so the rules can be evaluated.
 INVESTIGATION_METRICS = list(dict.fromkeys(
     CPU_COMPONENTS + MAX_CPU_COMPONENTS + ["SYSTEM_MEMORY_USED", "SYSTEM_MEMORY_AVAILABLE", "SYSTEM_MEMORY_FREE"]
-    + CPU_CONTEXT + MEMORY_CONTEXT + DISK_CONTEXT_PROCESS))
+    + MAX_MEMORY + CPU_CONTEXT + MEMORY_CONTEXT + DISK_CONTEXT_PROCESS + WORKLOAD_METRICS))
 DISK_METRICS = ["DISK_QUEUE_DEPTH", "MAX_DISK_QUEUE_DEPTH", "DISK_PARTITION_IOPS_TOTAL",
-                "DISK_PARTITION_LATENCY_READ", "DISK_PARTITION_LATENCY_WRITE"]
+                "DISK_PARTITION_LATENCY_READ", "DISK_PARTITION_LATENCY_WRITE", "MAX_DISK_PARTITION_IOPS_TOTAL",
+                "MAX_DISK_PARTITION_LATENCY_READ", "MAX_DISK_PARTITION_LATENCY_WRITE"]
 DEFAULT_THRESHOLDS = {"cpu_peak_percent": 90.0, "cpu_sustained_percent": 70.0, "cpu_sustained_minutes": 20,
                       "memory_percent": 75.0, "disk_queue_depth": 10.0, "disk_min_points": 3,
-                      "connection_memory_mb": 1.0, "correlation_margin_minutes": 5, "top_groups": 10}
+                      "connection_memory_mb": 1.0, "correlation_margin_minutes": 5, "top_groups": 10,
+                      # Hourly/daily granularity: spike of the average series versus the day median.
+                      "avg_spike_ratio": 2.0, "avg_spike_min_delta_percent": 15.0, "avg_spike_min_delta_queue": 3.0,
+                      # Workload (opcounters / document metrics) change versus the day median.
+                      "workload_increase_ratio": 2.0, "workload_min_abs_increase": 5.0}
 SECTION_HEADING = "## High resource usage investigation"
 SECTION_RE = re.compile(r"(?im)^#{1,3}\s*High resource usage investigation\b")
-_GRANULARITY = {"PT1M": 60, "PT5M": 300, "PT1H": 3600, "P1D": 86400}
+_DURATION = re.compile(r"^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$")
+# Samples of one hour or more are "coarse": averages hide peaks shorter than the sample.
+COARSE_STEP_SECONDS = 3600
 _SYSTEM_NS = re.compile(r"^(admin|local|config)\.|__mdb_internal")
 
 
@@ -98,9 +128,40 @@ def metrics_present(payload) -> bool:
     return any(s["points"] for name, s in series_of(payload.get("data")).items())
 
 
+def granularity_seconds(value, default=300) -> int:
+    """Seconds of an ISO-8601 granularity (PT10S, PT1M, PT5M, PT1H, P1D ...)."""
+    m = _DURATION.match(str(value or "").strip().upper())
+    if not m or not any(m.groups()):
+        return default
+    days, hours, minutes, seconds = (float(g) if g else 0.0 for g in m.groups())
+    total = int(days * 86400 + hours * 3600 + minutes * 60 + seconds)
+    return total if total > 0 else default
+
+
 def _step_seconds(payload) -> int:
-    window = payload.get("window") or {}
-    return _GRANULARITY.get(str(window.get("granularity") or "").upper(), 300)
+    window = (payload or {}).get("window") or {}
+    return granularity_seconds(window.get("granularity"))
+
+
+def _median(values):
+    vals = sorted(values)
+    if not vals:
+        return None
+    mid = len(vals) // 2
+    return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+
+
+def average_spikes(points, ratio, min_delta) -> set:
+    """Timestamps where the average series jumps well above its day median (load sustained over
+    the sample, which an hourly average only shows when the rise lasted a large part of the hour)."""
+    base = _median(points.values())
+    if base is None:
+        return set()
+    return {t for t, v in points.items() if v - base >= min_delta and (base <= 0 or v >= base * ratio)}
+
+
+def _in(points, start, end):
+    return [v for t, v in points.items() if start <= t < end]
 
 
 def _runs(points, predicate, step):
@@ -144,10 +205,10 @@ def _local(when, tz_name):
         return None
 
 
-def _episode(run, step, tz_name, metric, unit="%"):
+def _episode(run, step, tz_name, metric, unit="%", basis="average"):
     start, end = run[0][0], run[-1][0] + timedelta(seconds=step)
     peak_t, peak = max(run, key=lambda p: p[1])
-    return {"metric": metric, "start_utc": start.isoformat(), "end_utc": end.isoformat(),
+    return {"metric": metric, "basis": basis, "start_utc": start.isoformat(), "end_utc": end.isoformat(),
             "start_local": _local(start, tz_name), "end_local": _local(end, tz_name),
             "duration_minutes": round((end - start).total_seconds() / 60, 1), "samples": len(run),
             "peak": round(peak, 2), "peak_at_utc": peak_t.isoformat(), "unit": unit,
@@ -273,6 +334,99 @@ def _memory_percent(series):
     return {t: 100.0 * u / (u + avail[t]) for t, u in used.items() if t in avail and (u + avail[t]) > 0}
 
 
+def _memory_max_percent(series):
+    """Peak memory used per sample: MAX_SYSTEM_MEMORY_USED / total RAM (total from the average
+    series, used + available, which is stable; the day median fills missing samples)."""
+    max_used = (series.get("MAX_SYSTEM_MEMORY_USED") or {}).get("points") or {}
+    used = (series.get("SYSTEM_MEMORY_USED") or {}).get("points") or {}
+    avail = (series.get("SYSTEM_MEMORY_AVAILABLE") or {}).get("points") or {}
+    totals = {t: u + avail[t] for t, u in used.items() if t in avail and u + avail[t] > 0}
+    fallback = _median(totals.values())
+    if not max_used or not fallback:
+        return {}
+    return {t: min(100.0, 100.0 * u / (totals.get(t) or fallback)) for t, u in max_used.items()}
+
+
+def _annotate_max_episode(ep, avg_points, spikes, sustained_threshold):
+    """Max-basis episode (hourly/daily data): does the average series confirm sustained load?"""
+    start, end = ep["_start"], ep["_end"]
+    vals = _in(avg_points, start, end)
+    spike = any(start <= t < end for t in spikes)
+    ep["average_series_in_window"] = ({"max": round(max(vals), 2), "mean": round(sum(vals) / len(vals), 2)}
+                                      if vals else None)
+    ep["average_spike"] = spike
+    ep["confidence"] = ("sustained_load" if spike or (vals and max(vals) > sustained_threshold)
+                        else "short_peak" if vals else "unknown_no_average_series")
+    return ep
+
+
+def _spike_episodes(avg_points, spikes, covered, step, tz_name, metric, unit):
+    """Average spikes that are not inside an already reported episode."""
+    free = {t: v for t, v in avg_points.items() if t in spikes
+            and not any(a <= t < b for a, b in covered)}
+    return [_episode(r, step, tz_name, metric + "_average_spike", unit=unit, basis="average_spike")
+            for r in _runs(free, lambda v: True, step)]
+
+
+def workload_summary(series) -> dict:
+    """Day view of opcounters and document metrics (median, max, time of max)."""
+    out = {}
+    for name in WORKLOAD_METRICS:
+        s = series.get(name) or {}
+        pts = s.get("points") or {}
+        if not pts:
+            continue
+        peak_t = max(pts, key=pts.get)
+        out[name] = {"median": round(_median(pts.values()), 2), "max": round(pts[peak_t], 2),
+                     "max_at_utc": peak_t.isoformat(), "units": s.get("units")}
+    return {"status": "available" if out else "no_data", "metrics": out}
+
+
+def _read_ops(series, start=None, end=None):
+    total = {}
+    for name in ("OPCOUNTER_QUERY", "OPCOUNTER_GETMORE"):
+        for t, v in ((series.get(name) or {}).get("points") or {}).items():
+            if start is None or start <= t < end:
+                total[t] = total.get(t, 0.0) + v
+    return total
+
+
+def workload_in_window(series, start, end, th) -> dict:
+    """Opcounters / document metrics in [start, end) versus the day median.
+
+    ``increased``: metrics at >= ``workload_increase_ratio`` x the median and at least
+    ``workload_min_abs_increase`` above it. ``verdict``: volume_increase | no_volume_change | no_data."""
+    ratio_th, abs_th = float(th["workload_increase_ratio"]), float(th["workload_min_abs_increase"])
+    increased, rows = [], []
+    for name in WORKLOAD_METRICS:
+        pts = (series.get(name) or {}).get("points") or {}
+        vals = _in(pts, start, end)
+        if not vals:
+            continue
+        base = _median(pts.values()) or 0.0
+        mean, peak = sum(vals) / len(vals), max(vals)
+        row = {"metric": name, "window_mean": round(mean, 2), "window_max": round(peak, 2),
+               "day_median": round(base, 2), "ratio": round(mean / base, 2) if base > 0 else None}
+        rows.append(row)
+        if mean - base >= abs_th and (base <= 0 or mean >= base * ratio_th):
+            increased.append(row)
+    if not rows:
+        return {"verdict": "no_data"}
+    increased.sort(key=lambda r: -(float("inf") if r["ratio"] is None else r["ratio"]))
+    busiest = sorted(rows, key=lambda r: -r["window_mean"])[:3]
+    out = {"verdict": "volume_increase" if increased else "no_volume_change",
+           "increased": increased, "busiest": [r for r in busiest if r not in increased]}
+    # Documents returned per read operation: a rise means larger result sets / less selective reads.
+    returned = (series.get("DOCUMENT_METRICS_RETURNED") or {}).get("points") or {}
+    reads_all, reads_win = _read_ops(series), _read_ops(series, start, end)
+    per_op = lambda pts, reads: [pts[t] / reads[t] for t in pts if reads.get(t)]
+    day, win = per_op(returned, reads_all), per_op({t: v for t, v in returned.items() if start <= t < end}, reads_win)
+    if day and win:
+        out["docs_returned_per_read_op"] = {"window_mean": round(sum(win) / len(win), 2),
+                                            "day_median": round(_median(day), 2)}
+    return out
+
+
 def analyze(metrics_payload, extract, config=None) -> dict:
     config = config or {}
     th = {**DEFAULT_THRESHOLDS, **(config.get("resource_thresholds") or {})}
@@ -282,12 +436,23 @@ def analyze(metrics_payload, extract, config=None) -> dict:
     series = series_of((metrics_payload or {}).get("data"))
     top = int(th["top_groups"])
     window = (metrics_payload or {}).get("window") or {}
+    coarse = step >= COARSE_STEP_SECONDS
     result = {"thresholds": th, "granularity_seconds": step, "timezone": tz_name,
-              "metrics_window": {k: window.get(k) for k in ("since", "until", "granularity") if k in window},
+              "metrics_window": {k: window.get(k) for k in ("since", "until", "granularity", "requested_granularity")
+                                 if k in window},
+              "coarse_granularity": coarse,
+              "evaluation_basis": ("max series for peak rules, average series for sustained rule and spikes"
+                                   if coarse else "average series"),
               "notes": []}
-    if step >= 3600:
-        result["notes"].append("Metrics are hourly averages: short peaks may be hidden and each sample "
-                               "covers one hour of the sustained-CPU rule.")
+    if coarse:
+        result["notes"].append(
+            f"Metrics granularity is {window.get('granularity') or str(step) + ' s'} (hourly/daily data, typical "
+            "for log days older than the fine-grained retention). Averages hide peaks shorter than one sample, so "
+            "the peak rules are evaluated on the MAX_* series (peak inside each sample). An average spike "
+            f"(>= {th['avg_spike_ratio']:g}x the day median) in the same window means the load lasted a large part "
+            "of the sample (confidence sustained_load); a max-only episode is a short_peak. The sustained-CPU rule "
+            "uses the average series (one sample covers the whole hour).")
+    result["workload"] = workload_summary(series)
 
     from . import concurrency_findings as cf
     timeline = cf.timeline_minutes(extract or {})
@@ -300,46 +465,86 @@ def analyze(metrics_payload, extract, config=None) -> dict:
         if timeline:
             episode["contention"] = cf.episode_contention(
                 cf.window_stats(extract, start - margin, end + margin, config, timeline))
+        episode["workload"] = workload_in_window(series, start, end, th)
         return episode
+
+    pct_delta = float(th["avg_spike_min_delta_percent"])
 
     # A - CPU
     cpu = _cpu_total(series)
-    if not cpu:
+    # Sum of per-component maxima (as the Atlas "Max Normalized System CPU" chart): an upper bound.
+    cpu_max = {t: min(100.0, v) for t, v in _cpu_total(series, MAX_CPU_COMPONENTS).items()}
+    use_max = coarse and bool(cpu_max)
+    if not cpu and not use_max:
         result["cpu"] = {"status": "no_data", "rule": "normalized system CPU metrics missing"}
     else:
-        peaks = [finish(_episode(r, step, tz_name, "normalized_system_cpu"), CPU_CONTEXT)
-                 for r in _runs(cpu, lambda v: v > th["cpu_peak_percent"], step)]
+        peak_series = cpu_max if use_max else cpu
+        basis = "max" if use_max else "average"
+        spikes = average_spikes(cpu, float(th["avg_spike_ratio"]), pct_delta) if coarse and cpu else set()
+        peaks = []
+        for r in _runs(peak_series, lambda v: v > th["cpu_peak_percent"], step):
+            ep = _episode(r, step, tz_name, "normalized_system_cpu", basis=basis)
+            if use_max:
+                _annotate_max_episode(ep, cpu, spikes, th["cpu_sustained_percent"])
+            peaks.append(ep)
         sustained = []
         for r in _runs(cpu, lambda v: v > th["cpu_sustained_percent"], step):
             ep = _episode(r, step, tz_name, "normalized_system_cpu")
             if ep["duration_minutes"] > th["cpu_sustained_minutes"]:
-                sustained.append(finish(ep, CPU_CONTEXT))
-        cpu_max = _cpu_total(series, MAX_CPU_COMPONENTS)
-        for ep in peaks + sustained:
+                sustained.append(ep)
+        covered = [(ep["_start"], ep["_end"]) for ep in peaks + sustained]
+        spike_eps = _spike_episodes(cpu, spikes, covered, step, tz_name, "normalized_system_cpu", "%") \
+            if coarse else []
+        peaks, sustained, spike_eps = ([finish(ep, CPU_CONTEXT) for ep in group]
+                                       for group in (peaks, sustained, spike_eps))
+        for ep in peaks + sustained + spike_eps:
             s0, e0 = _ts(ep["start_utc"]), _ts(ep["end_utc"])
-            vals = [v for t, v in cpu_max.items() if s0 <= t <= e0]
+            vals = [v for t, v in cpu_max.items() if s0 <= t < e0]
             ep["max_series_peak_percent"] = round(max(vals), 2) if vals else None
         result["cpu"] = {"status": "triggered" if peaks or sustained else "not_triggered",
-                         "evaluated_on": "average (SYSTEM_NORMALIZED_CPU_*)",
-                         "max_percent": round(max(cpu.values()), 2),
-                         "max_at_utc": max(cpu, key=cpu.get).isoformat(),
+                         "evaluated_on": ("max (MAX_SYSTEM_NORMALIZED_CPU_*, sum of per-component maxima = upper "
+                                          "bound) for the peak rule; average for the sustained rule") if use_max
+                                         else "average (SYSTEM_NORMALIZED_CPU_*)",
+                         "basis": basis,
+                         "max_percent": round(max(peak_series.values()), 2),
+                         "max_at_utc": max(peak_series, key=peak_series.get).isoformat(),
+                         "average_max_percent": round(max(cpu.values()), 2) if cpu else None,
+                         "average_median_percent": round(_median(cpu.values()), 2) if cpu else None,
                          "max_series_max_percent": round(max(cpu_max.values()), 2) if cpu_max else None,
                          "peak_episodes_over_%g" % th["cpu_peak_percent"]: peaks,
                          "sustained_episodes_over_%g_for_%gmin" % (th["cpu_sustained_percent"],
                                                                    th["cpu_sustained_minutes"]): sustained}
+        if coarse:
+            result["cpu"]["average_spikes"] = spike_eps
+            if not use_max:
+                result["notes"].append("CPU: MAX_SYSTEM_NORMALIZED_CPU_* not collected; peak rule evaluated on "
+                                       "hourly averages, short peaks may be hidden.")
     # B - Memory
     mem = _memory_percent(series)
+    mem_max = _memory_max_percent(series) if coarse else {}
+    use_max = bool(mem_max)
     if not mem:
         result["memory"] = {"status": "no_data", "rule": "SYSTEM_MEMORY_USED/AVAILABLE missing"}
     else:
-        episodes = []
-        for r in _runs(mem, lambda v: v > th["memory_percent"], step):
-            ep = finish(_episode(r, step, tz_name, "system_memory_used_percent"), MEMORY_CONTEXT)
+        peak_series = mem_max if use_max else mem
+        spikes = average_spikes(mem, float(th["avg_spike_ratio"]), pct_delta) if coarse else set()
+        episodes, raw = [], []
+        for r in _runs(peak_series, lambda v: v > th["memory_percent"], step):
+            ep = _episode(r, step, tz_name, "system_memory_used_percent", basis="max" if use_max else "average")
+            if use_max:
+                _annotate_max_episode(ep, mem, spikes, th["memory_percent"])
+            raw.append(ep)
+        spike_eps = _spike_episodes(mem, spikes, [(e["_start"], e["_end"]) for e in raw], step, tz_name,
+                                    "system_memory_used_percent", "%") if coarse else []
+        spike_eps = [finish(ep, MEMORY_CONTEXT) for ep in spike_eps]
+        for ep in raw:
+            ep = finish(ep, MEMORY_CONTEXT)
             peak_t = _ts(ep["peak_at_utc"])
-            used, avail = (_value_at(series, "SYSTEM_MEMORY_USED", peak_t),
-                           _value_at(series, "SYSTEM_MEMORY_AVAILABLE", peak_t))
+            used = _value_at(series, "MAX_SYSTEM_MEMORY_USED" if use_max else "SYSTEM_MEMORY_USED", peak_t)
+            avg_used, avail = (_value_at(series, "SYSTEM_MEMORY_USED", peak_t),
+                               _value_at(series, "SYSTEM_MEMORY_AVAILABLE", peak_t))
             conns = _value_at(series, "CONNECTIONS", peak_t)
-            total_mb = (used + avail) / 1024 if used is not None and avail is not None else None
+            total_mb = (avg_used + avail) / 1024 if avg_used is not None and avail is not None else None
             conn_mb = conns * th["connection_memory_mb"] if conns is not None else None
             ep["at_peak"] = {"system_memory_used_mb": round(used / 1024, 1) if used is not None else None,
                              "system_memory_total_estimate_mb": round(total_mb, 1) if total_mb else None,
@@ -350,10 +555,20 @@ def analyze(metrics_payload, extract, config=None) -> dict:
                              "global_lock_queue_total": _value_at(series, "GLOBAL_LOCK_CURRENT_QUEUE_TOTAL", peak_t)}
             episodes.append(ep)
         result["memory"] = {"status": "triggered" if episodes else "not_triggered",
-                            "max_percent": round(max(mem.values()), 2),
-                            "max_at_utc": max(mem, key=mem.get).isoformat(),
-                            "method": "SYSTEM_MEMORY_USED / (SYSTEM_MEMORY_USED + SYSTEM_MEMORY_AVAILABLE); approximate",
+                            "basis": "max" if use_max else "average",
+                            "max_percent": round(max(peak_series.values()), 2),
+                            "max_at_utc": max(peak_series, key=peak_series.get).isoformat(),
+                            "average_max_percent": round(max(mem.values()), 2),
+                            "average_median_percent": round(_median(mem.values()), 2),
+                            "method": ("MAX_SYSTEM_MEMORY_USED / (SYSTEM_MEMORY_USED + SYSTEM_MEMORY_AVAILABLE) "
+                                       "per sample; approximate") if use_max else
+                                      "SYSTEM_MEMORY_USED / (SYSTEM_MEMORY_USED + SYSTEM_MEMORY_AVAILABLE); approximate",
                             "episodes_over_%g" % th["memory_percent"]: episodes}
+        if coarse:
+            result["memory"]["average_spikes"] = spike_eps
+            if not use_max:
+                result["notes"].append("Memory: MAX_SYSTEM_MEMORY_USED not collected; evaluated on hourly "
+                                       "averages, short peaks may be hidden.")
     # C - Disk
     disks = (metrics_payload or {}).get("disk_measurements") or []
     partitions = []
@@ -362,18 +577,44 @@ def analyze(metrics_payload, extract, config=None) -> dict:
         queue = (s.get("DISK_QUEUE_DEPTH") or {}).get("points") or {}
         if not queue:
             continue
-        over = [t for t, v in queue.items() if v > th["disk_queue_depth"]]
         qmax = (s.get("MAX_DISK_QUEUE_DEPTH") or {}).get("points") or {}
-        entry = {"partition": disk.get("partitionName"), "evaluated_on": "average (DISK_QUEUE_DEPTH)",
-                 "max_queue_depth": round(max(queue.values()), 2),
-                 "max_at_utc": max(queue, key=queue.get).isoformat(),
+        use_max = coarse and bool(qmax)
+        evaluated = qmax if use_max else queue
+        over = [t for t, v in evaluated.items() if v > th["disk_queue_depth"]]
+        spikes = average_spikes(queue, float(th["avg_spike_ratio"]), float(th["avg_spike_min_delta_queue"])) \
+            if coarse else set()
+        entry = {"partition": disk.get("partitionName"),
+                 "evaluated_on": "max (MAX_DISK_QUEUE_DEPTH)" if use_max else "average (DISK_QUEUE_DEPTH)",
+                 "basis": "max" if use_max else "average",
+                 "max_queue_depth": round(max(evaluated.values()), 2),
+                 "max_at_utc": max(evaluated, key=evaluated.get).isoformat(),
+                 "average_max_queue_depth": round(max(queue.values()), 2),
                  "max_series_max_queue_depth": round(max(qmax.values()), 2) if qmax else None,
                  "samples_over_threshold": len(over),
                  "pressure": len(over) >= int(th["disk_min_points"]), "episodes": []}
-        if entry["pressure"]:
-            merged = {**series, **{k: v for k, v in s.items()}}
-            for r in _runs(queue, lambda v: v > th["disk_queue_depth"], step):
-                ep = _episode(r, step, tz_name, "disk_queue_depth", unit="")
+        if use_max:
+            # One hourly max over the threshold is enough when the average confirms it (spike, or the
+            # hourly average itself over the threshold): the queue stayed high for a large part of the hour.
+            confirmed = [t for t in over if t in spikes or queue.get(t, 0) > th["disk_queue_depth"]]
+            entry["samples_confirmed_by_average"] = len(confirmed)
+            entry["pressure"] = entry["pressure"] or bool(confirmed)
+        if coarse and not use_max:
+            result["notes"].append(f"Disk {disk.get('partitionName')}: MAX_DISK_QUEUE_DEPTH not collected; "
+                                   "evaluated on hourly averages, short peaks may be hidden.")
+        merged = {**series, **{k: v for k, v in s.items()}}
+        runs = _runs(evaluated, lambda v: v > th["disk_queue_depth"], step) if entry["pressure"] else []
+        drafts = []
+        for r in runs:
+            ep = _episode(r, step, tz_name, "disk_queue_depth", unit="", basis="max" if use_max else "average")
+            if use_max:
+                _annotate_max_episode(ep, queue, spikes, th["disk_queue_depth"])
+            drafts.append(ep)
+        spike_drafts = _spike_episodes(queue, spikes, [(e["_start"], e["_end"]) for e in drafts], step, tz_name,
+                                       "disk_queue_depth", "") if coarse else []
+        for target, group in (("episodes", drafts), ("average_spikes", spike_drafts)):
+            if coarse:
+                entry.setdefault(target, [])
+            for ep in group:
                 start, end = ep["_start"], ep["_end"]
                 ctx = {n: round(v, 2) for n in [m for m in DISK_METRICS if m != "DISK_QUEUE_DEPTH"] + DISK_CONTEXT_PROCESS
                        if (v := _window_max(merged, n, start, end)) is not None}
@@ -382,7 +623,7 @@ def analyze(metrics_payload, extract, config=None) -> dict:
                 ep["correlated"]["slow_operations"].sort(
                     key=lambda r: ((r["storage_bytes_read_total"] or 0) / 1e6 + (r["docs_examined_total"] or 0) / 1e3),
                     reverse=True)
-                entry["episodes"].append(ep)
+                entry[target].append(ep)
         partitions.append(entry)
     if not partitions:
         result["disk"] = {"status": "no_data", "rule": "DISK_QUEUE_DEPTH not collected for this node"}
@@ -499,11 +740,47 @@ def _fmt_contention(ep):
     return []
 
 
+_WORKLOAD_LABEL = {"volume_increase": "workload volume increased", "no_volume_change": "no workload volume change"}
+
+
+def _short(name):
+    return name.replace("OPCOUNTER_", "op ").replace("DOCUMENT_METRICS_", "docs ").lower()
+
+
+def _fmt_workload(ep):
+    w = ep.get("workload") or {}
+    if w.get("verdict") in (None, "no_data"):
+        return []
+    rows = w.get("increased") or w.get("busiest") or []
+    detail = ", ".join(f"{_short(r['metric'])} {r['window_mean']:g}/s (day median {r['day_median']:g}"
+                       + (f", x{r['ratio']:g}" if r.get("ratio") else "") + ")" for r in rows[:4])
+    line = f"  - Workload: {_WORKLOAD_LABEL[w['verdict']]}" + (f" — {detail}" if detail else "")
+    if w["verdict"] == "no_volume_change":
+        line += "; the rise is per-operation cost (scans, targeting, cache) or contention, not more traffic"
+    per = w.get("docs_returned_per_read_op")
+    if per:
+        line += f"; docs returned per read op {per['window_mean']:g} (day median {per['day_median']:g})"
+    return [line]
+
+
+def _fmt_basis(ep):
+    if ep.get("basis") != "max":
+        return ""
+    avg = ep.get("average_series_in_window") or {}
+    conf = {"sustained_load": "average spike confirms sustained load",
+            "short_peak": "max only: short peak, average stays normal"}.get(ep.get("confidence"), "no average series")
+    return f" [max basis; average max {avg.get('max', 'n/a')}; {conf}]"
+
+
 def render_markdown(analysis) -> str:
     th = analysis["thresholds"]
     out = [SECTION_HEADING, "",
            "Deterministic evaluation of the node metrics; causes are plausible correlations with log "
            "occurrences in the same window, not confirmed root causes.", ""]
+    if analysis.get("coarse_granularity"):
+        out.extend([f"Granularity {analysis.get('metrics_window', {}).get('granularity') or analysis['granularity_seconds']} "
+                    "(hourly/daily): peak rules evaluated on the MAX_* series; average spikes versus the day median "
+                    "separate sustained load from short peaks.", ""])
     for key, title in (("cpu", "A — CPU"), ("memory", "B — Memory"), ("disk", "C — Disk")):
         sec = analysis.get(key) or {}
         out.extend([f"### {title}", ""])
@@ -513,19 +790,33 @@ def render_markdown(analysis) -> str:
         if key == "disk":
             for part in sec["partitions"]:
                 mx = part.get("max_series_max_queue_depth")
-                out.append(f"- Partition `{part['partition']}`: max avg queue depth {part['max_queue_depth']}"
-                           + (f" (max series peak {mx})" if mx is not None else "") + ", "
+                if part.get("basis") == "max":
+                    head = (f"- Partition `{part['partition']}`: max queue depth {part['max_queue_depth']} (max series), "
+                            f"average series max {part.get('average_max_queue_depth')}, ")
+                else:
+                    head = (f"- Partition `{part['partition']}`: max avg queue depth {part['max_queue_depth']}"
+                            + (f" (max series peak {mx})" if mx is not None else "") + ", ")
+                out.append(head +
                            f"{part['samples_over_threshold']} sample(s) over {th['disk_queue_depth']:g} — "
                            + ("**pressure**" if part["pressure"] else "no pressure"))
                 for ep in part["episodes"]:
-                    out.append(f"  - {ep['start_utc'][:16]}–{ep['end_utc'][11:16]} UTC, peak {ep['peak']}")
-                    out.extend("  " + x for x in _fmt_contention(ep) + _fmt_corr(ep["correlated"]))
+                    out.append(f"  - {ep['start_utc'][:16]}–{ep['end_utc'][11:16]} UTC, peak {ep['peak']}{_fmt_basis(ep)}")
+                    out.extend("  " + x for x in _fmt_contention(ep) + _fmt_workload(ep) + _fmt_corr(ep["correlated"]))
+                for ep in part.get("average_spikes") or []:
+                    out.append(f"  - Average spike {ep['start_utc'][:16]}–{ep['end_utc'][11:16]} UTC, avg queue "
+                               f"{ep['peak']} (below the trigger but well above the day median)")
+                    out.extend("  " + x for x in _fmt_workload(ep))
             out.append("")
             continue
         mx = sec.get("max_series_max_percent")
-        out.append(f"Max {sec['max_percent']}% (average series) at {sec['max_at_utc'][:16]} UTC"
-                   + (f", max series peak {mx}%" if mx is not None else "") + " — "
-                   + ("**threshold exceeded**" if sec["status"] == "triggered" else "threshold not reached") + ".")
+        if sec.get("basis") == "max":
+            out.append(f"Max {sec['max_percent']}% (max series) at {sec['max_at_utc'][:16]} UTC, average series max "
+                       f"{sec.get('average_max_percent')}% / median {sec.get('average_median_percent')}% — "
+                       + ("**threshold exceeded**" if sec["status"] == "triggered" else "threshold not reached") + ".")
+        else:
+            out.append(f"Max {sec['max_percent']}% (average series) at {sec['max_at_utc'][:16]} UTC"
+                       + (f", max series peak {mx}%" if mx is not None else "") + " — "
+                       + ("**threshold exceeded**" if sec["status"] == "triggered" else "threshold not reached") + ".")
         out.append("")
         for label, episodes in sec.items():
             if not isinstance(episodes, list):
@@ -533,13 +824,15 @@ def render_markdown(analysis) -> str:
             for ep in episodes:
                 out.append(f"- {label.replace('_', ' ')}: {ep['start_utc'][:16]}–{ep['end_utc'][11:16]} UTC "
                            f"({ep.get('start_local') or ''}), {ep['duration_minutes']} min, peak {ep['peak']}%, "
-                           f"avg {ep['average']}%")
+                           + (f"mean of max {ep['average']}%" if ep.get("basis") == "max" else f"avg {ep['average']}%")
+                           + _fmt_basis(ep))
                 if ep.get("at_peak"):
                     a = ep["at_peak"]
                     out.append(f"  - At peak: {a.get('connections')} connections ≈ {a.get('connection_memory_estimate_mb')} MB "
                                f"({a.get('connection_memory_share_percent')}% of RAM), {a.get('cursors_open')} open cursors, "
                                f"global lock queue {a.get('global_lock_queue_total')}")
                 out.extend(_fmt_contention(ep))
+                out.extend(_fmt_workload(ep))
                 out.extend(_fmt_corr(ep["correlated"]))
         out.append("")
     return "\n".join(out).rstrip() + "\n"
