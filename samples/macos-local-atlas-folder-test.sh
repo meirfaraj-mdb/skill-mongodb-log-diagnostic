@@ -172,12 +172,12 @@ else
 fi
 
 note "Atlas API configuration"
-prompt CLUSTER_NAME "Atlas cluster name" ""
+prompt CLUSTER_NAME "Atlas cluster name (empty = every cluster of the project, one <prefix>/<cluster>/ folder each)" ""
 prompt GROUP_ID "Atlas project (group) ID" ""
 prompt ATLAS_PUBLIC_KEY "Atlas API public key" "$(saved_value atlas_public_key)"
 SAVED_PUBLIC_KEY="$ATLAS_PUBLIC_KEY"   # remembered; the private key below is not
 read -r -s -p "Atlas API private key (input hidden): " ATLAS_PRIVATE_KEY; printf '\n'
-[[ -n "$CLUSTER_NAME" && -n "$GROUP_ID" && -n "$ATLAS_PUBLIC_KEY" && -n "$ATLAS_PRIVATE_KEY" ]] || die "Atlas values are required."
+[[ -n "$GROUP_ID" && -n "$ATLAS_PUBLIC_KEY" && -n "$ATLAS_PRIVATE_KEY" ]] || die "Atlas values are required."
 prompt LOG_NAMES "Log names (comma-separated: auto,mongodb,mongos)" "auto"
 prompt ENABLE_OBSERVABILITY "Collect observability for each selected day? (yes/no)" "no"
 yes_no ENABLE_OBSERVABILITY "Collect observability"

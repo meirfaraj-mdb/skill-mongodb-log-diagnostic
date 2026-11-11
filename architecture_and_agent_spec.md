@@ -287,11 +287,11 @@ Inject and authorize the Atlas secret reference only in `atlas_api` mode; omit i
 | Setting | Purpose | Example |
 |---|---|---|
 | `MONGODB_LOG_DIAG_GROUP_ID` | Atlas project ID (24 characters) | `YOUR_24_CHARACTER_ATLAS_PROJECT_ID` |
-| `MONGODB_LOG_DIAG_CLUSTER_NAME` | Target cluster | `my-cluster` |
+| `MONGODB_LOG_DIAG_CLUSTER_NAME` | Target cluster: only its nodes are processed, under `<prefix>/<day>/...`. Empty = every cluster of the project, each under `<prefix>/<cluster>/<day>/...` | `my-cluster` |
 | `MONGODB_LOG_DIAG_TIMEZONE` | Time zone for the capture window | `Asia/Jerusalem` |
 | `MONGODB_LOG_DIAG_API_VERSION` | Atlas Admin API version | `2025-03-12` |
 | `MONGODB_LOG_DIAG_LOG_NAMES` | `auto` (select by process) or a comma-separated list, e.g. `mongodb,mongos` | `auto` |
-| `MONGODB_LOG_DIAG_HOST_SELECTOR` | Optional regex over hostname/userAlias; ignored when exact hostnames are configured | `^my-cluster-` |
+| `MONGODB_LOG_DIAG_HOST_SELECTOR` | Optional regex over hostname/userAlias that narrows the cluster's nodes; ignored when exact hostnames are configured | `^my-cluster-` |
 | `MONGODB_LOG_DIAG_HTTP_TIMEOUT_SECONDS` | Atlas API request timeout | `120` |
 | `MONGODB_LOG_DIAG_MAX_RETRIES` | Atlas API retry count | `5` |
 

@@ -25,6 +25,8 @@ class Layout:
     <prefix>/<day>/<node>/extracts/<log>/...
     <prefix>/<day>/<node>/reports/<log>/...
     Cluster-level artifacts are separate under <prefix>/<day>/cluster/reports/.
+    When no cluster is selected, the handler runs each project cluster with
+    prefix = <prefix>/<cluster>, so the same layout applies per cluster.
     """
     prefix: str
 

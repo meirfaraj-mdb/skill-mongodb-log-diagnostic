@@ -216,7 +216,11 @@ def normalize_config(raw: dict, cloud: str) -> dict:
         raise ValueError("input_mode must be atlas_api or existing_bucket")
     if cfg["input_mode"] == "atlas_api":
         skills.atlas_logs().validate_config(cfg)
-    cfg.setdefault("cluster_name", "MongoDB cluster")
+    # atlas_api: an empty cluster_name means "every cluster of the project" (agent.handler.run_all_clusters),
+    # each stored under <prefix>/<cluster>/. existing_bucket only uses it as a report label.
+    cfg["cluster_name"] = str(cfg.get("cluster_name") or "").strip()
+    if cfg["input_mode"] != "atlas_api" and not cfg["cluster_name"]:
+        cfg["cluster_name"] = "MongoDB cluster"
     cfg.setdefault("timezone", "UTC")
     if cfg["llm_provider"] == "vertex" and not (cfg.get("vertex_model") or os.environ.get("VERTEX_MODEL")):
         cfg["vertex_model"] = "claude-sonnet-5"

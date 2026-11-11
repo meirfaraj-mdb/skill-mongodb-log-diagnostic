@@ -33,6 +33,9 @@ class FakeS3:
 class FakeAtlasClient:
     def __init__(self): self.calls = []
     def get_json(self, path, query=None):
+        if "/clusters/" in path:  # cluster details: its nodes are node-0 and node-1
+            return {"name": "cluster", "connectionStrings": {
+                "standard": "mongodb://node-0:27017,node-1:27017/?replicaSet=rs0"}}
         return {"results": [{"hostname": f"node-{i}", "typeName": "REPLICA_SECONDARY"} for i in range(2)]}
     def download_log(self, group, host, log, start, end):
         self.calls.append(host)
