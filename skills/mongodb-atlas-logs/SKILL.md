@@ -19,7 +19,8 @@ a storage skill (`aws-storage`, `gcp-storage`) or to a local directory.
 
 ## Configuration (same keys as the original lambda secret)
 See `references/config-schema.md`. Required: `atlas_public_key`, `atlas_private_key`, `group_id`,
-`cluster_name`, `timezone`, `api_version`. Optional: `hostnames`, `host_selector`, `log_names`
+`timezone`, `api_version`. Optional: `cluster_name` (only that cluster's nodes; empty = every cluster of the
+project, one folder per cluster), `hostnames`, `host_selector`, `log_names`
 (`["auto"]`, `mongodb`, `mongos`, `mongodb-audit-log`, `mongos-audit-log`), `atlas_base_url`,
 `http_timeout_seconds`, `max_retries`.
 
@@ -35,10 +36,12 @@ caller prefixes this with its own bucket prefix, so the result is identical to t
 ## CLI
 ```bash
 # config from JSON file (or env ATLAS_CONFIG_JSON)
+python3 scripts/atlas_logs.py --config atlas.json list-clusters
 python3 scripts/atlas_logs.py --config atlas.json list-hosts
 python3 scripts/atlas_logs.py --config atlas.json download --output-dir ./logs [--log-date 2026-09-22]
 ```
-Prints a JSON result `{log_date, cluster, logs[], failed[]}`.
+Prints a JSON result `{log_date, cluster, logs[], failed[]}`. With an empty `cluster_name`, every cluster is
+downloaded under `--output-dir/<cluster>/` and the result is keyed by cluster name.
 
 ## Library (streaming to any storage)
 ```python

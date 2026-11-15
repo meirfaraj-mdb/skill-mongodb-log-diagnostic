@@ -24,6 +24,8 @@ class Atlas:
     def __init__(self): self.calls = 0
     def _retry_delay(self, attempt): return 0
     def get_json(self, path, query=None):
+        if "/clusters/" in path:  # cluster details: its node is node-0
+            return {"name": "c", "connectionStrings": {"standard": "mongodb://node-0:27017/?replicaSet=rs0"}}
         return {"results": [{"hostname": "node-0", "typeName": "REPLICA_SECONDARY"}]}
     def download_log(self, *args):
         self.calls += 1

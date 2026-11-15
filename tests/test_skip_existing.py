@@ -17,6 +17,9 @@ class AtlasClient:
     def __init__(self):
         self.downloads = []
     def get_json(self, path, query=None):
+        if "/clusters/" in path:  # cluster details: its nodes are node-0 and node-1
+            return {"name": "Cluster1", "connectionStrings": {
+                "standard": "mongodb://node-0:27017,node-1:27017/?replicaSet=rs0"}}
         return {"results": [{"hostname": f"node-{i}", "typeName": "REPLICA_SECONDARY"}
                             for i in range(2)]}
     def download_log(self, group, host, log, start, end):
