@@ -122,6 +122,20 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(len(result["data"]), 2)
         self.assertEqual(result["errors"], [{"metrics": ["CONNECTIONS"], "status": 400, "error_type": "HTTPError"}])
 
+    def test_invalid_metric_name_404_batch_retried_per_metric(self):
+        # Atlas answers an invalid m with 404 INVALID_METRIC_NAME for the whole batch.
+        def fake(config, url, source):
+            names = parse_qs(urlsplit(url).query)["m"]
+            if len(names) > 1 or names == ["SYSTEM_NETWORK_IN"]:
+                raise HTTPError(url, 404, "INVALID_METRIC_NAME", {}, io.BytesIO(b""))
+            return [{"measurements": [{"name": names[0], "dataPoints": []}]}], False
+        cfg = dict(self.cfg, metrics_graph_groups=["SYSTEM_NETWORK"], resource_investigation_enabled=False)
+        with patch.object(collector, "_api_pages", side_effect=fake):
+            result = collector.collect_api(cfg, "node", "node:27017", "metrics", "atlas_api")
+        got = {m["name"] for pg in result["data"] for m in pg["measurements"]}
+        self.assertEqual(got, {"SYSTEM_NETWORK_OUT", "MAX_SYSTEM_NETWORK_IN", "MAX_SYSTEM_NETWORK_OUT"})
+        self.assertEqual(result["errors"], [{"metrics": ["SYSTEM_NETWORK_IN"], "status": 404, "error_type": "HTTPError"}])
+
     def test_invalid_granularity(self):
         with self.assertRaises(ValueError):
             collector.collect_api(dict(self.cfg, metrics_granularity="PT2M"), "n", "n:1", "metrics", "atlas_api")
@@ -261,7 +275,7 @@ class CpuAndDiskQueueTests(unittest.TestCase):
         self.assertEqual(plan["disk"], ["DISK_QUEUE_DEPTH", "MAX_DISK_QUEUE_DEPTH"])
         self.assertNotIn("DISK_QUEUE_DEPTH", plan["requested"])
 
-    def _disk_api(self, reject_max=False):
+    def _disk_api(self, max_in_all=True):
         calls = []
 
         def fake(config, url, source):
@@ -271,11 +285,13 @@ class CpuAndDiskQueueTests(unittest.TestCase):
                 return [{"results": [{"partitionName": "data"}]}], False
             if "/disks/" in path:
                 names = query.get("m")
-                if names == ["MAX_DISK_QUEUE_DEPTH"] and reject_max:
-                    raise HTTPError(url, 400, "bad", {}, io.BytesIO(b""))
-                if names is None:  # no-m fallback returns everything
-                    return [{"measurements": [measurement("DISK_QUEUE_DEPTH", "SCALAR", [1, 2]),
-                                              measurement("MAX_DISK_QUEUE_DEPTH", "SCALAR", [5, 9])]}], False
+                if names and any(n not in catalog.ATLAS_DISK_MEASUREMENTS for n in names):
+                    raise HTTPError(url, 404, "INVALID_METRIC_NAME", {}, io.BytesIO(b""))
+                if names is None:  # no m returns every measurement of the partition
+                    every = [measurement("DISK_QUEUE_DEPTH", "SCALAR", [1, 2])]
+                    if max_in_all:
+                        every.append(measurement("MAX_DISK_QUEUE_DEPTH", "SCALAR", [5, 9]))
+                    return [{"measurements": every}], False
                 return [{"measurements": [measurement(n, "SCALAR", [1, 2]) for n in names]}], False
             return [{"measurements": []}], False
         return fake, calls
@@ -285,7 +301,8 @@ class CpuAndDiskQueueTests(unittest.TestCase):
         with patch.object(collector, "_api_pages", side_effect=fake):
             result = collector.collect_api(self.cfg, "node", "node:27017", "metrics", "atlas_api")
         disk_calls = [parse_qs(urlsplit(u).query).get("m") for u in calls if "/disks/data/measurements" in u]
-        self.assertIn(["MAX_DISK_QUEUE_DEPTH"], disk_calls)  # undocumented name sent alone
+        self.assertNotIn(["MAX_DISK_QUEUE_DEPTH"], disk_calls)  # undocumented: never sent as m (Atlas 404)
+        self.assertIn(None, disk_calls)  # read from the no-m response instead
         self.assertTrue(any(m and "DISK_QUEUE_DEPTH" in m for m in disk_calls))
         names = {m["name"] for pg in result["disk_measurements"][0]["data"] for m in pg["measurements"]}
         self.assertTrue({"DISK_QUEUE_DEPTH", "MAX_DISK_QUEUE_DEPTH"} <= names)
@@ -298,14 +315,31 @@ class CpuAndDiskQueueTests(unittest.TestCase):
                                            "node", "node:27017", "metrics", "atlas_api")
         self.assertEqual(len(result["disk_measurements"]), 1)
 
-    def test_max_disk_queue_rejected_falls_back_to_all_measurements(self):
-        fake, calls = self._disk_api(reject_max=True)
+    def test_max_disk_queue_read_from_all_measurements(self):
+        fake, calls = self._disk_api()
         with patch.object(collector, "_api_pages", side_effect=fake):
             result = collector.collect_api(self.cfg, "node", "node:27017", "metrics", "atlas_api")
         kept = [m for pg in result["disk_measurements"][0]["data"] for m in pg["measurements"]
                 if m["name"] == "MAX_DISK_QUEUE_DEPTH"]
         self.assertEqual([p["value"] for p in kept[0]["dataPoints"]], [5, 9])
         self.assertEqual(result["disk_errors"], [])
+
+    def test_max_disk_queue_not_returned_lists_available_names(self):
+        fake, calls = self._disk_api(max_in_all=False)
+        with patch.object(collector, "_api_pages", side_effect=fake):
+            result = collector.collect_api(self.cfg, "node", "node:27017", "metrics", "atlas_api")
+        self.assertEqual(result["disk_errors"], [{
+            "step": "disk_measurements", "partitionName": "data", "metrics": ["MAX_DISK_QUEUE_DEPTH"],
+            "error_type": "NotReturned", "status": None, "returned": ["DISK_QUEUE_DEPTH"]}])
+        names = {m["name"] for pg in result["disk_measurements"][0]["data"] for m in pg["measurements"]}
+        self.assertIn("DISK_QUEUE_DEPTH", names)  # documented batch still collected
+
+    def test_ops_manager_system_network_names_graphed(self):
+        payload = {"data": [{"measurements": [
+            measurement("SYSTEM_NETWORK_BYTES_IN", "BYTES_PER_SECOND", [10, 20]),
+            measurement("MAX_SYSTEM_NETWORK_IN", "BYTES_PER_SECOND", [30, 40])]}]}
+        panels, _empty = graphs.plan_panels(graphs.load_series(payload), {"metrics_graph_groups": ["SYSTEM_NETWORK"]})
+        self.assertEqual([l["name"] for l in panels[0]["lines"]], ["SYSTEM_NETWORK_IN", "MAX_SYSTEM_NETWORK_IN"])
 
     def test_graph_panels_for_cpu_and_disk_queue(self):
         payload = {"data": [{"measurements": [
