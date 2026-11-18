@@ -527,7 +527,7 @@ def _collect_measurements(config, host, base, source, start, end, basis="request
     if granularity_note:
         window_meta["requested_granularity"] = requested_granularity
         window_meta["granularity_note"] = granularity_note
-    disks, disk_errors = ([], [])
+    disks, disk_errors, disk_names = [], [], []
     if source == "atlas_api":
         from agent.resource_investigation import DISK_METRICS
         disk_names = list(dict.fromkeys(plan.get("disk", []) + (DISK_METRICS if investigate else [])))
@@ -535,7 +535,9 @@ def _collect_measurements(config, host, base, source, start, end, basis="request
             disks, disk_errors = _collect_disk_measurements(config, base, window, source, disk_names)
     return _envelope(source + "_metrics", host, basis, pages, truncated=truncated,
                      window=window_meta, disk_measurements=disks, disk_errors=disk_errors,
-                     measurement_plan={k: plan[k] for k in ("requested", "unsupported", "aliases")},
+                     # ``disk`` lets a rerun check the stored file covers the same disk measurements.
+                     measurement_plan={**{k: plan[k] for k in ("requested", "unsupported", "aliases")},
+                                       "disk": disk_names},
                      errors=errors,
                      limitations=["API support, permissions and retention depend on deployment version/tier; unsupported responses are reported, not replaced with fabricated data."])
 

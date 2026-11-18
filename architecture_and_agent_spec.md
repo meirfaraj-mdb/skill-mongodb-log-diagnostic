@@ -333,6 +333,7 @@ The ADK orchestration layer uses its own model, set by `MONGODB_LOG_DIAG_ADK_MOD
 | `MONGODB_LOG_DIAG_CLUSTER_SUMMARY` | Generate the cluster-wide report | `true` |
 | `MONGODB_LOG_DIAG_CLUSTER_SUMMARY_SOURCE` | `extract`: `cluster-summary.md` from node reports + extract trend alerts + query-shape evidence; `node_reports`: `cluster-summary.from-node-reports.md` built only from the stored node `report.md` files; `both`: write both to compare. `--stage cluster-summary-md` builds only the node-report variant from existing reports | `extract` |
 | `MONGODB_LOG_DIAG_QUERY_STATS_SKIP_EXISTING` | Do not call Query Shape Insights for a node whose stored query-stats file already has rows | `true` |
+| `MONGODB_LOG_DIAG_METRICS_SKIP_EXISTING` | Do not call the measurements API for a node whose stored metrics file covers the complete log day with the same timezone, granularity and measurements and has no retryable error (`--refresh-observability` forces a new call) | `true` |
 | `MONGODB_LOG_DIAG_QUERY_SHAPE_SPLIT_TO_NODES` | When every per-node QSI request fails or is empty, copy the one cluster-wide result into each node file, marked `scope: cluster` (the API returns no per-node attribution) | `true` |
 | `MONGODB_LOG_DIAG_OFFLINE_CVE_INCLUDE_UNREVIEWED` | Also report OSV catalog entries with `reviewed: false`, labelled `unreviewed_candidate` | `false` |
 

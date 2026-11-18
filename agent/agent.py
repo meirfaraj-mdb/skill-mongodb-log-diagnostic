@@ -27,6 +27,7 @@ def _run(stage: str, log_date: str | None = None, skip_existing: bool = True) ->
         "log_date": log_date,
         "skip_existing": skip_existing,
         "force_reextract": not skip_existing,
+        "refresh_observability": not skip_existing,
     })
 
 

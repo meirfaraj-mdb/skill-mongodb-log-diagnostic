@@ -636,7 +636,10 @@ result = run_pipeline({"stage": "observability", "log_date": log_date}, config=c
 # Do not print MongoDB URI, Atlas keys, or per-node exception text.
 nodes = result.get("nodes", [])
 failed = sum(bool(node.get("errors")) for node in nodes)
-print(json.dumps({"status": result.get("status"), "nodes": len(nodes), "nodes_with_errors": failed}))
+# Metrics already stored for the complete day are reused (MONGODB_LOG_DIAG_METRICS_SKIP_EXISTING=false refetches).
+reused = sum((node.get("artifacts", {}).get("metrics") or {}).get("status") == "skipped_existing" for node in nodes)
+print(json.dumps({"status": result.get("status"), "nodes": len(nodes), "nodes_with_errors": failed,
+                  "metrics_reused": reused}))
 if result.get("status") != "completed" or failed:
     raise SystemExit("Observability did not complete successfully; inspect stage logs")
 PYCODE

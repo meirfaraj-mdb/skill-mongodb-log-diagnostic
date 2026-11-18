@@ -13,6 +13,10 @@ Historical producer snapshots must identify collection time and counter reset/en
 ## Per-node metric graphs (report APPENDIX 1)
 
 * `MONGODB_LOG_DIAG_METRICS_GRANULARITY`: `PT1M`, `PT5M` (default), `PT1H` or `P1D` for the 24h measurements window.
+* `MONGODB_LOG_DIAG_METRICS_SKIP_EXISTING`: `true` (default) reuses a stored `metrics/metrics.json` instead of calling
+  the measurements API again when it covers the complete log day (`window.complete_day`) in the same timezone and
+  requested granularity, contains every measurement the current graph/investigation settings need, and has no
+  retryable error (HTTP 408/425/429/5xx or network). Otherwise it is refreshed and the receipt shows `refetch_reason`.
 * `MONGODB_LOG_DIAG_METRICS_GRAPHS_ENABLED`: true/false (default true). Adds APPENDIX 1 (before APPENDIX 2, Performance Advisor, and APPENDIX 3, the reported query forms) to a node report only when that node's metrics file has data points; the graph is embedded in `report.md` as a base64 PNG (`data:image/png;base64,...`).
 * `MONGODB_LOG_DIAG_METRICS_GRAPH_GROUPS`: JSON list of group names to graph; defaults to the 21 groups in `agent/metrics_catalog.py` (`DEFAULT_SELECTED_GROUPS`): the 18 original groups plus `NORMALIZED_SYSTEM_CPU`, `MAX_NORMALIZED_SYSTEM_CPU` and `DISK_QUEUE_DEPTH` (avg `DISK_QUEUE_DEPTH` + `MAX_DISK_QUEUE_DEPTH`).
 * `MONGODB_LOG_DIAG_METRICS_GRAPH_CONFIG`: optional JSON object with the slowInvest `cluster.per_node.graph` shape: `{"group_of_metrics": {"GROUP": {"list_of_metrics": [...]}}, "metrics": ["GROUP", ...]}`. Entries are merged over the built-in groups.

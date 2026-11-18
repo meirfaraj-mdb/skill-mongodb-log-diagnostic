@@ -35,6 +35,12 @@ Use `--no-install` on a machine without PyPI access.
 | Download (`--stage download`) | yes | skipped | – |
 | Extract (`--stage extract`) | yes | yes | yes (synthetic log) |
 | Observability (Atlas metrics, query shapes, indexStats) | optional | not available | – |
+
+Observability reruns reuse what is already stored: a node's `metrics/metrics.json` that covers the
+complete day (same timezone, granularity and measurements, no 429/5xx error) and a query-stats file
+with rows are not requested from Atlas again. A day collected while it was still in progress is
+refreshed. Export `MONGODB_LOG_DIAG_METRICS_SKIP_EXISTING=false` (or run
+`python -m agent.handler --stage observability --refresh-observability`) to force new calls.
 | Reports: `none` / `bedrock` / `vertex` / `anthropic` / `claude_cli` | optional | optional | – |
 | Jira (P0) / Slack (P1): `off` / `json` / `create`·`send` | optional | optional | – |
 | Unit tests + skill shell tests + `bash -n` + `compileall` | – | – | yes |
