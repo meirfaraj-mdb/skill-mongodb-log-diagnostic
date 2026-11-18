@@ -204,3 +204,146 @@ class EndpointRequestTest(_EnvCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _sse(events):
+    out = []
+    for ev in events:
+        out.append(f"event: {ev['type']}\ndata: {__import__('json').dumps(ev)}\n\n")
+    return out
+
+
+def _message_events(text, stop="end_turn", chunks=3):
+    step = max(1, len(text) // chunks)
+    parts = [text[i:i + step] for i in range(0, len(text), step)] or [""]
+    return ([{"type": "message_start", "message": {"usage": {"input_tokens": 7, "output_tokens": 1}}},
+             {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+             {"type": "ping"}]
+            + [{"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": p}}
+               for p in parts]
+            + [{"type": "content_block_stop", "index": 0},
+               {"type": "message_delta", "delta": {"stop_reason": stop}, "usage": {"output_tokens": 42}},
+               {"type": "message_stop"}])
+
+
+class StreamingTest(_EnvCase):
+    """Default override transport streams SSE so gateways do not time out (HTTP 504)."""
+
+    def setUp(self):
+        super().setUp()
+        import json as _json
+        import threading
+        import time as _time
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from socketserver import ThreadingMixIn
+        seen = self.seen = []
+        plans = self.plans = []
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):  # noqa: N802
+                body = _json.loads(self.rfile.read(int(self.headers["content-length"])))
+                seen.append({"body": body, "accept": self.headers.get("accept")})
+                plan = plans.pop(0)
+                if plan.get("status", 200) != 200:
+                    out = plan.get("raw", b"<html>504 Gateway Time-out</html>")
+                    self.send_response(plan["status"])
+                    self.send_header("content-type", "text/html")
+                    self.send_header("content-length", str(len(out)))
+                    self.end_headers()
+                    self.wfile.write(out)
+                    return
+                self.send_response(200)
+                self.send_header("content-type", plan.get("ctype", "text/event-stream"))
+                self.send_header("connection", "close")
+                self.end_headers()
+                for chunk in plan["chunks"]:
+                    if plan.get("delay"):
+                        _time.sleep(plan["delay"])
+                    self.wfile.write(chunk.encode())
+                    self.wfile.flush()
+                self.close_connection = True
+
+            def log_message(self, *args):
+                pass
+
+        class Server(ThreadingMixIn, HTTPServer):
+            daemon_threads = True
+
+        self.server = Server(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.url = f"http://127.0.0.1:{self.server.server_port}/v1/messages"
+
+    def _model(self, **cfg):
+        model = AnthropicLLM({"anthropic_base_url": self.url, "anthropic_model": "m", **cfg})
+        model.client.messages._sleep = lambda _s: None
+        return model
+
+    def test_stream_assembles_text_stop_and_usage(self):
+        self.plans.append({"chunks": _sse(_message_events("Hello streamed report"))})
+        model = self._model()
+        self.assertTrue(model.client.messages.stream)
+        response = model.client.messages.create(model="m", max_tokens=10, system="s",
+                                                messages=[{"role": "user", "content": "u"}])
+        self.assertEqual(response.content[0].text, "Hello streamed report")
+        self.assertEqual(response.stop_reason, "end_turn")
+        self.assertEqual(response.usage, {"input_tokens": 7, "output_tokens": 42})
+        self.assertIs(self.seen[0]["body"]["stream"], True)
+        self.assertEqual(self.seen[0]["accept"], "text/event-stream")
+
+    def test_slow_stream_longer_than_read_timeout_succeeds(self):
+        # Total ~2.4s but a byte every 0.3s: a 1s read timeout never fires (as with gateway idle timeouts).
+        self.plans.append({"chunks": _sse(_message_events("x" * 30, chunks=6)), "delay": 0.2})
+        model = self._model()
+        model.client.messages._http.timeout = 1.0
+        self.assertEqual(model.generate("s", "u"), "x" * 30)
+
+    def test_continuation_over_stream(self):
+        self.plans.extend([{"chunks": _sse(_message_events("Part one", stop="max_tokens"))},
+                           {"chunks": _sse(_message_events("Part two"))}])
+        self.assertEqual(self._model().generate("s", "u"), "Part onePart two")
+        self.assertEqual(self.seen[1]["body"]["messages"][1], {"role": "assistant", "content": "Part one"})
+
+    def test_truncated_stream_is_retried(self):
+        truncated = _sse(_message_events("lost"))[:-2]  # no message_delta / message_stop
+        self.plans.extend([{"chunks": truncated}, {"chunks": _sse(_message_events("ok"))}])
+        self.assertEqual(self._model().generate("s", "u"), "ok")
+        self.assertEqual(len(self.seen), 2)
+
+    def test_error_event_raises_without_retry(self):
+        self.plans.append({"chunks": _sse([{"type": "error", "error": {"type": "overloaded_error",
+                                                                         "message": "busy"}}])})
+        with self.assertRaises(RuntimeError) as ctx:
+            self._model().generate("s", "u")
+        self.assertIn("overloaded_error", str(ctx.exception))
+        self.assertEqual(len(self.seen), 1)
+
+    def test_gateway_json_reply_to_stream_request(self):
+        doc = __import__("json").dumps({"content": [{"type": "text", "text": "json ok"}], "stop_reason": "end_turn"})
+        self.plans.append({"chunks": [doc], "ctype": "application/json"})
+        self.assertEqual(self._model().generate("s", "u"), "json ok")
+
+    def test_504_retried_then_reported_with_hint(self):
+        self.plans.extend([{"status": 504}] * 4)
+        with self.assertRaises(RuntimeError) as ctx:
+            self._model().generate("s", "u")
+        self.assertIn("HTTP 504", str(ctx.exception))
+        self.assertIn("hint=", str(ctx.exception))
+        self.assertEqual(len(self.seen), 4)
+
+    def test_stream_can_be_disabled(self):
+        with mock.patch.dict(os.environ, {"MONGODB_LOG_DIAG_ANTHROPIC_STREAM": "false"}):
+            model = self._model()
+        self.assertFalse(model.client.messages.stream)
+        doc = __import__("json").dumps({"content": [{"type": "text", "text": "plain"}], "stop_reason": "end_turn"})
+        self.plans.append({"chunks": [doc], "ctype": "application/json"})
+        self.assertEqual(model.generate("s", "u"), "plain")
+        self.assertNotIn("stream", self.seen[0]["body"])
+
+    def test_invalid_stream_setting(self):
+        with mock.patch.dict(os.environ, {"MONGODB_LOG_DIAG_ANTHROPIC_STREAM": "maybe"}), \
+                self.assertRaises(ValueError):
+            self._model()

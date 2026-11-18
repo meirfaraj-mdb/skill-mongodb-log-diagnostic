@@ -53,6 +53,7 @@ _ENV_FIELDS = {
     "vertex_project": "VERTEX_PROJECT", "storage_provider": "STORAGE_PROVIDER",
     "aws_region": "AWS_REGION", "gcp_project": "GCP_PROJECT",
     "anthropic_base_url": "ANTHROPIC_BASE_URL",
+    "anthropic_stream": "ANTHROPIC_STREAM",
 }
 _ENV_FIELDS.update({
     "observability_enabled": "OBSERVABILITY_ENABLED", "deployment_type": "DEPLOYMENT_TYPE",
@@ -102,7 +103,7 @@ _BOOL_FIELDS = {"cluster_summary", "offline_cve_include_unreviewed", "observabil
                 "metrics_graphs_enabled", "resource_investigation_enabled", "advisor_appendix_enabled",
                 "concurrency_findings_enabled", "concurrency_graphs_enabled",
                 "query_stats_skip_existing", "query_shape_split_to_nodes", "notify_after_report",
-                "jira_comment_on_existing"}
+                "jira_comment_on_existing", "anthropic_stream"}
 _JSON_FIELDS = {"observability_sources": dict, "atlas_process_ids": dict, "ops_manager_host_ids": dict,
                 "query_plan_requests": list, "metrics_graph_groups": list, "metrics_graph_config": dict,
                 "resource_thresholds": dict, "concurrency_thresholds": dict, "notify_env_overrides": dict, "jira_priority_map": dict,

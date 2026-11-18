@@ -91,6 +91,11 @@ Anthropic Messages URL, complete incl. /v1/messages (blank = default https://api
   which one is enabled.
 - The override is sent with the Python standard library (`urllib`), so it does not need the
   `anthropic` or `httpx` packages. The default endpoint still uses the `anthropic` SDK.
+- The override streams the answer (`"stream": true`, server-sent events), so a long report keeps
+  bytes flowing and gateway idle timeouts (HTTP 504) do not cut it. Export
+  `MONGODB_LOG_DIAG_ANTHROPIC_STREAM=false` only if your gateway cannot stream. If you still get a
+  504 with streaming on, the gateway timed out before the first byte: ask its owner to raise the
+  request timeout, or lower `MONGODB_LOG_DIAG_REPORT_MAX_INPUT_CHARS`.
 - It is exported as `MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL`. The script always unsets the SDK's own
   `ANTHROPIC_BASE_URL`, which is only a base that the SDK appends `/v1/messages` to.
 - Requests send `x-api-key: $ANTHROPIC_API_KEY` and `anthropic-version: 2023-06-01`. Gateways that
