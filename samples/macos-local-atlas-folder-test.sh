@@ -59,7 +59,7 @@ for f in skills/mongodb-atlas-logs/scripts/atlas_logs.py \
 done
 
 # Extra choices remembered by this runner (log date, Atlas public key, cluster-summary variant,
-# non-secret notification settings). Kept in a separate 0600 JSON file so the shared
+# non-secret notification settings, Anthropic base URL override). Kept in a separate 0600 JSON file so the shared
 # ~/.localsample format is untouched. The Atlas private key, the Anthropic API key, and the
 # Jira/Slack tokens and webhook URL are never written.
 FOLDER_TEST_SAVED="${FOLDER_TEST_SAVED:-$HOME/.localsample.atlas-folder.json}"
@@ -85,6 +85,7 @@ save_folder_test_choices() {  # values go through the environment, not the comma
   for key in "${NOTIFY_SAVED_KEYS[@]}"; do notify_env+=("SAVE_NOTIFY_$key=${!key:-}"); done
   env "${notify_env[@]}" \
   SAVE_LOG_DATE="$LOG_DATE" SAVE_PUBLIC_KEY="$SAVED_PUBLIC_KEY" SAVE_SUMMARY="${CLUSTER_SUMMARY_SOURCE:-}" \
+  SAVE_REPORT_PROVIDER="${REPORT_PROVIDER:-}" SAVE_ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL_OVERRIDE:-}" \
     python3 - "$FOLDER_TEST_SAVED" <<'PYSAVE' || printf 'warning: could not save choices to %s\n' "$FOLDER_TEST_SAVED" >&2
 import json, os, sys
 path = sys.argv[1]
@@ -98,6 +99,8 @@ data["log_date"] = os.environ["SAVE_LOG_DATE"]          # as typed: blank = yest
 data["atlas_public_key"] = os.environ["SAVE_PUBLIC_KEY"]
 if os.environ["SAVE_SUMMARY"]:
     data["cluster_summary_source"] = os.environ["SAVE_SUMMARY"]
+if os.environ.get("SAVE_REPORT_PROVIDER") == "anthropic":  # blank = default endpoint, forget any override
+    data["anthropic_base_url"] = os.environ.get("SAVE_ANTHROPIC_BASE_URL", "")
 if os.environ.get("SAVE_NOTIFY_ENABLE_NOTIFICATIONS"):
     for name, value in os.environ.items():
         if name.startswith("SAVE_NOTIFY_"):
@@ -199,6 +202,14 @@ REPORT_PROVIDER=$(printf '%s' "$REPORT_PROVIDER" | tr '[:upper:]' '[:lower:]')
 [[ "$REPORT_PROVIDER" == none || "$REPORT_PROVIDER" == bedrock || "$REPORT_PROVIDER" == vertex || "$REPORT_PROVIDER" == anthropic || "$REPORT_PROVIDER" == claude_cli ]] || die "Choose none, bedrock, vertex, anthropic, or claude_cli."
 BEDROCK_REGION=""; BEDROCK_MODEL_ID=""; AWS_PROFILE_NAME=""
 GCP_PROJECT=""; VERTEX_LOCATION=""; VERTEX_MODEL=""; ANTHROPIC_MODEL=""; CLAUDE_CLI_MODEL=""
+ANTHROPIC_BASE_URL_OVERRIDE=""
+# Same rule as agent/llm.py: https (http only for localhost), no credentials, query or fragment.
+valid_anthropic_base_url() {
+  local u="$1"
+  [[ "$u" != *[@?#[:space:]]* ]] || return 1
+  [[ "$u" =~ ^https://[^/:]+(:[0-9]+)?(/.*)?$ ||
+     "$u" =~ ^http://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?(/.*)?$ ]]
+}
 case "$REPORT_PROVIDER" in
   bedrock)
     note "Amazon Bedrock configuration"
@@ -234,6 +245,18 @@ case "$REPORT_PROVIDER" in
   anthropic)
     note "Direct Claude API configuration (no AWS/GCP credentials needed)"
     prompt ANTHROPIC_MODEL "Anthropic API model ID (must be enabled for your API key)" "claude-sonnet-5"
+    # Optional gateway/proxy/Anthropic-compatible endpoint. Default comes from the shell
+    # (MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL, then ANTHROPIC_BASE_URL), then the last saved answer.
+    _anthropic_url_default="${MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL:-${ANTHROPIC_BASE_URL:-$(saved_value anthropic_base_url)}}"
+    read -r -p "Anthropic API base URL (blank = ${_anthropic_url_default:-default https://api.anthropic.com}${_anthropic_url_default:+; type 'default' for https://api.anthropic.com}): " ANTHROPIC_BASE_URL_OVERRIDE
+    ANTHROPIC_BASE_URL_OVERRIDE="$(printf '%s' "${ANTHROPIC_BASE_URL_OVERRIDE:-$_anthropic_url_default}" | tr -d '[:space:]')"
+    unset _anthropic_url_default
+    case "$(lower "$ANTHROPIC_BASE_URL_OVERRIDE")" in default|none|-) ANTHROPIC_BASE_URL_OVERRIDE="" ;; esac
+    ANTHROPIC_BASE_URL_OVERRIDE="${ANTHROPIC_BASE_URL_OVERRIDE%/}"
+    if [[ -n "$ANTHROPIC_BASE_URL_OVERRIDE" ]] && ! valid_anthropic_base_url "$ANTHROPIC_BASE_URL_OVERRIDE"; then
+      die "Invalid Anthropic base URL: use https://host[:port][/path] (http only for localhost), without credentials, query or fragment."
+    fi
+    note "Anthropic endpoint: ${ANTHROPIC_BASE_URL_OVERRIDE:-https://api.anthropic.com (default)}"
     if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
       read -r -s -p "Anthropic API key (input hidden): " ANTHROPIC_API_KEY; printf '\n'
       [[ -n "$ANTHROPIC_API_KEY" ]] || die "ANTHROPIC_API_KEY is required for direct Claude reports."
@@ -480,12 +503,23 @@ if [[ "$REPORT_PROVIDER" != none ]]; then
       export MONGODB_LOG_DIAG_VERTEX_LOCATION="$VERTEX_LOCATION"
       export MONGODB_LOG_DIAG_VERTEX_MODEL="$VERTEX_MODEL"
       ;;
-    anthropic|claude_cli)
+    anthropic)
+      # agent/llm.py AnthropicLLM reads ANTHROPIC_MODEL and the endpoint override from the environment.
+      export ANTHROPIC_MODEL
+      if [[ -n "$ANTHROPIC_BASE_URL_OVERRIDE" ]]; then
+        export MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL_OVERRIDE"
+      else
+        # 'default' chosen: make sure a stale shell value cannot silently redirect the SDK.
+        unset MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL ANTHROPIC_BASE_URL
+      fi
+      ;;
+    claude_cli)
       note "The unchanged provider loader does not expose per-provider model overrides; using its default model."
       ;;
   esac
+  [[ "$REPORT_PROVIDER" == anthropic ]] || unset MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL
 else
-  unset MONGODB_LOG_DIAG_LLM_PROVIDER MONGODB_LOG_DIAG_CLUSTER_SUMMARY_SOURCE
+  unset MONGODB_LOG_DIAG_LLM_PROVIDER MONGODB_LOG_DIAG_CLUSTER_SUMMARY_SOURCE MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL
 fi
 export_if() { if [[ -n "$2" ]]; then export "$1=$2"; fi; }
 if [[ "$ENABLE_NOTIFICATIONS" == yes ]]; then

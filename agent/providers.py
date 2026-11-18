@@ -52,6 +52,7 @@ _ENV_FIELDS = {
     "vertex_model": "VERTEX_MODEL", "vertex_location": "VERTEX_LOCATION",
     "vertex_project": "VERTEX_PROJECT", "storage_provider": "STORAGE_PROVIDER",
     "aws_region": "AWS_REGION", "gcp_project": "GCP_PROJECT",
+    "anthropic_base_url": "ANTHROPIC_BASE_URL",
 }
 _ENV_FIELDS.update({
     "observability_enabled": "OBSERVABILITY_ENABLED", "deployment_type": "DEPLOYMENT_TYPE",

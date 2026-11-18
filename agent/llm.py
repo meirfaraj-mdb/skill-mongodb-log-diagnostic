@@ -12,6 +12,7 @@ import os
 import subprocess
 import tempfile
 import time
+from urllib.parse import urlsplit
 
 from .common import logger
 
@@ -224,19 +225,56 @@ class VertexLLM:
         return "".join(parts)
 
 
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def resolve_anthropic_base_url(config: dict) -> str | None:
+    """Optional Anthropic API endpoint override (gateway, proxy or compatible endpoint).
+
+    Precedence: MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL (config["anthropic_base_url"]),
+    then the standard ANTHROPIC_BASE_URL, else None (SDK default https://api.anthropic.com).
+    The value is a non-secret locator: it must not carry credentials, a query or a fragment.
+    """
+    value = (config.get("anthropic_base_url") or os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname
+    except ValueError as exc:
+        raise ValueError("Anthropic base URL is not a valid URL") from exc
+    if parsed.scheme not in ("https", "http") or not host:
+        raise ValueError("Anthropic base URL must be an absolute http(s) URL, e.g. https://gateway.example.com")
+    if parsed.scheme == "http" and host not in _LOCAL_HOSTS:
+        raise ValueError("Anthropic base URL must use https (http is allowed only for localhost)")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Anthropic base URL must not contain credentials, a query string or a fragment")
+    return value.rstrip("/")
+
+
 class AnthropicLLM:
-    """Direct Claude Messages API; API key supplied through environment."""
+    """Direct Claude Messages API; API key supplied through environment.
+
+    The endpoint defaults to the SDK default and can be overridden with
+    MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL or ANTHROPIC_BASE_URL.
+    """
 
     def __init__(self, config: dict, client=None):
         self.model = config.get("anthropic_model") or os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-5"
         self.max_tokens = int(config.get("report_max_tokens", 16000))
         self.max_continuations = int(config.get("report_max_continuations", 3))
+        self.base_url = resolve_anthropic_base_url(config)
         if client is None:
             if not os.environ.get("ANTHROPIC_API_KEY"):
                 raise ValueError("Set ANTHROPIC_API_KEY to use direct Claude reports (do not store it in the local config)")
             import anthropic
-            client = anthropic.Anthropic(timeout=900.0, max_retries=3)
+            kwargs = {"timeout": 900.0, "max_retries": 3}
+            if self.base_url:
+                kwargs["base_url"] = self.base_url
+            client = anthropic.Anthropic(**kwargs)
         self.client = client
+        logger.info("Anthropic client model=%s endpoint=%s", self.model,
+                    self.base_url or "default (https://api.anthropic.com)")
 
     def generate(self, system_prompt: str, user_content: str) -> str:
         messages = [{"role": "user", "content": user_content}]
