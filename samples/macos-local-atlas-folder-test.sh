@@ -245,18 +245,22 @@ case "$REPORT_PROVIDER" in
   anthropic)
     note "Direct Claude API configuration (no AWS/GCP credentials needed)"
     prompt ANTHROPIC_MODEL "Anthropic API model ID (must be enabled for your API key)" "claude-sonnet-5"
-    # Optional gateway/proxy/Anthropic-compatible endpoint. Default comes from the shell
-    # (MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL, then ANTHROPIC_BASE_URL), then the last saved answer.
-    _anthropic_url_default="${MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL:-${ANTHROPIC_BASE_URL:-$(saved_value anthropic_base_url)}}"
-    read -r -p "Anthropic API base URL (blank = ${_anthropic_url_default:-default https://api.anthropic.com}${_anthropic_url_default:+; type 'default' for https://api.anthropic.com}): " ANTHROPIC_BASE_URL_OVERRIDE
+    # Optional gateway/proxy/Anthropic-compatible endpoint: the COMPLETE Messages URL, used as-is
+    # (nothing is appended). Default comes from MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL in the shell,
+    # then the last saved answer.
+    _anthropic_url_default="${MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL:-$(saved_value anthropic_base_url)}"
+    read -r -p "Anthropic Messages URL, complete incl. /v1/messages (blank = ${_anthropic_url_default:-default https://api.anthropic.com/v1/messages}${_anthropic_url_default:+; type 'default' for https://api.anthropic.com/v1/messages}): " ANTHROPIC_BASE_URL_OVERRIDE
     ANTHROPIC_BASE_URL_OVERRIDE="$(printf '%s' "${ANTHROPIC_BASE_URL_OVERRIDE:-$_anthropic_url_default}" | tr -d '[:space:]')"
     unset _anthropic_url_default
     case "$(lower "$ANTHROPIC_BASE_URL_OVERRIDE")" in default|none|-) ANTHROPIC_BASE_URL_OVERRIDE="" ;; esac
     ANTHROPIC_BASE_URL_OVERRIDE="${ANTHROPIC_BASE_URL_OVERRIDE%/}"
     if [[ -n "$ANTHROPIC_BASE_URL_OVERRIDE" ]] && ! valid_anthropic_base_url "$ANTHROPIC_BASE_URL_OVERRIDE"; then
-      die "Invalid Anthropic base URL: use https://host[:port][/path] (http only for localhost), without credentials, query or fragment."
+      die "Invalid Anthropic Messages URL: use https://host[:port]/path/v1/messages (http only for localhost), without credentials, query or fragment."
     fi
-    note "Anthropic endpoint: ${ANTHROPIC_BASE_URL_OVERRIDE:-https://api.anthropic.com (default)}"
+    if [[ -n "$ANTHROPIC_BASE_URL_OVERRIDE" && "$ANTHROPIC_BASE_URL_OVERRIDE" != */messages ]]; then
+      printf 'warning: %s does not end with /messages; it is used as-is (nothing is appended).\n' "$ANTHROPIC_BASE_URL_OVERRIDE" >&2
+    fi
+    note "Anthropic endpoint: ${ANTHROPIC_BASE_URL_OVERRIDE:-https://api.anthropic.com/v1/messages (default)}"
     if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
       read -r -s -p "Anthropic API key (input hidden): " ANTHROPIC_API_KEY; printf '\n'
       [[ -n "$ANTHROPIC_API_KEY" ]] || die "ANTHROPIC_API_KEY is required for direct Claude reports."
@@ -504,13 +508,14 @@ if [[ "$REPORT_PROVIDER" != none ]]; then
       export MONGODB_LOG_DIAG_VERTEX_MODEL="$VERTEX_MODEL"
       ;;
     anthropic)
-      # agent/llm.py AnthropicLLM reads ANTHROPIC_MODEL and the endpoint override from the environment.
+      # agent/llm.py AnthropicLLM reads ANTHROPIC_MODEL and the complete endpoint URL from the environment.
       export ANTHROPIC_MODEL
+      # The SDK's ANTHROPIC_BASE_URL is a base (SDK appends /v1/messages); never let a stale one leak in.
+      unset ANTHROPIC_BASE_URL
       if [[ -n "$ANTHROPIC_BASE_URL_OVERRIDE" ]]; then
         export MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL_OVERRIDE"
       else
-        # 'default' chosen: make sure a stale shell value cannot silently redirect the SDK.
-        unset MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL ANTHROPIC_BASE_URL
+        unset MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL
       fi
       ;;
     claude_cli)

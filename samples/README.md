@@ -21,7 +21,7 @@ Run it from any directory; it switches to the repository root itself.
 | Atlas API key pair with project read access | `atlas` mode |
 | AWS credentials (`aws configure` / profile) | S3 storage or Bedrock reports |
 | Google Cloud CLI + ADC login | GCS storage or Vertex reports |
-| `ANTHROPIC_API_KEY` (asked hidden if unset); optional gateway/proxy base URL | `anthropic` reports |
+| `ANTHROPIC_API_KEY` (asked hidden if unset); optional complete gateway/proxy Messages URL | `anthropic` reports |
 | Claude Code CLI signed in (`claude`) | `claude_cli` reports |
 
 The script creates `.venv-local-atlas-folder/` and installs only what the chosen options need.
@@ -63,30 +63,38 @@ Outputs are written next to the raw logs: `<host>/extracts/<log>/`, `<host>/repo
 |---|---|---|
 | `bedrock` | region, model/inference-profile ID, AWS profile | `MONGODB_LOG_DIAG_BEDROCK_REGION`, `MONGODB_LOG_DIAG_BEDROCK_MODEL_ID`, `AWS_PROFILE` |
 | `vertex` | GCP project, location, model | `MONGODB_LOG_DIAG_VERTEX_PROJECT`, `_LOCATION`, `_MODEL` |
-| `anthropic` | model, API key, base URL (blank = default) | `ANTHROPIC_MODEL`, `ANTHROPIC_API_KEY`, `MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL` |
+| `anthropic` | model, API key, complete Messages URL (blank = default) | `ANTHROPIC_MODEL`, `ANTHROPIC_API_KEY`, `MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL` |
 | `claude_cli` | model (blank = CLI default) | `CLAUDE_CLI_MODEL` |
 
-#### Anthropic base URL override
+#### Anthropic Messages URL override
 
-With `anthropic`, the script also asks for the API base URL, for example an internal gateway or an
-Anthropic-compatible proxy. Leave it blank to keep the value shown in brackets, or to use the
-default `https://api.anthropic.com` when nothing is shown. Type `default` to drop a remembered or
-inherited override.
+With `anthropic`, the script also asks for the **complete** Messages URL, for example an internal
+gateway or an Anthropic-compatible proxy. The URL is used as-is: every request is POSTed to it and
+nothing (no `/v1/messages`) is appended, so include the full path.
 
-- The prompt default comes from `MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL`, then `ANTHROPIC_BASE_URL`
-  in your shell, then the last saved answer.
-- The URL must be `https://host[:port][/path]` (`http` only for `localhost`) and must not contain
-  credentials, a query string or a fragment.
-- It is exported as `MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL`. When you choose the default, the script
-  unsets both variables so a stale shell value cannot redirect the requests.
-- The API key is still sent as `x-api-key`. Gateways that need a different auth header are not
-  covered.
+```text
+Anthropic Messages URL, complete incl. /v1/messages (blank = default https://api.anthropic.com/v1/messages): https://llm-gateway.example.com/anthropic/v1/messages
+==> Anthropic endpoint: https://llm-gateway.example.com/anthropic/v1/messages
+```
+
+- Leave it blank to keep the value shown in brackets, or to use the default
+  `https://api.anthropic.com/v1/messages` (Anthropic SDK) when nothing is shown. Type `default` to
+  drop a remembered or inherited override.
+- The prompt default comes from `MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL` in your shell, then the last
+  saved answer.
+- The URL must be `https://host[:port]/path` (`http` only for `localhost`) and must not contain
+  credentials, a query string or a fragment. A URL that does not end with `/messages` is accepted
+  with a warning.
+- It is exported as `MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL`. The script always unsets the SDK's own
+  `ANTHROPIC_BASE_URL`, which is only a base that the SDK appends `/v1/messages` to.
+- Requests send `x-api-key: $ANTHROPIC_API_KEY` and `anthropic-version: 2023-06-01`. Gateways that
+  need a different auth header are not covered.
 
 Non-interactive example:
 
 ```bash
 export ANTHROPIC_API_KEY=...            # never saved
-export MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL=https://llm-gateway.example.com/anthropic
+export MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL=https://llm-gateway.example.com/anthropic/v1/messages
 ./samples/macos-local-atlas-folder-test.sh   # choose provider: anthropic, press Enter at the URL prompt
 ```
 
@@ -105,7 +113,7 @@ temporary 0600 file in the format of `secret.notifications.example.json`.
 - `~/.localsample` stores non-secret defaults (storage, bucket, prefix, timezone, cluster, group,
   provider, models, mode). It is saved only when you answer `yes`.
 - `~/.localsample.atlas-folder.json` stores the last log-date answer, the Atlas **public** key, the
-  cluster-summary source, non-secret notification settings, and the Anthropic base URL override.
+  cluster-summary source, non-secret notification settings, and the Anthropic Messages URL override.
 - The script never saves the Atlas private key, the MongoDB URI template, the Anthropic key, or
   Jira/Slack tokens and webhooks. The Atlas key pair is written to a temporary keys-only file.
   The pipeline rejects any other field in that file. The file is removed on exit.

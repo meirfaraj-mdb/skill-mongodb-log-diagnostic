@@ -12,6 +12,7 @@ import os
 import subprocess
 import tempfile
 import time
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from .common import logger
@@ -226,16 +227,21 @@ class VertexLLM:
 
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+ANTHROPIC_VERSION = "2023-06-01"
+_RETRY_STATUSES = {408, 409, 429, 500, 502, 503, 504, 529}
 
 
 def resolve_anthropic_base_url(config: dict) -> str | None:
-    """Optional Anthropic API endpoint override (gateway, proxy or compatible endpoint).
+    """Optional complete Anthropic Messages endpoint (gateway, proxy or compatible endpoint).
 
-    Precedence: MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL (config["anthropic_base_url"]),
-    then the standard ANTHROPIC_BASE_URL, else None (SDK default https://api.anthropic.com).
+    MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL (config["anthropic_base_url"]) is the COMPLETE URL that
+    receives the POST, e.g. https://gateway.example.com/anthropic/v1/messages. Nothing is
+    appended to it. None means the SDK default (https://api.anthropic.com/v1/messages).
+    The standard ANTHROPIC_BASE_URL is NOT read here: the SDK treats that one as a base and
+    appends /v1/messages itself.
     The value is a non-secret locator: it must not carry credentials, a query or a fragment.
     """
-    value = (config.get("anthropic_base_url") or os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+    value = str(config.get("anthropic_base_url") or "").strip()
     if not value:
         return None
     try:
@@ -244,37 +250,113 @@ def resolve_anthropic_base_url(config: dict) -> str | None:
     except ValueError as exc:
         raise ValueError("Anthropic base URL is not a valid URL") from exc
     if parsed.scheme not in ("https", "http") or not host:
-        raise ValueError("Anthropic base URL must be an absolute http(s) URL, e.g. https://gateway.example.com")
+        raise ValueError("Anthropic base URL must be an absolute http(s) URL, "
+                         "e.g. https://gateway.example.com/v1/messages")
     if parsed.scheme == "http" and host not in _LOCAL_HOSTS:
         raise ValueError("Anthropic base URL must use https (http is allowed only for localhost)")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError("Anthropic base URL must not contain credentials, a query string or a fragment")
-    return value.rstrip("/")
+    value = value.rstrip("/")
+    if not urlsplit(value).path.endswith("/messages"):
+        logger.warning("Anthropic base URL %s is used as the complete Messages endpoint and does not end "
+                       "with /messages; nothing is appended (expected e.g. .../v1/messages)", value)
+    return value
+
+
+class _EndpointMessages:
+    """messages.create() posting to one exact URL; same result shape as the SDK object."""
+
+    def __init__(self, url: str, api_key: str, http_client, max_retries: int = 3, sleep=time.sleep):
+        self.url = url
+        self._api_key = api_key
+        self._http = http_client
+        self.max_retries = max_retries
+        self._sleep = sleep
+
+    def _headers(self) -> dict:
+        return {"x-api-key": self._api_key, "anthropic-version": ANTHROPIC_VERSION,
+                "content-type": "application/json", "accept": "application/json"}
+
+    @staticmethod
+    def _retry_delay(resp, attempt: int) -> float:
+        value = (getattr(resp, "headers", None) or {}).get("retry-after") if resp is not None else None
+        try:
+            return min(max(float(value), 0.0), 60.0)
+        except (TypeError, ValueError):
+            return min(2.0 ** attempt, 30.0)
+
+    def create(self, **body):
+        for attempt in range(self.max_retries + 1):
+            resp = None
+            try:
+                resp = self._http.post(self.url, json=body, headers=self._headers())
+            except Exception as exc:  # transport errors: timeouts, resets, DNS
+                if attempt >= self.max_retries:
+                    logger.error("Anthropic endpoint request failed endpoint=%s error_type=%s",
+                                 self.url, type(exc).__name__)
+                    raise
+                logger.warning("Anthropic endpoint transport error endpoint=%s error_type=%s retry=%d",
+                               self.url, type(exc).__name__, attempt + 1)
+                self._sleep(self._retry_delay(None, attempt))
+                continue
+            if resp.status_code in _RETRY_STATUSES and attempt < self.max_retries:
+                logger.warning("Anthropic endpoint HTTP %s endpoint=%s retry=%d",
+                               resp.status_code, self.url, attempt + 1)
+                self._sleep(self._retry_delay(resp, attempt))
+                continue
+            if resp.status_code >= 400:
+                error_type = error_message = None
+                try:
+                    error = resp.json().get("error") or {}
+                    error_type = str(error.get("type", ""))[:80]
+                    error_message = str(error.get("message", ""))[:500]
+                except (ValueError, TypeError, AttributeError):
+                    pass
+                raise RuntimeError(f"Anthropic endpoint HTTP {resp.status_code} endpoint={self.url} "
+                                   f"error_type={error_type} error_message={error_message}")
+            data = resp.json()
+            return SimpleNamespace(
+                content=[SimpleNamespace(type=block.get("type"), text=block.get("text", ""))
+                         for block in data.get("content") or []],
+                stop_reason=data.get("stop_reason"),
+                usage=data.get("usage"),
+            )
+        raise RuntimeError("unreachable")  # pragma: no cover
+
+
+class _EndpointClient:
+    def __init__(self, messages: _EndpointMessages):
+        self.messages = messages
 
 
 class AnthropicLLM:
     """Direct Claude Messages API; API key supplied through environment.
 
-    The endpoint defaults to the SDK default and can be overridden with
-    MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL or ANTHROPIC_BASE_URL.
+    Default: the Anthropic SDK and https://api.anthropic.com/v1/messages.
+    With MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL set, every request is POSTed to exactly that
+    complete URL (for example https://gateway.example.com/anthropic/v1/messages).
     """
 
-    def __init__(self, config: dict, client=None):
+    def __init__(self, config: dict, client=None, http_client=None):
         self.model = config.get("anthropic_model") or os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-5"
         self.max_tokens = int(config.get("report_max_tokens", 16000))
         self.max_continuations = int(config.get("report_max_continuations", 3))
         self.base_url = resolve_anthropic_base_url(config)
         if client is None:
-            if not os.environ.get("ANTHROPIC_API_KEY"):
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
+            if not api_key:
                 raise ValueError("Set ANTHROPIC_API_KEY to use direct Claude reports (do not store it in the local config)")
-            import anthropic
-            kwargs = {"timeout": 900.0, "max_retries": 3}
             if self.base_url:
-                kwargs["base_url"] = self.base_url
-            client = anthropic.Anthropic(**kwargs)
+                if http_client is None:
+                    import httpx  # installed with the anthropic SDK
+                    http_client = httpx.Client(timeout=900.0)
+                client = _EndpointClient(_EndpointMessages(self.base_url, api_key, http_client))
+            else:
+                import anthropic
+                client = anthropic.Anthropic(timeout=900.0, max_retries=3)
         self.client = client
         logger.info("Anthropic client model=%s endpoint=%s", self.model,
-                    self.base_url or "default (https://api.anthropic.com)")
+                    self.base_url or "default (https://api.anthropic.com/v1/messages)")
 
     def generate(self, system_prompt: str, user_content: str) -> str:
         messages = [{"role": "user", "content": user_content}]
