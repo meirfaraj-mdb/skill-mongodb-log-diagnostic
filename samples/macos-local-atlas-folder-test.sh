@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # macOS: Atlas API -> local folder / S3 / GCS -> extraction -> optional reports
 #        -> optional P0 Jira / P1 Slack notifications (each: off | json | create/send).
+# Usage: samples/macos-local-atlas-folder-test.sh [--profile NAME [--yes]] [--list-profiles]
+#        [--delete-profile NAME] [--help]   (profiles: samples/local-atlas-profiles.sh)
 set -euo pipefail
 umask 077  # credential file contains Atlas API keys
 
@@ -19,7 +21,37 @@ yes_no() {
 }
 # providers.py accepts only true/false for boolean MONGODB_LOG_DIAG_* settings.
 yes_no_to_bool() { if [[ "$1" == yes ]]; then printf true; else printf false; fi; }
-prompt() { local var="$1" label="$2" default="${3:-}" value; if [[ "$var" != LOG_DATE ]] && declare -f sample_default >/dev/null; then default="$(sample_default "$var" "$default")"; fi; read -r -p "$label${default:+ [$default]}: " value; printf -v "$var" '%s' "${value:-$default}"; }
+# prompt VAR LABEL [DEFAULT]: default order is the --profile answer, ~/.localsample, then DEFAULT.
+prompt() {
+  local var="$1" label="$2" default="${3:-}" value
+  if [[ "$var" != LOG_DATE ]] && declare -f sample_default >/dev/null; then default="$(sample_default "$var" "$default")"; fi
+  if declare -f profile_lookup >/dev/null && profile_mark "$var" && profile_lookup "$var"; then
+    default="$PROFILE_VALUE"
+    if [[ "$ASSUME_YES" == yes ]]; then  # --yes: saved answer, no question
+      printf '%s: %s\n' "$label" "${default:-(blank)}"; printf -v "$var" '%s' "$default"; return 0
+    fi
+    # '-' answers blank when the profile has a value (e.g. cluster name blank = every cluster).
+    read -r -p "$label [${default:-blank}${default:+; - = blank}]: " value
+    if [[ "$value" == "-" ]]; then printf -v "$var" '%s' ""; return 0; fi
+  else
+    read -r -p "$label${default:+ [$default]}: " value
+  fi
+  printf -v "$var" '%s' "${value:-$default}"
+}
+source "$PROJECT_ROOT/samples/local-atlas-profiles.sh"
+ASSUME_YES=no; PROFILE_NAME=""   # only from the command line, never from the environment
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile) [[ $# -ge 2 && -n "$2" ]] || die "--profile needs a name."; PROFILE_NAME="$2"; shift 2 ;;
+    --profile=*) PROFILE_NAME="${1#--profile=}"; shift ;;
+    --yes|-y) ASSUME_YES=yes; shift ;;
+    --list-profiles) profile_list; exit 0 ;;
+    --delete-profile) [[ $# -ge 2 ]] || die "--delete-profile needs a name."; profile_delete "$2"; exit 0 ;;
+    -h|--help) profile_usage; exit 0 ;;
+    *) profile_usage >&2; die "Unknown option: $1" ;;
+  esac
+done
+[[ "$ASSUME_YES" == no || -n "$PROFILE_NAME" ]] || die "--yes is only valid with --profile NAME."
 [[ "$(uname -s)" == Darwin ]] || die "This script is for macOS."
 command -v python3 >/dev/null || die "python3 is required."
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || die "python3 >= 3.9 is required (zoneinfo)."
@@ -39,6 +71,11 @@ unset _var
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]'; }
 
 source "$PROJECT_ROOT/samples/local-atlas-storage.sh"
+if [[ -n "$PROFILE_NAME" ]]; then
+  profile_select "$PROFILE_NAME"
+  profile_load
+  profile_describe
+fi
 # Prompt to restore missing skill files from the repository before collecting credentials.
 if [[ ! -f skills/mongodb-atlas-logs/scripts/atlas_logs.py ||
       ! -f skills/mongodb-log-diagnostic/scripts/extract_mongodb_log.py ||
@@ -61,7 +98,9 @@ done
 # Extra choices remembered by this runner (log date, Atlas public key, cluster-summary variant,
 # non-secret notification settings, Anthropic base URL override). Kept in a separate 0600 JSON file so the shared
 # ~/.localsample format is untouched. The Atlas private key, the Anthropic API key, and the
-# Jira/Slack tokens and webhook URL are never written.
+# Jira/Slack tokens and webhook URL are never written there. With --profile NAME, this file and
+# ~/.localsample are only read (as fallback defaults); answers, and secrets only if you choose,
+# go to the profile instead (samples/local-atlas-profiles.sh).
 FOLDER_TEST_SAVED="${FOLDER_TEST_SAVED:-$HOME/.localsample.atlas-folder.json}"
 saved_or() { local v; v="$(saved_value "$1")"; printf '%s' "${v:-$2}"; }  # saved_or KEY DEFAULT
 # Non-secret notification answers remembered as notify_<name lower-case>.
@@ -179,7 +218,7 @@ prompt CLUSTER_NAME "Atlas cluster name (empty = every cluster of the project, o
 prompt GROUP_ID "Atlas project (group) ID" ""
 prompt ATLAS_PUBLIC_KEY "Atlas API public key" "$(saved_value atlas_public_key)"
 SAVED_PUBLIC_KEY="$ATLAS_PUBLIC_KEY"   # remembered; the private key below is not
-read -r -s -p "Atlas API private key (input hidden): " ATLAS_PRIVATE_KEY; printf '\n'
+prompt_secret ATLAS_PRIVATE_KEY "Atlas API private key"
 [[ -n "$GROUP_ID" && -n "$ATLAS_PUBLIC_KEY" && -n "$ATLAS_PRIVATE_KEY" ]] || die "Atlas values are required."
 prompt LOG_NAMES "Log names (comma-separated: auto,mongodb,mongos)" "auto"
 prompt ENABLE_OBSERVABILITY "Collect observability for each selected day? (yes/no)" "no"
@@ -193,7 +232,8 @@ if [[ "$ENABLE_OBSERVABILITY" == yes ]]; then
   prompt INDEX_STATS_ENABLED "Also collect direct MongoDB indexStats? (yes/no)" "no"
   yes_no INDEX_STATS_ENABLED "Collect indexStats"
   if [[ "$INDEX_STATS_ENABLED" == yes || "$QUERY_SHAPE_SOURCE" == mongodb ]]; then
-    prompt MONGODB_URI_TEMPLATE "MongoDB URI template ({host} is replaced; input hidden is not supported)" ""
+    # Can hold a password: asked hidden, saved only with the profile secrets.
+    prompt_secret MONGODB_URI_TEMPLATE "MongoDB URI template ({host} is replaced)"
     [[ -n "$MONGODB_URI_TEMPLATE" ]] || die "A MongoDB URI template is required for direct MongoDB collection."
   fi
 fi
@@ -250,7 +290,13 @@ case "$REPORT_PROVIDER" in
     # (nothing is appended). Default comes from MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL in the shell,
     # then the last saved answer.
     _anthropic_url_default="${MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL:-$(saved_value anthropic_base_url)}"
+    profile_mark ANTHROPIC_BASE_URL_OVERRIDE
+    if profile_lookup ANTHROPIC_BASE_URL_OVERRIDE; then _anthropic_url_default="$PROFILE_VALUE"; fi
+    if [[ "$ASSUME_YES" == yes ]] && profile_lookup ANTHROPIC_BASE_URL_OVERRIDE; then
+      ANTHROPIC_BASE_URL_OVERRIDE=""   # profile value is applied just below
+    else
     read -r -p "Anthropic Messages URL, complete incl. /v1/messages (blank = ${_anthropic_url_default:-default https://api.anthropic.com/v1/messages}${_anthropic_url_default:+; type 'default' for https://api.anthropic.com/v1/messages}): " ANTHROPIC_BASE_URL_OVERRIDE
+    fi
     ANTHROPIC_BASE_URL_OVERRIDE="$(printf '%s' "${ANTHROPIC_BASE_URL_OVERRIDE:-$_anthropic_url_default}" | tr -d '[:space:]')"
     unset _anthropic_url_default
     case "$(lower "$ANTHROPIC_BASE_URL_OVERRIDE")" in default|none|-) ANTHROPIC_BASE_URL_OVERRIDE="" ;; esac
@@ -265,8 +311,11 @@ case "$REPORT_PROVIDER" in
       printf 'warning: %s does not end with /messages; it is used as-is (nothing is appended).\n' "$ANTHROPIC_BASE_URL_OVERRIDE" >&2
     fi
     note "Anthropic endpoint: ${ANTHROPIC_BASE_URL_OVERRIDE:-https://api.anthropic.com/v1/messages (default)}"
-    if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-      read -r -s -p "Anthropic API key (input hidden): " ANTHROPIC_API_KEY; printf '\n'
+    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+      note "Using ANTHROPIC_API_KEY from your shell"
+      profile_mark ANTHROPIC_API_KEY   # saved only if you choose to save secrets to the profile
+    else
+      prompt_secret ANTHROPIC_API_KEY "Anthropic API key"
       [[ -n "$ANTHROPIC_API_KEY" ]] || die "ANTHROPIC_API_KEY is required for direct Claude reports."
       export ANTHROPIC_API_KEY
     fi
@@ -344,13 +393,15 @@ if [[ "$ENABLE_NOTIFICATIONS" == yes ]]; then
       if [[ "$JIRA_DEPLOYMENT" == cloud ]]; then
         prompt JIRA_EMAIL "Jira account email (for the API token)" "$(saved_value notify_jira_email)"
         [[ -n "$JIRA_EMAIL" ]] || die "A Jira account email is required for Jira Cloud."
-        read -r -s -p "Jira API token (input hidden): " JIRA_API_TOKEN; printf '\n'
+        prompt_secret JIRA_API_TOKEN "Jira API token"
         [[ -n "$JIRA_API_TOKEN" ]] || die "A Jira API token is required for JIRA_MODE=create."
       else
-        read -r -s -p "Jira personal access token (input hidden): " JIRA_PAT; printf '\n'
+        prompt_secret JIRA_PAT "Jira personal access token"
         [[ -n "$JIRA_PAT" ]] || die "A Jira personal access token is required for JIRA_MODE=create."
       fi
-      if ! confirm_real "Jira create mode opens real issues in $JIRA_PROJECT_KEY for $NOTIFY_ENVIRONMENT (existing ones are skipped)."; then
+      if profile_preconfirmed JIRA_MODE create; then
+        note "Jira create mode already confirmed in profile $PROFILE_NAME (--yes)"
+      elif ! confirm_real "Jira create mode opens real issues in $JIRA_PROJECT_KEY for $NOTIFY_ENVIRONMENT (existing ones are skipped)."; then
         note "Jira switched to json mode (jira-issues.json only)"
         JIRA_MODE=json; JIRA_API_TOKEN=""; JIRA_PAT=""
       fi
@@ -372,17 +423,19 @@ if [[ "$ENABLE_NOTIFICATIONS" == yes ]]; then
       prompt SLACK_SEND_VIA "Send via incoming webhook or bot token (webhook/bot)" "$(saved_or notify_slack_send_via webhook)"
       SLACK_SEND_VIA="$(lower "$SLACK_SEND_VIA")"
       if [[ "$SLACK_SEND_VIA" == webhook ]]; then
-        read -r -s -p "Slack incoming webhook URL (input hidden): " SLACK_WEBHOOK_URL; printf '\n'
+        prompt_secret SLACK_WEBHOOK_URL "Slack incoming webhook URL"
         [[ "$SLACK_WEBHOOK_URL" == https://hooks.slack.com/* ]] || die "The webhook URL must start with https://hooks.slack.com/"
       elif [[ "$SLACK_SEND_VIA" == bot ]]; then
         prompt SLACK_CHANNEL "Slack channel ID or #name" "$(saved_value notify_slack_channel)"
         [[ -n "$SLACK_CHANNEL" ]] || die "A channel is required with a bot token."
-        read -r -s -p "Slack bot token (input hidden): " SLACK_BOT_TOKEN; printf '\n'
+        prompt_secret SLACK_BOT_TOKEN "Slack bot token"
         [[ "$SLACK_BOT_TOKEN" == xoxb-* ]] || die "A Slack bot token (xoxb-...) is required."
       else
         die "Choose webhook or bot."
       fi
-      if ! confirm_real "Slack send mode posts a real message for $NOTIFY_ENVIRONMENT."; then
+      if profile_preconfirmed SLACK_MODE send; then
+        note "Slack send mode already confirmed in profile $PROFILE_NAME (--yes)"
+      elif ! confirm_real "Slack send mode posts a real message for $NOTIFY_ENVIRONMENT."; then
         note "Slack switched to json mode (slack-messages.json only)"
         SLACK_MODE=json; SLACK_WEBHOOK_URL=""; SLACK_BOT_TOKEN=""
       fi
@@ -398,8 +451,13 @@ fi
 
 # Persist selections before installing dependencies or checking S3/GCS access.
 # Failed cloud authentication must not discard a newly selected S3 bucket.
-save_atlas_sample_defaults
-save_folder_test_choices
+if [[ -n "$PROFILE_NAME" ]]; then
+  profile_save_choices   # the profile replaces ~/.localsample and ~/.localsample.atlas-folder.json
+  profile_forget
+else
+  save_atlas_sample_defaults
+  save_folder_test_choices
+fi
 
 note "Creating Python environment"
 python3 -m venv .venv-local-atlas-folder

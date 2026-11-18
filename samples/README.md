@@ -9,6 +9,10 @@ Vertex, AWS and GCP test scripts, `local-atlas-storage.sh` and `restore-vendored
 ./samples/macos-local-atlas-folder-test.sh --mode bucket    # logs already staged, no Atlas keys
 ./samples/macos-local-atlas-folder-test.sh --mode selftest  # offline tests, no credentials
 ./samples/macos-local-atlas-folder-test.sh --restore-skills [--source-dir DIR] [--branch BRANCH]
+./samples/macos-local-atlas-folder-test.sh --profile prod         # answers from profile "prod"
+./samples/macos-local-atlas-folder-test.sh --profile prod --yes   # replay "prod" without questions
+./samples/macos-local-atlas-folder-test.sh --list-profiles
+./samples/macos-local-atlas-folder-test.sh --delete-profile prod
 ```
 
 Run it from any directory; it switches to the repository root itself.
@@ -125,14 +129,54 @@ confirmation before any real Jira or Slack call. If you decline, they fall back 
 reports are off, notifications use the reports already stored for the day. Credentials go to a
 temporary 0600 file in the format of `secret.notifications.example.json`.
 
+## Profiles
+
+`--profile NAME` keeps one complete set of answers per environment, for example `dev` and `prod`.
+
+1. **First run** with a new name: answer the questions as usual. Before any install or cloud check
+   the script asks:
+   - `Save these answers to profile NAME?` (default `yes`). Saves every answer, including the
+     storage, cluster, report provider, Anthropic URL, notification settings and log date.
+   - `Also save the secrets of this run to the profile?` (default `no` for a new profile). Saves the
+     Atlas private key, the Anthropic API key, the MongoDB URI template, and the Jira/Slack tokens
+     and webhook URL. Answering `no` deletes secrets saved earlier.
+2. **Next runs** with `--profile NAME`: every question shows the saved answer. Press Enter to keep
+   it, or type `-` to answer blank (for example a blank cluster name = every cluster). Secret
+   questions say `Enter keeps the one saved in profile NAME` and never show the value.
+3. **`--yes`** uses every saved answer and secret without asking. It only asks for secrets the
+   profile does not have, and for questions it has no answer for. Jira `create` and Slack `send` run
+   without a new confirmation only when the profile already has that mode (it was confirmed when it
+   was saved). Without `--yes`, real Jira/Slack calls are always confirmed again. `--yes` does not
+   change the profile.
+
+Files, in `~/.localsample.profiles/` (0700; override with `LOCALSAMPLE_PROFILES_DIR`):
+
+| File | Content | Mode |
+|---|---|---|
+| `NAME.json` | all non-secret answers | 0600 |
+| `NAME.secrets.json` | secrets, only if you chose to save them, **plain text** | 0600 |
+
+- The script refuses a secrets file that another user owns, or that group or others can read. Fix it with
+  `chmod 600 ~/.localsample.profiles/NAME.secrets.json`.
+- Files are read as JSON data, never sourced as shell code. Secrets reach the Python helpers through
+  the environment, never the command line.
+- An `ANTHROPIC_API_KEY` exported in your shell still wins over the profile. It is saved only
+  if you choose to save secrets.
+- With `--profile`, `~/.localsample` and `~/.localsample.atlas-folder.json` are only read, as
+  defaults for answers the profile does not have yet. They are not updated.
+- The saved log date is replayed as is. Save a day count (for example `1` = yesterday) rather than
+  a fixed date if you use `--yes` every day.
+
 ## What is stored, what is not
 
 - `~/.localsample` stores non-secret defaults (storage, bucket, prefix, timezone, cluster, group,
   provider, models, mode). It is saved only when you answer `yes`.
 - `~/.localsample.atlas-folder.json` stores the last log-date answer, the Atlas **public** key, the
   cluster-summary source, non-secret notification settings, and the Anthropic Messages URL override.
-- The script never saves the Atlas private key, the MongoDB URI template, the Anthropic key, or
-  Jira/Slack tokens and webhooks. The Atlas key pair is written to a temporary keys-only file.
+- Without `--profile`, the script never saves the Atlas private key, the MongoDB URI template, the
+  Anthropic key, or Jira/Slack tokens and webhooks. With `--profile`, they are saved only to
+  `NAME.secrets.json` and only if you say so (see [Profiles](#profiles)). The Atlas key pair is
+  written to a temporary keys-only file.
   The pipeline rejects any other field in that file. The file is removed on exit.
 - The script sets all non-secret pipeline settings as `MONGODB_LOG_DIAG_*` environment variables.
   Extra tuning variables you export yourself, such as `MONGODB_LOG_DIAG_REPORT_MAX_TOKENS`, are
