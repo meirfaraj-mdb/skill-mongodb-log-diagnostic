@@ -8,12 +8,15 @@ Report generation may continue when a model reaches its output token limit.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
 import time
 from types import SimpleNamespace
 from urllib.parse import urlsplit
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 from .common import logger
 
@@ -257,10 +260,46 @@ def resolve_anthropic_base_url(config: dict) -> str | None:
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError("Anthropic base URL must not contain credentials, a query string or a fragment")
     value = value.rstrip("/")
+    if not urlsplit(value).path:
+        raise ValueError(f"Anthropic base URL {value} has no path; it must be the complete Messages URL, "
+                         f"e.g. {value}/v1/messages (LiteLLM: {value}/v1/messages or {value}/anthropic/v1/messages)")
     if not urlsplit(value).path.endswith("/messages"):
         logger.warning("Anthropic base URL %s is used as the complete Messages endpoint and does not end "
                        "with /messages; nothing is appended (expected e.g. .../v1/messages)", value)
     return value
+
+
+_dumps = json.dumps
+
+
+class _HttpResponse:
+    def __init__(self, status_code: int, body: bytes, headers):
+        self.status_code = status_code
+        self.content = body
+        self.headers = {k.lower(): v for k, v in (headers or {}).items()}
+
+    def json(self):
+        return json.loads(self.content.decode("utf-8") or "null")
+
+
+class _UrllibHttp:
+    """Minimal POST client on the standard library: the endpoint override needs no extra package."""
+
+    def __init__(self, timeout: float = 900.0):
+        self.timeout = timeout
+
+    def post(self, url: str, json=None, headers=None):  # noqa: A002 - same signature as httpx/requests
+        data = _dumps(json).encode("utf-8")
+        req = urlrequest.Request(url, data=data, method="POST", headers=headers or {})
+        try:
+            with urlrequest.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310 - https/localhost enforced
+                return _HttpResponse(resp.status, resp.read(), dict(resp.headers))
+        except urlerror.HTTPError as exc:  # 4xx/5xx still carry a body worth reporting
+            try:
+                body = exc.read()
+            finally:
+                exc.close()
+            return _HttpResponse(exc.code, body, dict(exc.headers or {}))
 
 
 class _EndpointMessages:
@@ -348,8 +387,7 @@ class AnthropicLLM:
                 raise ValueError("Set ANTHROPIC_API_KEY to use direct Claude reports (do not store it in the local config)")
             if self.base_url:
                 if http_client is None:
-                    import httpx  # installed with the anthropic SDK
-                    http_client = httpx.Client(timeout=900.0)
+                    http_client = _UrllibHttp(timeout=900.0)
                 client = _EndpointClient(_EndpointMessages(self.base_url, api_key, http_client))
             else:
                 import anthropic

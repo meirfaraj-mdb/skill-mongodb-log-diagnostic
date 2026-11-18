@@ -207,8 +207,9 @@ ANTHROPIC_BASE_URL_OVERRIDE=""
 valid_anthropic_base_url() {
   local u="$1"
   [[ "$u" != *[@?#[:space:]]* ]] || return 1
-  [[ "$u" =~ ^https://[^/:]+(:[0-9]+)?(/.*)?$ ||
-     "$u" =~ ^http://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?(/.*)?$ ]]
+  # A path is required: this is the complete Messages URL, nothing is appended.
+  [[ "$u" =~ ^https://[^/:]+(:[0-9]+)?/.+$ ||
+     "$u" =~ ^http://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?/.+$ ]]
 }
 case "$REPORT_PROVIDER" in
   bedrock)
@@ -254,6 +255,9 @@ case "$REPORT_PROVIDER" in
     unset _anthropic_url_default
     case "$(lower "$ANTHROPIC_BASE_URL_OVERRIDE")" in default|none|-) ANTHROPIC_BASE_URL_OVERRIDE="" ;; esac
     ANTHROPIC_BASE_URL_OVERRIDE="${ANTHROPIC_BASE_URL_OVERRIDE%/}"
+    if [[ "$ANTHROPIC_BASE_URL_OVERRIDE" =~ ^https?://[^/]+$ ]]; then
+      die "Anthropic Messages URL $ANTHROPIC_BASE_URL_OVERRIDE has no path. Enter the complete URL, e.g. $ANTHROPIC_BASE_URL_OVERRIDE/v1/messages (LiteLLM: $ANTHROPIC_BASE_URL_OVERRIDE/v1/messages or $ANTHROPIC_BASE_URL_OVERRIDE/anthropic/v1/messages)."
+    fi
     if [[ -n "$ANTHROPIC_BASE_URL_OVERRIDE" ]] && ! valid_anthropic_base_url "$ANTHROPIC_BASE_URL_OVERRIDE"; then
       die "Invalid Anthropic Messages URL: use https://host[:port]/path/v1/messages (http only for localhost), without credentials, query or fragment."
     fi

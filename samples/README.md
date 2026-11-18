@@ -83,8 +83,14 @@ Anthropic Messages URL, complete incl. /v1/messages (blank = default https://api
 - The prompt default comes from `MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL` in your shell, then the last
   saved answer.
 - The URL must be `https://host[:port]/path` (`http` only for `localhost`) and must not contain
-  credentials, a query string or a fragment. A URL that does not end with `/messages` is accepted
+  credentials, a query string or a fragment. A bare host such as `https://gateway.example.com` is
+  rejected because it has no path. A URL with a path that does not end with `/messages` is accepted
   with a warning.
+- LiteLLM proxies usually expose `https://<proxy>/v1/messages` (unified Anthropic-format endpoint)
+  or `https://<proxy>/anthropic/v1/messages` (Anthropic pass-through). Ask your gateway owner
+  which one is enabled.
+- The override is sent with the Python standard library (`urllib`), so it does not need the
+  `anthropic` or `httpx` packages. The default endpoint still uses the `anthropic` SDK.
 - It is exported as `MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL`. The script always unsets the SDK's own
   `ANTHROPIC_BASE_URL`, which is only a base that the SDK appends `/v1/messages` to.
 - Requests send `x-api-key: $ANTHROPIC_API_KEY` and `anthropic-version: 2023-06-01`. Gateways that

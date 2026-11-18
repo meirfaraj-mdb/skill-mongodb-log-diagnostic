@@ -73,6 +73,12 @@ class ResolveUrlTest(_EnvCase):
             self.assertEqual(resolve_anthropic_base_url({"anthropic_base_url": "https://gw.example.com/x"}),
                              "https://gw.example.com/x")
 
+    def test_bare_host_rejected_with_hint(self):
+        for bare in ("https://genai-litellm.example.com", "https://genai-litellm.example.com/"):
+            with self.subTest(bare=bare), self.assertRaises(ValueError) as ctx:
+                resolve_anthropic_base_url({"anthropic_base_url": bare})
+            self.assertIn("https://genai-litellm.example.com/v1/messages", str(ctx.exception))
+
     def test_http_only_for_localhost(self):
         self.assertEqual(resolve_anthropic_base_url({"anthropic_base_url": "http://localhost:8080/v1/messages"}),
                          "http://localhost:8080/v1/messages")
@@ -113,6 +119,57 @@ class ClientSelectionTest(_EnvCase):
         os.environ.pop("ANTHROPIC_API_KEY")
         with self.assertRaises(ValueError):
             AnthropicLLM({"anthropic_base_url": FULL}, http_client=_FakeHttp([]))
+
+
+class StdlibHttpTest(_EnvCase):
+    """The default override transport needs no third-party package (no httpx/anthropic)."""
+
+    def setUp(self):
+        super().setUp()
+        import json as _json
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        seen = self.seen = []
+        replies = self.replies = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                body = _json.loads(self.rfile.read(int(self.headers["content-length"])))
+                seen.append({"path": self.path, "key": self.headers.get("x-api-key"),
+                             "version": self.headers.get("anthropic-version"), "body": body})
+                status, payload = replies.pop(0)
+                out = _json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.url = f"http://127.0.0.1:{self.server.server_port}/anthropic/v1/messages"
+
+    def test_round_trip_without_httpx(self):
+        self.replies.append((200, {"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"}))
+        with mock.patch.dict(sys.modules, {"httpx": None, "anthropic": None}):
+            model = AnthropicLLM({"anthropic_base_url": self.url, "anthropic_model": "m"})
+            self.assertEqual(model.generate("s", "u"), "ok")
+        self.assertEqual(self.seen[0]["path"], "/anthropic/v1/messages")
+        self.assertEqual(self.seen[0]["key"], "test-key")
+        self.assertEqual(self.seen[0]["version"], ANTHROPIC_VERSION)
+
+    def test_http_error_body_reported(self):
+        self.replies.append((401, {"error": {"type": "authentication_error", "message": "bad key"}}))
+        model = AnthropicLLM({"anthropic_base_url": self.url})
+        with self.assertRaises(RuntimeError) as ctx:
+            model.generate("s", "u")
+        self.assertIn("HTTP 401", str(ctx.exception))
+        self.assertIn("bad key", str(ctx.exception))
 
 
 class EndpointRequestTest(_EnvCase):
