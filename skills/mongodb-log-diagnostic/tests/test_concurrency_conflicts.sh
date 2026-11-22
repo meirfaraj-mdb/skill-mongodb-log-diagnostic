@@ -52,7 +52,7 @@ import json, sys
 full = json.load(open(sys.argv[1], encoding="utf-8"))
 short = json.load(open(sys.argv[2], encoding="utf-8"))
 raw = open(sys.argv[1], encoding="utf-8").read()
-assert full["schema_version"] == "1.7", full["schema_version"]
+assert full["schema_version"] == "1.8", full["schema_version"]
 
 # 1. Literal document identifiers never leak.
 assert "HOT-DOC-0001" not in raw and "bg-1" not in raw and "000000000000000000000001" not in raw
@@ -119,7 +119,54 @@ assert sum(b.get("write_conflicts", 0) for b in full["trends"]) == 10800
 assert "occurrence_timestamps" not in json.dumps(short)
 assert short["concurrency"]["hot_write_targets"][0]["count"] == 3600
 assert short["timeline"]["peak_minutes"] == tl["peak_minutes"]
+
+# 8. (1.8) Conflicting distinct documents per query, with the number of conflicts. Only conflict-bearing
+# records are listed: the 400 background documents (written, never conflicting) must not appear.
+docs = c["write_conflict_documents"]
+assert len(docs) == 1, docs
+d = docs[0]
+assert d["target_id"] == hot["target_id"] and d["filter_fields"] == ["id"], d
+assert d["write_conflicts"] == 10800 and d["records_with_write_conflicts"] == 3600, d
+assert d["max_write_conflicts_per_record"] == 3 and d["logged_writes"] == 3600 and d["conflict_record_ratio"] == 1.0, d
+assert d["operation_names"] == ["findAndModify"], d
+assert d["queries"][0]["query_hash"] == "QH000001" and d["queries"][0]["write_conflicts"] == 10800, d["queries"]
+assert d["queries"][0]["sample_query_shape"]["query"] == {"id": "?"}, d["queries"][0]
+queries = c["write_conflict_queries"]
+assert len(queries) == 1, queries
+q = queries[0]
+assert q["namespace"] == "appdb.items" and q["query_hash"] == "QH000001", q
+assert q["write_conflicts"] == 10800 and q["records_with_write_conflicts"] == 3600, q
+assert q["distinct_conflicting_documents"] == 1 and q["top_conflicting_documents"][0] == {"target_id": hot["target_id"], "write_conflicts": 10800.0}, q
+assert q["sample_query_shape"]["findAndModify"] == "?", q
+assert short["concurrency"]["write_conflict_documents"][0]["write_conflicts"] == 10800
+
+# 9. (1.8) Top-level order: mongodbServer, driverCompatibility, then concurrency.
+keys = list(full)
+assert keys[:5] == ["schema_version", "metadata", "mongodbServer", "driverCompatibility", "concurrency"], keys
+assert full["mongodbServer"]["status"] == "unknown", full["mongodbServer"]
 print("concurrency conflict extraction test: PASS")
+PY
+
+# (1.8) High write volume and parallel writers WITHOUT write conflicts: no conflict blocks at all.
+python3 - "$TMP_DIR/busy.log" <<'PY'
+import json, sys
+lines = []
+for k in range(3000):
+    attr = {"type": "command", "ns": "appdb.items", "appName": f"worker-{k % 32}",
+            "command": {"update": "items", "updates": [{"q": {"id": "BUSY-1"}, "u": {"$inc": {"n": 1}}}], "$db": "appdb"},
+            "planSummary": "IXSCAN { id: 1 }", "queryHash": "QHBUSY", "writeConflicts": 0, "durationMillis": 150, "cpuNanos": 1000}
+    lines.append({"t": {"$date": f"2026-03-10T16:{k // 600:02d}:{k % 60:02d}.000Z"}, "s": "I", "c": "COMMAND", "id": 51803,
+                  "ctx": "conn9", "msg": "Slow query", "attr": attr})
+open(sys.argv[1], "w").write("\n".join(json.dumps(x) for x in lines) + "\n")
+PY
+python3 "$EXTRACTOR" --output "$TMP_DIR/out3" --slow-ms 100 "$TMP_DIR/busy.log" >/dev/null 2>"$TMP_DIR/err3.txt"
+python3 - "$TMP_DIR/out3/extractionOccurence.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))["concurrency"]
+assert c["write_conflicts"]["total"] == 0 and c["write_conflicts"]["records_with_write_conflicts"] == 0, c["write_conflicts"]
+assert c["hot_write_targets"][0]["count"] == 3000, c["hot_write_targets"][0]
+assert "write_conflict_documents" not in c and "write_conflict_queries" not in c, sorted(c)
+print("no-conflict busy document test: PASS")
 PY
 
 # FTDC: serverStatus.metrics.operation.writeConflicts and transactions.* were excluded by the generic

@@ -5,6 +5,9 @@ the offline CVE snapshot refreshed <date> ... See Section 10"). That duplicates 
 deterministic pass removes such a block. If the block carries CVE/GHSA IDs the driver section does not
 already mention, it is moved (not lost) to the end of the driver section; when there is no driver section
 and the block carries such IDs, the report is returned unchanged.
+
+The "MongoDB server version and CVE review" section (offline server CVE snapshot, placed just before the
+driver section) is a legitimate CVE section: it and any CVE sub-block inside it are never moved or removed.
 """
 from __future__ import annotations
 
@@ -18,6 +21,7 @@ _CVE_STATUS_TITLE = re.compile(
     r"^(?:driver\s+)?cves?(?:\s*/\s*advisor(?:y|ies))?(?:\s+(?:status|warnings?|summary|check|review|"
     r"findings?|lookup|snapshot))\b", re.I)
 _DRIVER_TITLE = re.compile(r"\bdrivers?\b", re.I)
+_SERVER_TITLE = re.compile(r"\bmongodb\s+server\b|\bserver\s+version\b", re.I)
 _IDS = re.compile(r"\b(?:CVE-\d{4}-\d{4,}|GHSA(?:-[0-9a-z]{4}){3})\b", re.I)
 _FENCE = re.compile(r"^\s*(```|~~~)")
 _PSEUDO_LEVEL = 7  # weaker than any Markdown heading
@@ -62,7 +66,10 @@ def relocate_standalone_cve_status(markdown: str) -> tuple[str, int]:
     driver = next((s for s in spans if s[2][1] < _PSEUDO_LEVEL and _DRIVER_TITLE.search(s[2][2])
                    and not _CVE_STATUS_TITLE.match(s[2][2])), None)
     d_start, d_end = (driver[0], driver[1]) if driver else (len(lines), len(lines))
-    stray = [s for s in spans if _CVE_STATUS_TITLE.match(s[2][2]) and not (d_start <= s[0] < d_end)]
+    servers = [(s[0], s[1]) for s in spans if s[2][1] < _PSEUDO_LEVEL and _SERVER_TITLE.search(s[2][2])
+               and not _DRIVER_TITLE.search(s[2][2])]
+    stray = [s for s in spans if _CVE_STATUS_TITLE.match(s[2][2]) and not (d_start <= s[0] < d_end)
+             and not any(a <= s[0] < b for a, b in servers)]
     # Drop nested candidates (a pseudo heading inside an already-selected block).
     selected: list[tuple[int, int]] = []
     for s in sorted(stray):

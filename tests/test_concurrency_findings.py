@@ -29,7 +29,7 @@ def synthetic_extract(burst=True):
                                                  "writeConflicts": 30000 if hot else 2}})
             if hot:
                 target.append({f"{h:02d}H{m:02d}": {"occur": 400, "writeConflicts": 29500}})
-    return {"schema_version": "1.7",
+    return {"schema_version": "1.8",
             "timeline": {"occurrence_timestamps": {"20260310": minutes}},
             "concurrency": {"write_conflicts": {"total": 240000, "by_operation": [["update", 240000]]},
                             "hot_write_targets": [{"namespace": "appdb.items", "target_id": "0123456789abcdef",
@@ -122,6 +122,7 @@ class ReportWiringTests(unittest.TestCase):
     def setUp(self):
         sys.modules.setdefault("agent.offline_cve", types.ModuleType("agent.offline_cve"))
         sys.modules["agent.offline_cve"].check = lambda p, **k: {"matches": []}
+        sys.modules["agent.offline_cve"].check_server = lambda p, **k: {"matches": [], "match_count": 0, "status": "no_match_in_snapshot"}
         sys.modules["agent.offline_cve"].load_catalog = lambda: {}
         from agent import report_stage
         self.rs = report_stage
@@ -193,3 +194,29 @@ class ReportWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConflictDocumentTests(unittest.TestCase):
+    """Conflicting-documents block: only with logged writeConflicts > 0 (parser 1.8)."""
+    def _extract(self, conflicts):
+        e = synthetic_extract()
+        e["concurrency"]["write_conflicts"].update({"total": conflicts, "records_with_write_conflicts": 10 if conflicts else 0})
+        doc = {"namespace": "appdb.items", "target_id": "0123456789abcdef", "filter_fields": ["id"],
+               "write_conflicts": conflicts, "records_with_write_conflicts": 10 if conflicts else 0,
+               "max_write_conflicts_per_record": 3, "operation_names": ["update"],
+               "queries": [{"query_hash": "QH000001", "write_conflicts": conflicts, "records_with_write_conflicts": 10}]}
+        e["concurrency"]["write_conflict_documents"] = [doc]
+        e["concurrency"]["write_conflict_queries"] = [{**doc, "query_hash": "QH000001", "distinct_conflicting_documents": 1}]
+        return e
+
+    def test_block_present_with_conflicts(self):
+        f = cf.summarize(self._extract(30.0))
+        self.assertEqual(f["conflict_documents"][0]["write_conflicts"], 30.0)
+        self.assertEqual(f["conflict_queries"][0]["distinct_conflicting_documents"], 1)
+        self.assertIn("Conflicting documents", cf.render_markdown(f))
+
+    def test_no_block_when_zero_conflicts(self):
+        f = cf.summarize(self._extract(0.0))
+        self.assertNotIn("conflict_documents", f)
+        self.assertNotIn("conflict_queries", f)
+        self.assertNotIn("Conflicting documents", cf.render_markdown(f))

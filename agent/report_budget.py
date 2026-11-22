@@ -26,7 +26,7 @@ LABEL_RE = re.compile(r'\blabel="([^"]*)"')
 
 # Shrunk first -> last. ``current`` (the occurrence extract of the log day) is reduced last.
 SHRINK_ORDER = ("query_stats", "index_stats", "n-8", "n-1", "precomputed_diff", "offline_driver_cves",
-                "resource_investigation", "current")
+                "offline_mongodb_server_cves", "resource_investigation", "current")
 # Small documents computed from the FULL extract (the only place the minute timeline and hot-document
 # evidence survive). Reduced only after every other document reached the last level.
 PROTECTED = ("concurrency_findings",)

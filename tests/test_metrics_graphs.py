@@ -223,6 +223,7 @@ class GraphAndAppendixTests(unittest.TestCase):
         for name in ("diffing", "offline_cve"):
             sys.modules.setdefault("agent." + name, types.ModuleType("agent." + name))
         sys.modules["agent.offline_cve"].check = lambda payload: {"matches": []}
+        sys.modules["agent.offline_cve"].check_server = lambda p, **k: {"matches": [], "match_count": 0, "status": "no_match_in_snapshot"}
         from agent import report_stage
         layout = Layout("p")
         store = Store({
@@ -249,6 +250,7 @@ class GraphAndAppendixTests(unittest.TestCase):
     def test_report_node_without_metrics_states_absence(self):
         sys.modules.setdefault("agent.offline_cve", types.ModuleType("agent.offline_cve"))
         sys.modules["agent.offline_cve"].check = lambda payload: {"matches": []}
+        sys.modules["agent.offline_cve"].check_server = lambda p, **k: {"matches": [], "match_count": 0, "status": "no_match_in_snapshot"}
         from agent import report_stage
         layout = Layout("p")
         store = Store({layout.extract("2026-10-27", "node", "mongodb", "extractionOccurence.json"): {}})

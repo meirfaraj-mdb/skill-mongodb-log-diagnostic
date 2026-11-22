@@ -87,8 +87,11 @@ Specify what to measure after remediation, including p95/p99 latency, write late
 ## 9. Important limitations
 List all limitations, including missing timestamps, filtered records, aggregate-only metrics, redacted fields, incomplete client attribution, and any inability to establish causality.
 
-## 10. Driver compatibility and CVE review
-This is the **only** place for driver versions, driver compatibility, and CVE/advisory information (including the red warning table and any "no match" statement). Do not create a separate "Driver CVE Status", "CVE status", or similar section, banner, or standalone paragraph anywhere else in the report. The executive summary may mention a confirmed or candidate driver CVE match in at most one bullet that refers to section 10; it must not mention a no-match or lookup-limitation status. Omit this section entirely when no customer-owned driver is in scope.
+## 10. MongoDB server version and CVE review
+State the MongoDB server version of the node and where it came from (`mongodbServer.version` / `mongodbServer.source`, parser 1.8: the log `buildInfo` record; in the agent pipeline the `offline_mongodb_server_cves.observed_server`). This section is the **only** place for MongoDB *server* CVEs and is placed immediately before section 11. Use only the supplied offline server CVE snapshot (`offline_mongodb_server_cves`) or, outside the pipeline, an explicit lookup of MongoDB/NVD advisories for the exact server version; never infer a server CVE from a driver advisory. For each match give the CVE, severity (CVSS when present), one-line summary, the affected range containing the version, `fixed_in` on the same release line, `platform_note` (for example Windows- or Linux-only) and the source link; label `unreviewed_candidate` matches as unreviewed candidates. Give the highest fix release among the matches as the patch target to confirm, never as a guaranteed CVE-free version. On Atlas, server patch releases are applied by Atlas during the maintenance window: recommend confirming the running version and scheduling maintenance, not a manual binary upgrade. When the version is unknown or only `major.minor` is known (`server_version_unknown` / `server_version_incomplete`), say so in one line and list no CVE. When there is no match, write `No match in the offline MongoDB server CVE snapshot refreshed <date>` in one line, without claiming the server is safe. The executive summary may mention a CRITICAL/HIGH server CVE match in at most one bullet that refers to section 10.
+
+## 11. Driver compatibility and CVE review
+This is the **only** place for driver versions, driver compatibility, and CVE/advisory information (including the red warning table and any "no match" statement). Do not create a separate "Driver CVE Status", "CVE status", or similar section, banner, or standalone paragraph anywhere else in the report. The executive summary may mention a confirmed or candidate driver CVE match in at most one bullet that refers to section 11; it must not mention a no-match or lookup-limitation status. Omit this section entirely when no customer-owned driver is in scope.
 
 ## Writing rules
 
@@ -109,7 +112,7 @@ Before interpreting the JSON, read `references/extracted-signal-reference.md`. I
 - `extractionshort.json` contains the same aggregate data and removes only `occurrence_timestamps`. Missing occurrence arrays in this file are intentional and must not be interpreted as zero occurrences.
 - `slow_operations` is an alias of `slow.operations`; never add the two arrays together.
 - Use group-level fields for conclusions and occurrence arrays for recurrence and time distribution. When a slow group has `occurrences_truncated: true`, its occurrence array is a sample of `occurrences_recorded` records (parser 1.7: time-stratified across the day, see `occurrence_sampling`; parser 1.6: only the first records); take start, peak, and end times from `timeline` and the group `first_seen`/`last_seen`. In the agent pipeline a `concurrency_findings` document (computed from the full extract) has precedence for incident windows, hot documents and contention verdicts.
-- Use `concurrency` and `timeline` (parser 1.6) for write conflicts, lock wait, transaction outcomes, and hot write targets. A `hot_write_target` candidate means many logged writes addressed the same document; evaluate it before attributing a write slowdown to CPU saturation or general load, and state that log-side counts are a lower bound because fast writes are not logged.
+- Use `concurrency` and `timeline` (parser 1.6) for write conflicts, lock wait, transaction outcomes, and hot write targets. Parser 1.8 adds `concurrency.write_conflict_documents` (distinct documents with logged write conflicts, each with the conflicting query hash/shape and the number of conflicts) and `concurrency.write_conflict_queries` (per query: conflicts, records, distinct conflicting documents). Both exist only when at least one record has `writeConflicts > 0`; never build a "conflicting documents" table from `hot_write_targets` alone, because a high write count or parallel writers without conflicts is not contention. A `hot_write_target` candidate means many logged writes addressed the same document; evaluate it before attributing a write slowdown to CPU saturation or general load, and state that log-side counts are a lower bound because fast writes are not logged.
 - Preserve missing values as unknown. Do not reconstruct redacted values or invent absent metrics.
 
 Use normalized UTC ISO timestamps for ordinary timestamps:
@@ -157,7 +160,7 @@ For each distinct driver and observed version:
 
 ### Required red warning table
 
-Whenever any driver is affected by a confirmed CVE, has an available security advisory, is end-of-life, or requires an update for compatibility, place this block at the start of section 10 (Driver compatibility and CVE review), never as a separate top-of-report section:
+Whenever any driver is affected by a confirmed CVE, has an available security advisory, is end-of-life, or requires an update for compatibility, place this block at the start of section 11 (Driver compatibility and CVE review), never as a separate top-of-report section:
 
 > **⚠️ DRIVER CVE WARNINGS — UPDATE REVIEW REQUIRED**
 >
@@ -184,7 +187,7 @@ Rules for completing the warning table:
 6. Separate “incompatible with the observed MongoDB/server context” from “vulnerable to a CVE.” An incompatibility finding is not automatically a security vulnerability.
 7. Recommend validation after any update: application-driver compatibility testing, representative workload tests, authentication/TLS checks, connection-pool behavior, and post-deployment error review. Do not claim that an update was applied.
 
-If no affected, advisory-relevant, obsolete, or incompatible driver is found after inspecting all observed driver versions, include this statement once, inside section 10 only, instead of an empty warning table: `No driver CVE or driver-update warning was identified in the extracted data after checking the available authoritative sources.` Do not repeat it elsewhere in the report.
+If no affected, advisory-relevant, obsolete, or incompatible driver is found after inspecting all observed driver versions, include this statement once, inside section 11 only, instead of an empty warning table: `No driver CVE or driver-update warning was identified in the extracted data after checking the available authoritative sources.` Do not repeat it elsewhere in the report.
 
 ## Optional historical comparison: n-1 and n-8
 

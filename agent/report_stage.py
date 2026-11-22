@@ -66,9 +66,17 @@ def build_system_prompt() -> str:
         "Adapter note: the analysis prompt refers to `/home/user/extraction.json`; extraction files are "
         "supplied inline in labelled <document> tags. `current` is extractionOccurence.json; `n-1` and "
         "`n-8` are extractionshort.json baselines. Use exact numbers from `precomputed_diff`. "
-        "You have no web access. Use only reviewed offline_driver_cves matches as version-range review "
-        "candidates with unverified application exposure; include catalog refreshed_at. All CVE "
-        "information goes only inside the driver compatibility section (section 10); never add a separate "
+        "You have no web access. MongoDB server CVEs: use only offline_mongodb_server_cves matches, in the "
+        "section titled 'MongoDB server version and CVE review' placed immediately before the driver "
+        "compatibility section; give the observed server version and its source, the catalog refreshed_at, "
+        "each match (CVE, severity, summary, fixed_in, platform_note) and the highest fix release among the "
+        "matches as a patch target to confirm. If status is server_version_unknown/incomplete, say the "
+        "server version was not available and do not list CVEs; if no_match_in_snapshot, say so in one line "
+        "without claiming safety. On Atlas, server patching follows the maintenance window: recommend "
+        "confirming the version and scheduling maintenance, not a manual binary upgrade. "
+        "Driver CVEs: use only reviewed offline_driver_cves matches as version-range review "
+        "candidates with unverified application exposure; include catalog refreshed_at. All driver CVE "
+        "information goes only inside the driver compatibility section; never add a separate "
         "top-level 'Driver CVE Status' section. If status is no_match_in_snapshot say so in one line inside "
         "that section without claiming safety. A match with review_status "
         "unreviewed_candidate comes from an automated OSV import nobody has vetted: label it "
@@ -287,7 +295,11 @@ CONCURRENCY_INSTRUCTIONS = (
     "window and say that a larger tier or an index will not remove it. Never try to reveal hashed target "
     "values. List `coverage.heavy_groups_without_samples_in_windows` as a data limitation. When status is "
     "not_extracted, say in one line that write conflicts were not extracted (older parser), never that "
-    "there were none."
+    "there were none. When `conflict_documents` / `conflict_queries` are present (only when writeConflicts > 0 "
+    "were logged), add a 'Conflicting documents' table: namespace, filter fields, hashed target id, query hash "
+    "and operation, write conflicts, records with conflicts, max conflicts per record, and for each query the "
+    "number of distinct conflicting documents. When they are absent, write no such table: a high write count "
+    "or parallel writers without conflicts is not contention."
 )
 CONTENTION_SECTION_RE = re.compile(r"(?im)^#{1,3}\s*Write contention\b")
 
@@ -380,6 +392,12 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     # Opt-in only; when unset, offline_cve falls back to MONGODB_LOG_DIAG_OFFLINE_CVE_INCLUDE_UNREVIEWED.
     cve_options = {"include_unreviewed": True} if config.get("offline_cve_include_unreviewed") else {}
     offline_cves = offline_cve.check(current, **cve_options)
+    # Server-version CVEs (offline NVD snapshot); version from the log buildInfo, else config fallback.
+    offline_server_cves = offline_cve.check_server(current, fallback_version=config.get("mongodb_server_version"),
+                                                   **cve_options)
+    logger.info("Offline MongoDB server CVE check node=%s version=%s status=%s matches=%d", host_dir,
+                (offline_server_cves.get("observed_server") or {}).get("version"), offline_server_cves["status"],
+                offline_server_cves["match_count"])
     baselines, diffs = [], []
     for label, offset, desc in BASELINES:
         bdate = shift(log_date, offset)
@@ -405,6 +423,7 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
                              json.dumps(payload, separators=(",", ":"))))
         if diffs:
             docs.append(_doc("precomputed_diff", {}, json.dumps(diff_doc, separators=(",", ":"))))
+        docs.append(_doc("offline_mongodb_server_cves", {}, json.dumps(offline_server_cves, separators=(",", ":"))))
         docs.append(_doc("offline_driver_cves", {}, json.dumps(offline_cves, separators=(",", ":"))))
         if analysis is not None:
             docs.append(_doc("resource_investigation", {"node": host_dir},
@@ -537,7 +556,8 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     report_md = _add_appendices(report_md, store, layout, log_date, host_dir, metrics_payload, config)
     # Optional write-contention graph (base64 PNG) inside its section, also after the internal filter.
     report_md = _add_contention_graph(report_md, current, findings, host_dir, config)
-    report_md, removed_cves = _redact_unvetted_cves(report_md, {m["cve"] for m in offline_cves["matches"]})
+    report_md, removed_cves = _redact_unvetted_cves(report_md, {m["cve"] for m in offline_cves["matches"]}
+                                                    | {m["cve"] for m in offline_server_cves["matches"]})
     if removed_cves:
         logger.warning("Removed %d CVE ID(s) not in the reviewed offline matches node=%s: %s",
                        len(removed_cves), host_dir, ", ".join(removed_cves))
@@ -556,6 +576,7 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
                                          json.dumps(diff_doc, indent=2), "application/json")
     return {"node": host_dir, "log_name": log_name, "current_file": current_file, "max_input_chars": max_chars,
             "baselines": [b[0] for b in baselines], "offline_driver_cves": offline_cves,
+            "offline_mongodb_server_cves": offline_server_cves,
             "resource_investigation": analysis["triggered"] if analysis is not None else None,
             "contention_detected": bool(findings and findings.get("contention_detected")),
             "uploads": uploads, "report_md": report_md}

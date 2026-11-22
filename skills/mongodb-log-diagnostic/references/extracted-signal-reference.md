@@ -1,6 +1,6 @@
 # Extracted signal reference
 
-Applies to parser version 1.7 (`metadata.parser_version`). Sections and fields marked 1.5, 1.6 or 1.7 are absent from older extractions; when analyzing an older file, report them as "not extracted by this parser version", not as zero.
+Applies to parser version 1.8 (`metadata.parser_version`). Sections and fields marked 1.5, 1.6, 1.7 or 1.8 are absent from older extractions; when analyzing an older file, report them as "not extracted by this parser version", not as zero.
 
 ## AI-facing file description
 
@@ -13,13 +13,14 @@ For slow operations, `slow.operations` contains one bounded group per namespace/
 The wrapper emits `extractionOccurence.json` with these top-level sections and also emits `extractionshort.json` with occurrence arrays removed:
 
 - `metadata`: input files, parser version, thresholds, record counts, time range, and data-quality notes.
+- `mongodbServer` (parser 1.8): the server version logged in `buildInfo` (`version`, `major_minor`, `source`, `status`), used for the MongoDB server CVE review.
 - `driverCompatibility`: bundled analysis of client-driver metadata and incompatibility messages, including compatible-driver versions and `incompatible_drivers`; each driver version includes distinct IPs, application names, and platform names.
 - `summary`: severity, component, message-fingerprint, issue-category, and time-bucket counts.
 - `slow`: aggregated slow-operation evidence under `operations` plus `global_stats` for total slow count, COLLSCAN count, change-stream count, duration statistics, and CPU statistics. Explicit MongoDB `msg: "Slow query"` records are included even when their duration is below the configured threshold.
 - `slow_operations`: backward-compatible alias of `slow.operations`.
 - `issue_candidates`: grouped candidates with category, severity, recurrence, first/last seen, affected components, and evidence metrics. Since 1.7, `hot_write_target` candidates come first, then `concurrency_conflict`, so consumers that cap the list keep the contention evidence.
 - `trends`: chronological buckets for errors, warnings, slow operations, write conflicts, and candidate categories.
-- `concurrency` (parser 1.6): write-conflict totals and breakdowns, lock-wait and flow-control totals, transaction outcomes, conflict error codes, and `hot_write_targets` — single documents (equality targets) written repeatedly. See section 8.
+- `concurrency` (parser 1.6): write-conflict totals and breakdowns, lock-wait and flow-control totals, transaction outcomes, conflict error codes, and `hot_write_targets` — single documents (equality targets) written repeatedly. Parser 1.8 adds `write_conflict_documents` and `write_conflict_queries` (only when write conflicts were logged). See section 8.
 - `timeline` (parser 1.6): uncapped per-minute counters for slow load, CPU, write-concern wait, write conflicts, lock wait, and transaction outcomes. See section 9.
 - `quality`: parsed, skipped, malformed, and unsupported-record counts.
 
@@ -65,7 +66,7 @@ FTDC `writeConflicts` counts every write conflict on the node, including those o
 
 Use `extractionOccurence.json` for the authoritative diagnostic analysis. It contains all aggregate sections plus `occurrence_timestamps` under error groups and slow-operation groups. Use `extractionshort.json` only when a compact handoff is needed; it has the same aggregate values and the same group fields, but every `occurrence_timestamps` key is recursively removed. Do not interpret the short file as a different analysis or as evidence that no events occurred. A missing occurrence array in the short file is intentional.
 
-Both files are JSON documents. JSON object key order is not meaningful. Arrays such as groups, versions, timestamps, and samples are already sorted by the extractor where ordering matters.
+Both files are JSON documents. JSON object key order is not meaningful. For readability (parser 1.8) the root sections are written as `schema_version`, `metadata`, `mongodbServer`, `driverCompatibility`, `concurrency`, then the other sections alphabetically; nested keys are sorted. Arrays such as groups, versions, timestamps, and samples are already sorted by the extractor where ordering matters.
 
 ### 2. Root object and section meanings
 
@@ -73,6 +74,7 @@ The root object normally contains:
 
 - `schema_version`: extractor schema identifier.
 - `metadata`: `parser_version`, `slow_threshold_ms`, `bucket_minutes`, `input_files`, and `time_range`. When a log is streamed on stdin (input `-`), `input_files` records the name passed with `--input-name` (for example the original `.gz` name) instead of `-`.
+- `mongodbServer` (1.8): `{status: found|major_minor_only|unknown, version, major_minor, source, note}`. `version` is the full server build version (for example `8.0.4`, `7.0.12-rc1`) from the start-up `buildInfo` record; a log that does not contain the process start has `status: unknown`. `driverCompatibility.mongodb_full_version` carries the same value.
 - `driverCompatibility`: driver metadata and compatibility results.
 - `quality`: `input_files`, `lines_seen`, `parsed_records`, `skipped_records`, `skip_reasons`, `skipped_ratio`, and notes.
 - `summary`: severity counts, component counts, category counts, top message fingerprints, and repeated-error totals.
@@ -242,6 +244,31 @@ Field rules:
 - **Write targets.** For update, delete, and findAndModify records whose filter contains top-level equality predicates, the extractor computes `target_id`, a 16-hex-character keyed blake2b hash of the namespace, the equality field names (sorted, at most 5), and their values (extended-JSON wrappers such as `$oid` are normalized; a number and the same digits as a string hash differently). Literal values are never written to the output. The same document filter always yields the same id within one run and across runs that use the same key (`MONGODB_LOG_DIAG_TARGET_KEY`, default fixed), so ids can be compared between runs. `filter_fields` lists the hashed field names; it is a statement about the filter, not proof of a unique key. If `filter_fields` is not unique (for example a status field), one `target_id` may represent many documents — state that limitation.
 - `hot_write_targets` lists the top 20 targets by `count`. `share_of_namespace_writes` is the target's share of logged writes to its namespace. `max_per_minute` and `peak_minute` (earliest minute on ties) come from the per-minute series; `occurrence_timestamps` maps each UTC minute to `{occur, writeConflicts}`.
 - Coverage: `write_target_tracking.scope` states that only logged writes (slow, conflicting, or transaction records) are counted. Fast writes below the slow threshold are invisible, so `count` is a lower bound of the real write rate to that document. `count_is_lower_bound: true` means the target first appeared after the 10,000-target table had been pruned; `minutes_partial: true` means its minute series hit the 1,440-minute per-target or 200,000-cell global budget, so `max_per_minute` and `peak_minute` cover only the retained minutes (totals are still exact).
+
+- `hot_write_targets[]` (1.8) also carries `operation_names` and `max_write_conflicts_per_record`.
+
+#### 8b. Conflicting documents and queries (parser 1.8)
+
+`write_conflict_documents` and `write_conflict_queries` are present **only** when at least one record had `writeConflicts > 0`. A document or query that is merely written often (high `count`, many parallel writers or apps) without logged conflicts is never listed, and a missing key means "no logged conflict", not "not extracted" (check `metadata.parser_version >= 1.8`).
+
+```json
+"write_conflict_documents": [{"namespace": "appdb.items", "target_id": "0123456789abcdef", "filter_fields": ["id"],
+  "write_conflicts": 10800.0, "records_with_write_conflicts": 3600, "max_write_conflicts_per_record": 3.0,
+  "logged_writes": 3600, "conflict_record_ratio": 1.0, "operation_names": ["findAndModify"], "app_names": ["app-service-1"],
+  "first_conflict": "...", "last_conflict": "...", "count_is_lower_bound": false,
+  "queries": [{"query_key": "qh:QH000001", "query_hash": "QH000001", "operation_names": ["findAndModify"],
+               "records_with_write_conflicts": 3600, "write_conflicts": 10800.0, "sample_query_shape": {"findAndModify": "?", "query": {"id": "?"}, ...}}]}],
+"write_conflict_queries": [{"namespace": "appdb.items", "query_key": "qh:QH000001", "query_hash": "QH000001",
+  "operation_names": ["findAndModify"], "plan_summaries": ["IXSCAN { id: 1 }"], "app_names": ["app-service-1"],
+  "write_conflicts": 10800.0, "records_with_write_conflicts": 3600, "max_write_conflicts_per_record": 3.0,
+  "distinct_conflicting_documents": 1, "distinct_documents_is_lower_bound": false, "records_without_document_target": 0,
+  "top_conflicting_documents": [{"target_id": "0123456789abcdef", "write_conflicts": 10800.0}],
+  "first_seen": "...", "last_seen": "...", "sample_query_shape": {...}}]
+```
+
+- `write_conflict_documents`: top 20 distinct documents (write targets) by conflict total, selected from all tracked targets (not only the 20 busiest), each with the queries that conflicted on it (`queries`, at most 10 per document). Targets with conflicts are kept first when the 10,000-target table is pruned.
+- `write_conflict_queries`: top 20 `(namespace, query)` groups by conflict total. The query key is `qh:<queryHash>`, else `shape:<hash of the redacted shape>`, else `op:<operation>`. `distinct_conflicting_documents` counts distinct write targets (capped at 1,000 per query: `distinct_documents_is_lower_bound`); `records_without_document_target` are conflicting records whose filter had no top-level equality (multi-statement batches, range filters). `sample_query_shape` is redacted (field names kept, literals replaced by `?`).
+- Many distinct documents for one query means the conflicts are spread (transactions or batch overlap); one document with most of the conflicts is the hot-document signature.
 
 Interpretation rule: one `target_id` with a large `count`, a high `share_of_namespace_writes`, `write_conflicts > 0`, and the same `query_hashes` indicates a hot document (a counter or aggregate updated by many concurrent writers). Concurrent writes to the same document serialize: each retry after a write conflict burns CPU and holds a write ticket, so a hot document can raise node CPU and latency for unrelated operations. Report it as the leading hypothesis when its minute series aligns with the incident window in `timeline`, and confirm with FTDC `metrics.operation.writeConflicts` when available.
 

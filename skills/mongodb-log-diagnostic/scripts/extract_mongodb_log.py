@@ -25,7 +25,7 @@ except ModuleNotFoundError:
     from ftdc_decoder import decode_ftdc_bytes, emit_source_debug
     from driver_compatibility import DriverCompatibilityAccumulator, extract_driver_compatibility
 
-VERSION = "1.7"
+VERSION = "1.8"
 
 
 def _select_fast_loads():
@@ -1254,6 +1254,9 @@ class StreamingSummary:
         self.targets: dict[tuple[Any, str], dict[str, Any]] = {}
         self.target_pruned = 0
         self.target_cells = 0
+        # 1.8: write conflicts grouped by (namespace, query): distinct conflicting documents per query.
+        self.conflict_queries: dict[tuple[str, str], dict[str, Any]] = {}
+        self.conflict_queries_dropped = 0
         self.namespace_writes = collections.Counter()
         self.concurrency = {"records_with_write_conflicts": 0, "write_conflicts_total": 0.0, "temporarily_unavailable_total": 0.0,
                             "prepare_read_conflicts_total": 0.0, "lock_wait_micros_total": 0.0, "lock_wait_records": 0,
@@ -1266,6 +1269,9 @@ class StreamingSummary:
 
     MAX_TIMELINE_MINUTES = 20160  # 14 days of UTC minutes
     MAX_TARGETS = 10000
+    MAX_CONFLICT_QUERIES = 500           # distinct (namespace, query) pairs with write conflicts
+    MAX_CONFLICT_QUERY_TARGETS = 1000    # distinct documents counted per conflicting query
+    MAX_CONFLICT_QUERIES_PER_TARGET = 10
     MAX_TARGET_MINUTES = 1440
     MAX_TARGET_CELLS = 200000  # global budget of (target, minute) cells across all tracked targets
     KEEP_MINUTES_FOR_TOP = 100
@@ -1283,7 +1289,7 @@ class StreamingSummary:
             counter = day[key[1]] = collections.Counter()
         return counter
 
-    def _track_target(self, event: dict[str, Any], minute: tuple[str, str] | None) -> None:
+    def _track_target(self, event: dict[str, Any], minute: tuple[str, str] | None, conflict_query: str | None = None) -> None:
         target = event.get("write_target")
         namespace = event.get("namespace")
         if not target:
@@ -1293,7 +1299,9 @@ class StreamingSummary:
         if state is None:
             if len(self.targets) >= self.MAX_TARGETS:
                 # Keep the heaviest half (Misra-Gries style); counts for later-seen targets become lower bounds.
-                keep = sorted(self.targets.items(), key=lambda item: -item[1]["count"])[: self.MAX_TARGETS // 2]
+                # 1.8: targets with write conflicts are kept first, so a conflicting document is never pruned
+                # in favour of a merely busy one.
+                keep = sorted(self.targets.items(), key=lambda item: (item[1]["write_conflicts"] <= 0, -item[1]["count"]))[: self.MAX_TARGETS // 2]
                 self.target_pruned += len(self.targets) - len(keep)
                 self.targets = dict(keep)
                 self.target_cells = sum(len(item["minutes"]) for item in self.targets.values())
@@ -1301,6 +1309,8 @@ class StreamingSummary:
             state = self.targets[key] = {"namespace": namespace, "target_id": target["id"], "filter_fields": target["fields"], "count": 0,
                                          "write_conflicts": 0.0, "records_with_write_conflicts": 0, "write_kinds": {},
                                          "app_names": set(), "query_hashes": set(), "plan_summaries": set(),
+                                         "operation_names": set(), "max_write_conflicts_per_record": 0.0, "conflict_queries": {},
+                                         "first_conflict": None, "last_conflict": None,
                                          "duration_total": 0.0, "duration_max": 0.0, "cpu_total": 0.0, "cpu_max": 0.0,
                                          "first_seen": None, "last_seen": None, "minutes": {}, "minutes_partial": False, "seen_after_pruning": self.target_pruned > 0}
         state["count"] += 1
@@ -1308,9 +1318,20 @@ class StreamingSummary:
         if conflicts > 0:
             state["write_conflicts"] += conflicts
             state["records_with_write_conflicts"] += 1
+            state["max_write_conflicts_per_record"] = max(state["max_write_conflicts_per_record"], conflicts)
+            # 1.8: which query (shape) produced the conflicts on this document: {query_key: [records, conflicts]}.
+            qkey = conflict_query
+            per_query = state["conflict_queries"]
+            if qkey is not None and (qkey in per_query or len(per_query) < self.MAX_CONFLICT_QUERIES_PER_TARGET):
+                bucket = per_query.setdefault(qkey, [0, 0.0])
+                bucket[0] += 1; bucket[1] += conflicts
+            ts = event.get("timestamp")
+            if ts and (state["first_conflict"] is None or ts < state["first_conflict"]): state["first_conflict"] = ts
+            if ts and (state["last_conflict"] is None or ts > state["last_conflict"]): state["last_conflict"] = ts
         kind = str(event.get("write_kind"))
         state["write_kinds"][kind] = state["write_kinds"].get(kind, 0) + 1
-        for field, value in (("app_names", event.get("app_name")), ("query_hashes", event.get("query_hash")), ("plan_summaries", event.get("plan_summary"))):
+        for field, value in (("app_names", event.get("app_name")), ("query_hashes", event.get("query_hash")), ("plan_summaries", event.get("plan_summary")),
+                             ("operation_names", event.get("operation_name") or event.get("op_type"))):
             if value is not None and len(state[field]) < 10: state[field].add(str(value))
         duration, cpu = event.get("duration_ms"), event.get("cpu_nanos")
         if duration is not None:
@@ -1335,6 +1356,50 @@ class StreamingSummary:
                 bucket[0] += 1
                 bucket[1] += conflicts
 
+    def _track_conflict_query(self, event: dict[str, Any], conflicts: float) -> str:
+        """1.8: fold one conflict-bearing record into its (namespace, query) group.
+
+        Answers "which query conflicts, on how many distinct documents, with how many conflicts". Only
+        records with writeConflicts > 0 reach this point: a busy query without conflicts is never listed.
+        """
+        get = event.get
+        shape = get("query_shape")
+        if get("query_hash"):
+            qkey = "qh:" + str(get("query_hash"))
+        elif shape is not None:
+            qkey = "shape:" + hashlib.blake2b(json.dumps(shape, sort_keys=True, default=str).encode(), digest_size=6).hexdigest()
+        else:
+            qkey = "op:" + str(get("operation_name") or get("op_type") or "unknown")
+        key = (str(get("namespace")), qkey)
+        state = self.conflict_queries.get(key)
+        if state is None:
+            if len(self.conflict_queries) >= self.MAX_CONFLICT_QUERIES:
+                self.conflict_queries_dropped += 1
+                return qkey
+            state = self.conflict_queries[key] = {"namespace": get("namespace"), "query_key": qkey, "query_hash": get("query_hash"),
+                                                  "operation_names": set(), "plan_summaries": set(), "app_names": set(),
+                                                  "write_conflicts": 0.0, "records_with_write_conflicts": 0, "max_write_conflicts_per_record": 0.0,
+                                                  "targets": collections.Counter(), "targets_overflow": False, "records_without_target": 0,
+                                                  "sample_query_shape": shape, "first_seen": None, "last_seen": None}
+        state["write_conflicts"] += conflicts
+        state["records_with_write_conflicts"] += 1
+        state["max_write_conflicts_per_record"] = max(state["max_write_conflicts_per_record"], conflicts)
+        if state["sample_query_shape"] is None and shape is not None:
+            state["sample_query_shape"] = shape
+        for field, value in (("operation_names", get("operation_name") or get("op_type")), ("plan_summaries", get("plan_summary")), ("app_names", get("app_name"))):
+            if value is not None and len(state[field]) < 10: state[field].add(str(value))
+        target = get("write_target")
+        if not target:
+            state["records_without_target"] += 1
+        elif target["id"] in state["targets"] or len(state["targets"]) < self.MAX_CONFLICT_QUERY_TARGETS:
+            state["targets"][target["id"]] += conflicts
+        else:
+            state["targets_overflow"] = True
+        ts = get("timestamp")
+        if ts and (state["first_seen"] is None or ts < state["first_seen"]): state["first_seen"] = ts
+        if ts and (state["last_seen"] is None or ts > state["last_seen"]): state["last_seen"] = ts
+        return qkey
+
     def _compact_target_minutes(self) -> None:
         """Keep per-minute detail only for the heaviest targets once the global cell budget is reached."""
         top = {id(item) for item in sorted(self.targets.values(), key=lambda item: -item["count"])[: self.KEEP_MINUTES_FOR_TOP]}
@@ -1358,6 +1423,7 @@ class StreamingSummary:
         minute_key = _minute_key(event)
         minute = self._minute(event)
         c = self.concurrency
+        conflict_query = None
         if slow and minute is not None:
             minute["slow"] += 1
             if get("cpu_nanos") is not None: minute["slowCpuMs"] += float(get("cpu_nanos")) / 1e6
@@ -1377,6 +1443,7 @@ class StreamingSummary:
             if minute is not None:
                 minute["writeConflicts"] += n
                 minute["conflictRecords"] += 1
+            conflict_query = self._track_conflict_query(event, n)
         if unavailable:
             c["temporarily_unavailable_total"] += float(unavailable)
             if minute is not None: minute["temporarilyUnavailable"] += float(unavailable)
@@ -1409,7 +1476,7 @@ class StreamingSummary:
                 minute["txnCommitted" if str(termination).lower() == "committed" else "txnAborted"] += 1
         if get("write_kind"):
             self.namespace_writes[str(get("namespace"))] += 1
-            self._track_target(event, minute_key)
+            self._track_target(event, minute_key, conflict_query)
 
     @staticmethod
     def _limited_set(state: set[str], value: Any, limit: int = 100) -> None:
@@ -1611,14 +1678,15 @@ class StreamingSummary:
                         "share_of_namespace_writes": round(state["count"] / max(self.namespace_writes[str(state["namespace"])], 1), 4),
                         "write_conflicts": state["write_conflicts"], "records_with_write_conflicts": state["records_with_write_conflicts"],
                         "write_kinds": dict(state["write_kinds"]), "app_names": sorted(state["app_names"]), "query_hashes": sorted(state["query_hashes"]),
-                        "plan_summaries": sorted(state["plan_summaries"]),
+                        "plan_summaries": sorted(state["plan_summaries"]), "operation_names": sorted(state["operation_names"]),
+                        "max_write_conflicts_per_record": state["max_write_conflicts_per_record"],
                         "duration_ms": {"avg": round(state["duration_total"] / state["count"], 2), "max": state["duration_max"], "total": state["duration_total"]} if state["duration_total"] else None,
                         "cpuNanos": {"avg": round(state["cpu_total"] / state["count"], 2), "max": state["cpu_max"], "total": state["cpu_total"]} if state["cpu_total"] else None,
                         "first_seen": state["first_seen"], "last_seen": state["last_seen"], "peak_minute": peak[0], "max_per_minute": peak[1][0],
                         "count_is_lower_bound": state["seen_after_pruning"], "minutes_partial": state["minutes_partial"],
                         "occurrence_timestamps": dict(occurrences)})
         tx_stats = {name: _render_stat(value) for name, value in t["stats"].items()}
-        return {
+        output = {
             "write_conflicts": {"total": c["write_conflicts_total"], "records_with_write_conflicts": c["records_with_write_conflicts"],
                                 "per_record": _render_stat(c["write_conflicts_stat"].get("writeConflicts")),
                                 "first_seen": c["first_conflict"], "last_seen": c["last_conflict"],
@@ -1638,6 +1706,51 @@ class StreamingSummary:
                                       "scope": "update/delete/findAndModify records present in the log (slow or conflict-bearing); unlogged fast writes are not counted"},
             "hot_write_targets": hot,
         }
+        # 1.8: conflict-only blocks. Emitted only when at least one record has writeConflicts > 0; a document
+        # or query that is merely written often (high count / parallel writers without conflicts) is not listed.
+        conflict_queries, conflict_documents = self._conflict_outputs()
+        if conflict_queries:
+            output["write_conflict_queries"] = conflict_queries
+        if conflict_documents:
+            output["write_conflict_documents"] = conflict_documents
+        return output
+
+    def _conflict_outputs(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        queries = [q for q in self.conflict_queries.values() if q["records_with_write_conflicts"] > 0 and q["write_conflicts"] > 0]
+        queries.sort(key=lambda q: (-q["write_conflicts"], -q["records_with_write_conflicts"], str(q["namespace"]), q["query_key"]))
+        shapes = {(str(q["namespace"]), q["query_key"]): q for q in queries}
+        query_out = []
+        for q in queries[:20]:
+            query_out.append({"namespace": q["namespace"], "query_key": q["query_key"], "query_hash": q["query_hash"],
+                              "operation_names": sorted(q["operation_names"]), "plan_summaries": sorted(q["plan_summaries"]),
+                              "app_names": sorted(q["app_names"]), "write_conflicts": q["write_conflicts"],
+                              "records_with_write_conflicts": q["records_with_write_conflicts"],
+                              "max_write_conflicts_per_record": q["max_write_conflicts_per_record"],
+                              "distinct_conflicting_documents": len(q["targets"]),
+                              "distinct_documents_is_lower_bound": q["targets_overflow"],
+                              "records_without_document_target": q["records_without_target"],
+                              "top_conflicting_documents": [{"target_id": tid, "write_conflicts": n} for tid, n in q["targets"].most_common(5)],
+                              "first_seen": q["first_seen"], "last_seen": q["last_seen"], "sample_query_shape": q["sample_query_shape"]})
+        if query_out and self.conflict_queries_dropped:
+            query_out[-1]["note"] = f"{self.conflict_queries_dropped} conflict records belong to queries beyond the {self.MAX_CONFLICT_QUERIES}-query budget"
+        docs = [d for d in self.targets.values() if d["records_with_write_conflicts"] > 0 and d["write_conflicts"] > 0]
+        docs.sort(key=lambda d: (-d["write_conflicts"], -d["records_with_write_conflicts"], str(d["namespace"]), d["target_id"]))
+        doc_out = []
+        for d in docs[:20]:
+            per_query = []
+            for qkey, (records, conflicts) in sorted(d["conflict_queries"].items(), key=lambda kv: (-kv[1][1], kv[0])):
+                ref = shapes.get((str(d["namespace"]), qkey)) or {}
+                per_query.append({"query_key": qkey, "query_hash": ref.get("query_hash"), "operation_names": sorted(ref.get("operation_names") or []),
+                                  "records_with_write_conflicts": records, "write_conflicts": conflicts,
+                                  "sample_query_shape": ref.get("sample_query_shape")})
+            doc_out.append({"namespace": d["namespace"], "target_id": d["target_id"], "filter_fields": d["filter_fields"],
+                            "write_conflicts": d["write_conflicts"], "records_with_write_conflicts": d["records_with_write_conflicts"],
+                            "max_write_conflicts_per_record": d["max_write_conflicts_per_record"],
+                            "logged_writes": d["count"], "conflict_record_ratio": round(d["records_with_write_conflicts"] / max(d["count"], 1), 4),
+                            "operation_names": sorted(d["operation_names"]), "app_names": sorted(d["app_names"]),
+                            "first_conflict": d["first_conflict"], "last_conflict": d["last_conflict"],
+                            "count_is_lower_bound": d["seen_after_pruning"], "queries": per_query})
+        return query_out, doc_out
 
     def _operation_details(self, operation: dict[str, Any]) -> dict[str, Any] | None:
         if not operation: return None
@@ -1718,16 +1831,33 @@ def _without_occurrence_details(value: Any) -> Any:
     return value
 
 
+# 1.8: top-level sections are written in this order (server version, drivers, then contention); the remaining
+# sections follow alphabetically and every nested object keeps sorted keys.
+TOP_LEVEL_ORDER = ("schema_version", "metadata", "mongodbServer", "driverCompatibility", "concurrency")
+
+
+def _ordered_keys(value: dict[str, Any], top_level: bool) -> list[Any]:
+    try:
+        keys = sorted(value)
+    except TypeError:
+        keys = sorted(value, key=str)
+    if not top_level:
+        return keys
+    first = [key for key in TOP_LEVEL_ORDER if key in value]
+    return first + [key for key in keys if key not in TOP_LEVEL_ORDER]
+
+
 def _formatted_extraction_json(payload: dict[str, Any]) -> str:
     def _json_default(value: Any) -> Any:
         if isinstance(value, set): return sorted(value)
         raise TypeError(f"unsupported JSON value: {type(value).__name__}")
     compact: list[str] = []
     nonce = hashlib.sha1(str(time.perf_counter_ns()).encode()).hexdigest()[:12]
-    def replace(value: Any) -> Any:
+    def replace(value: Any, top_level: bool = False) -> Any:
         if isinstance(value, dict):
             result = {}
-            for key, child in value.items():
+            for key in _ordered_keys(value, top_level):
+                child = value[key]
                 if key in {"occurrence_timestamps", "sample_query_shape"}:
                     result[key] = f"__COMPACT_JSON_{nonce}_{len(compact)}__"
                     compact.append(json.dumps(child, separators=(",", ":"), sort_keys=True, default=_json_default))
@@ -1735,7 +1865,7 @@ def _formatted_extraction_json(payload: dict[str, Any]) -> str:
             return result
         if isinstance(value, list): return [replace(child) for child in value]
         return value
-    rendered = json.dumps(replace(payload), indent=2, sort_keys=True, default=_json_default)
+    rendered = json.dumps(replace(payload, top_level=True), indent=2, default=_json_default)
     # One pass over the document (was one full-document str.replace per compact block: ~4 s on 40 MB).
     return re.sub(f'"__COMPACT_JSON_{nonce}_([0-9]+)__"', lambda match: compact[int(match.group(1))], rendered)
 
@@ -1750,7 +1880,7 @@ def main() -> int:
         print("Missing input: " + ", ".join(missing), file=sys.stderr); return 2
     print(f"JSON reader: {JSON_BACKEND} (parser {VERSION})", file=sys.stderr)
     analyzer = StreamingSummary(args.slow_ms, args.bucket_minutes)
-    from driver_compatibility import DriverCompatibilityAccumulator
+    from driver_compatibility import DriverCompatibilityAccumulator, server_info
     driver = DriverCompatibilityAccumulator()
     quality = {"input_files": len(args.inputs), "lines_seen": 0, "parsed_records": 0, "skipped_records": 0, "skip_reasons": collections.Counter(), "notes": []}
     for path in args.inputs:
@@ -1783,10 +1913,10 @@ def main() -> int:
     print(f"Loading FTDC: {time.perf_counter() - step_started:.3f}s", file=sys.stderr)
     step_started = time.perf_counter(); extracted = analyzer.finish(); print(f"Summarizing records: {time.perf_counter() - step_started:.3f}s", file=sys.stderr)
     extracted["ftdc"] = ftdc
-    payload = {"schema_version": VERSION, "metadata": {"parser_version": VERSION, "slow_threshold_ms": args.slow_ms, "bucket_minutes": args.bucket_minutes, "time_range": {"first": analyzer.first_timestamp, "last": analyzer.last_timestamp}, "input_files": [input_names[p] for p in args.inputs]}, "driverCompatibility": driver_compatibility, "quality": parsed_quality, **extracted}
+    payload = {"schema_version": VERSION, "metadata": {"parser_version": VERSION, "slow_threshold_ms": args.slow_ms, "bucket_minutes": args.bucket_minutes, "time_range": {"first": analyzer.first_timestamp, "last": analyzer.last_timestamp}, "input_files": [input_names[p] for p in args.inputs]}, "mongodbServer": server_info(driver), "driverCompatibility": driver_compatibility, "quality": parsed_quality, **extracted}
     occurrence_path = args.output / "extractionOccurence.json"; short_path = args.output / "extractionshort.json"
     occurrence_path.write_text(_formatted_extraction_json(payload), encoding="utf-8"); short_path.write_text(_formatted_extraction_json(_without_occurrence_details(payload)), encoding="utf-8")
-    handoff = ["# MongoDB Log Extraction Handoff", "", f"Records parsed: {quality['parsed_records']}", f"Records skipped: {quality['skipped_records']}", f"Driver log records: {driver_compatibility['count']}", f"Incompatible driver groups: {driver_compatibility['incompatible_count']}", f"Time range: {analyzer.first_timestamp} to {analyzer.last_timestamp}", "", "Use extractionOccurence.json for full diagnostics with occurrence details. Use extractionshort.json for the compact handoff without occurrence arrays. Do not inspect the raw log directly."]
+    handoff = ["# MongoDB Log Extraction Handoff", "", f"Records parsed: {quality['parsed_records']}", f"Records skipped: {quality['skipped_records']}", f"MongoDB server version: {driver.mongodb_full_version or driver.mongodb_version or 'unknown'}", f"Driver log records: {driver_compatibility['count']}", f"Incompatible driver groups: {driver_compatibility['incompatible_count']}", f"Time range: {analyzer.first_timestamp} to {analyzer.last_timestamp}", "", "Use extractionOccurence.json for full diagnostics with occurrence details. Use extractionshort.json for the compact handoff without occurrence arrays. Do not inspect the raw log directly."]
     (args.output / "handoff.md").write_text("\n".join(handoff) + "\n", encoding="utf-8")
     print(f"Writing output: {time.perf_counter() - step_started:.3f}s", file=sys.stderr); print(f"Total extraction: {time.perf_counter() - total_started:.3f}s", file=sys.stderr)
     print(str(occurrence_path)); print(str(short_path)); return 0

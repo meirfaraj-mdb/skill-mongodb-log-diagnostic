@@ -9,6 +9,10 @@ document (a few KB) that the budget reducer keeps intact:
 * ``incident_windows``  bursts detected on the uncapped minute timeline (slow-operation spikes or
                         write-conflict storms), each compared with the preceding baseline and with the
                         hot documents active in the window, plus a verdict and a priority hint;
+* ``conflict_documents`` / ``conflict_queries`` (parser >= 1.8) the distinct documents and the queries
+                        that produced write conflicts, with the number of conflicts. Present only when at
+                        least one record has ``writeConflicts > 0``: a document or query that is merely
+                        written often (high count, parallel writers, no conflicts) is never listed;
 * ``coverage``          what the log cannot show (fast writes, capped slow-group samples).
 
 ``window_stats`` is also used by ``resource_investigation.correlate`` so a CPU/memory episode is
@@ -210,7 +214,7 @@ def _hot_documents(conc: dict, th: dict) -> list[dict]:
         out.append({k: target.get(k) for k in ("namespace", "target_id", "filter_fields", "count", "write_conflicts",
                                                 "records_with_write_conflicts", "share_of_namespace_writes",
                                                 "max_per_minute", "peak_minute", "app_names", "query_hashes",
-                                                "plan_summaries", "write_kinds", "first_seen", "last_seen",
+                                                "plan_summaries", "operation_names", "write_kinds", "first_seen", "last_seen",
                                                 "count_is_lower_bound", "minutes_partial")}
                    | {"duration_ms": target.get("duration_ms"),
                       "cpu_seconds_total": round(cpu / 1e9, 1) if isinstance(cpu, (int, float)) else None,
@@ -219,6 +223,37 @@ def _hot_documents(conc: dict, th: dict) -> list[dict]:
                                               "write_conflicts": _num(v.get("writeConflicts"))} for w, v in top),
                                             key=lambda r: r["minute"])})
     return out
+
+
+def _has_conflicts(item) -> bool:
+    return (isinstance(item, dict) and _num(item.get("write_conflicts")) > 0
+            and _num(item.get("records_with_write_conflicts")) > 0)
+
+
+def conflict_documents(conc: dict, th: dict) -> list[dict]:
+    """Documents with logged write conflicts (parser >= 1.8), each with the conflicting queries."""
+    out = []
+    for doc in [d for d in (conc.get("write_conflict_documents") or []) if _has_conflicts(d)][: int(th["max_targets"])]:
+        item = {k: doc.get(k) for k in ("namespace", "target_id", "filter_fields", "write_conflicts",
+                                         "records_with_write_conflicts", "max_write_conflicts_per_record",
+                                         "logged_writes", "conflict_record_ratio", "operation_names", "app_names",
+                                         "first_conflict", "last_conflict", "count_is_lower_bound")}
+        item["queries"] = [{k: q.get(k) for k in ("query_hash", "query_key", "operation_names", "write_conflicts",
+                                                   "records_with_write_conflicts", "sample_query_shape")}
+                           for q in (doc.get("queries") or [])[:3] if _num(q.get("write_conflicts")) > 0]
+        out.append(item)
+    return out
+
+
+def conflict_queries(conc: dict, th: dict) -> list[dict]:
+    """Queries with logged write conflicts and the number of distinct documents they conflicted on."""
+    keys = ("namespace", "query_hash", "query_key", "operation_names", "plan_summaries", "app_names",
+            "write_conflicts", "records_with_write_conflicts", "max_write_conflicts_per_record",
+            "distinct_conflicting_documents", "distinct_documents_is_lower_bound",
+            "records_without_document_target", "top_conflicting_documents", "first_seen", "last_seen",
+            "sample_query_shape")
+    return [{k: q.get(k) for k in keys}
+            for q in [q for q in (conc.get("write_conflict_queries") or []) if _has_conflicts(q)][: int(th["max_targets"])]]
 
 
 def summarize(extract, config=None) -> dict | None:
@@ -254,7 +289,7 @@ def summarize(extract, config=None) -> dict | None:
                               "query_hash": o.get("query_hash"), "count": o.get("count"),
                               "write_conflicts_total": (o.get("writeConflicts") or {}).get("total")})
     likely = [w for w in windows if w["verdict"] == LIKELY]
-    return {
+    findings = {
         "status": "ok", "parser_version": version,
         "source": "full extractionOccurence.json: uncapped minute timeline and hot write targets "
                   "(log-side counts: fast writes below the slow threshold are not logged, so values are lower bounds)",
@@ -283,8 +318,19 @@ def summarize(extract, config=None) -> dict | None:
             "fields to separate documents, shorter transactions); an index or a larger tier does not remove "
             "the serialization. Never try to reveal the hashed target values.",
             "Use incident_windows for start, peak and end times; slow-group occurrence arrays are samples.",
+            "conflict_documents / conflict_queries list only documents and queries with writeConflicts > 0. When "
+            "they are absent, do not write a conflicting-documents block: a high write count or many parallel "
+            "writers on one document without logged conflicts is not write contention.",
         ],
     }
+    # Conflict-only blocks: added only when the extract logged at least one conflicting record.
+    if _num(wc.get("total")) > 0 and _num(wc.get("records_with_write_conflicts")) > 0:
+        docs, queries = conflict_documents(conc, th), conflict_queries(conc, th)
+        if docs:
+            findings["conflict_documents"] = docs
+        if queries:
+            findings["conflict_queries"] = queries
+    return findings
 
 
 def _sampled_in(group: dict, start: datetime, end: datetime) -> bool:
@@ -321,6 +367,17 @@ def render_markdown(findings: dict) -> str:
                      f"{top['peak_writes_per_minute']}/min at {top['peak_minute'][11:16]} UTC. Slow operations "
                      f"×{ratio.get('slow', '?')} and slow-operation CPU ×{ratio.get('slowCpuMs', '?')} versus the "
                      "previous hour.")
+    docs = [d for d in findings.get("conflict_documents") or [] if _has_conflicts(d)]
+    if docs:
+        lines.extend(["", "Conflicting documents (records with writeConflicts > 0):", ""])
+        for d in docs:
+            ops = ", ".join(d.get("operation_names") or []) or "write"
+            queries = "; ".join(f"queryHash `{q.get('query_hash') or q.get('query_key')}` {_num(q.get('write_conflicts')):,.0f} conflicts"
+                                for q in d.get("queries") or [])
+            lines.append(f"- `{d['namespace']}` filter {d.get('filter_fields')} (target `{d['target_id']}`): "
+                         f"{_num(d['write_conflicts']):,.0f} write conflicts on {int(_num(d['records_with_write_conflicts'])):,} "
+                         f"records ({ops}), up to {_num(d.get('max_write_conflicts_per_record')):,.0f} per record"
+                         + (f"; {queries}" if queries else "") + ".")
     lines.extend(["", "Recommended: serialize or queue writes per document in the application, move frequently "
                   "updated counters/arrays out of the shared document, keep transactions on it short; validate "
                   "with a concurrent-write load test and FTDC `metrics.operation.writeConflicts`."])
