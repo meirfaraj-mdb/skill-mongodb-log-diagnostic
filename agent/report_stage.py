@@ -836,9 +836,25 @@ def _without_embedded_images(markdown: str) -> str:
     return _DATA_URI_IMAGE_RE.sub(lambda m: f"[embedded image omitted: {m.group(1)[:120]}]", markdown)
 
 
-def _validate_customer_summary(text: str) -> None:
-    if re.search(r"\bCVE-\d{4}-\d{4,}\b", text, re.I):
-        raise ValueError("Cluster summary contains a CVE without customer-use verification")
+_CVE_ID_RE = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.I)
+
+
+def _report_cves(reports) -> set[str]:
+    """CVE IDs present in the node reports. Those reports were already restricted to the offline
+    server/driver matches (_redact_unvetted_cves), so they are the only CVEs a cluster summary may cite."""
+    return {c.upper() for r in reports for c in _CVE_ID_RE.findall(r.get("report_md") or "")}
+
+
+def _validate_customer_summary(text: str, allowed: set[str] | None = None) -> str:
+    """Keep CVE IDs that come from the node reports; replace any other CVE ID instead of failing.
+
+    A CVE that no node report contains was invented or taken from outside the offline matches.
+    """
+    summary, removed = _redact_unvetted_cves(text, allowed or set())
+    if removed:
+        logger.warning("Removed %d CVE ID(s) from the cluster summary that no node report contains: %s",
+                       len(removed), ", ".join(removed))
+    return summary
 
 
 CLUSTER_PROMPT = (
@@ -860,7 +876,12 @@ CLUSTER_PROMPT = (
     "index is missing or naming a key order. Change streams, $natural, oplog, admin, and "
     "__mdb_internal_search are not evidence of a missing customer index. If shapes/indexStats are "
     "inconclusive, say 'No index gap verified from available evidence' and say what to collect. "
-    "Use only supplied node reports and bounded query evidence; do not invent metrics or CVEs. "
+"Use only supplied node reports and bounded query evidence; do not invent metrics or CVEs. "
+    "CVEs: cite only CVE IDs that appear in the node reports, with the node report's wording. MongoDB "
+    "server CVE matches go in one consolidated item: CVE, severity, the server version(s) and nodes "
+    "matched, and the patch target to confirm (on Atlas: confirm the version and schedule the maintenance "
+    "window); call them version-range matches, never proof of exploitation. Driver CVE matches: only as "
+    "the node report states them, with application attribution only when the node report verifies it. "
     "Do not instruct customers to change vendor-managed platform components. State n-1/n-8 trends only if "
     "present. Do not fill a quota of actions. Never expose credentials, IPs or query literals. "
     "Query-shape evidence with status 'empty' is not proof of a healthy workload: state its reason/explanation "
@@ -921,7 +942,8 @@ def _cluster_summary_source(config: dict) -> str:
     return value
 
 
-def _finish_cluster_summary(llm, system: str, user: str, trend_md: str | None = None) -> str:
+def _finish_cluster_summary(llm, system: str, user: str, trend_md: str | None = None,
+                            allowed_cves: set[str] | None = None) -> str:
     """Shared generation, executive-summary retry and customer-safety validation."""
     from . import trend_alerts
     summary = llm.generate(system, user)
@@ -936,8 +958,7 @@ def _finish_cluster_summary(llm, system: str, user: str, trend_md: str | None = 
     summary, removed_internal = _strip_internal_content(summary)
     if removed_internal:
         logger.info("Removed %d internal-only content block(s) from cluster summary", removed_internal)
-    _validate_customer_summary(summary)
-    return summary
+    return _validate_customer_summary(summary, allowed_cves)
 
 
 def cluster_summary_from_node_reports(store, layout, llm, config: dict, log_date: str, results) -> str:
@@ -951,7 +972,8 @@ def cluster_summary_from_node_reports(store, layout, llm, config: dict, log_date
     user = (f"Cluster `{config['cluster_name']}`, day {log_date}. Inputs: {len(results)} node reports "
             "(no extracts).\n\n" + body)
     summary = _finish_cluster_summary(llm, CLUSTER_PROMPT + " " + NODE_REPORTS_ONLY_INSTRUCTIONS
-                                      + _notification_instructions(config), user)
+                                      + _notification_instructions(config), user,
+                                      allowed_cves=_report_cves(results))
     header = (f"<!-- cluster summary variant: node_reports (built only from {len(results)} node report.md "
               "files; compare with cluster-summary.md, which also uses extract-based trend alerts and "
               "query-shape evidence) -->\n")
@@ -1089,7 +1111,7 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
             user += "\n\n" + _doc("trend_alerts", {"date": log_date, "baselines": "n-1,n-8"},
                                   json.dumps(trend_alerts.model_view(alerts), default=str))
         user += "\n\n" + body
-        summary = _finish_cluster_summary(llm, system, user, trend_md)
+        summary = _finish_cluster_summary(llm, system, user, trend_md, allowed_cves=_report_cves(results))
         cluster_uri = store.put_text(layout.cluster_report(log_date, "cluster-summary.md"),
                                      summary, "text/markdown; charset=utf-8")
     if want_summary and source in ("node_reports", "both"):
