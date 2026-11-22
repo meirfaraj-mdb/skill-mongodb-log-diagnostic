@@ -10,9 +10,9 @@ spec.loader.exec_module(mod)
 
 class RefreshTests(unittest.TestCase):
     def setUp(self):
-        self.catalog = {'$schema': mod.SCHEMA, 'catalog_name': 'reviewed snapshot', 'entries': [
+        self.catalog = {'$schema': mod.SCHEMA, 'catalog_name': 'snapshot', 'entries': [
             {'driver': 'mongo-go-driver', 'cve': 'CVE-2026-88031', 'affected': [{'introduced': '2.0.0', 'fixed': '2.9.1'}],
-             'source': 'https://vendor.example/advisory', 'reviewed': True, 'summary': 'Reviewed', 'scope_note': 'GridFS only'}]}
+             'source': 'https://vendor.example/advisory', 'summary': 'Hand edited', 'scope_note': 'GridFS only'}]}
         self.record = {'id': 'GHSA-test', 'aliases': ['CVE-2026-88031'], 'summary': 'OSV text', 'affected': [
             {'package': {'ecosystem': 'Go', 'name': 'go.mongodb.org/mongo-driver/v2'},
              'ranges': [{'type': 'SEMVER', 'events': [{'introduced': '2.0.0'}, {'fixed': '2.9.1'}]}]}]}
@@ -20,17 +20,18 @@ class RefreshTests(unittest.TestCase):
         if url.endswith('/query'):
             return {'vulns': [{'id': 'GHSA-test'}]} if body['package']['name'] == 'go.mongodb.org/mongo-driver/v2' else {'vulns': []}
         return self.record
-    def test_preserves_review_only_when_exact_range_same(self):
+    def test_rebuilt_from_source_when_range_same(self):
         result, stats = mod.refresh(self.catalog, self.fetch, '2026-10-04')
-        self.assertEqual(stats['reviewed_unchanged'], 1)
-        self.assertEqual(result['entries'][0]['source'], 'https://vendor.example/advisory')
-        self.assertEqual(result['entries'][0]['scope_note'], 'GridFS only')
-    def test_changed_range_is_unreviewed(self):
+        entry = result['entries'][0]
+        self.assertNotIn('reviewed', entry)
+        self.assertEqual(entry['source'], mod.API + '/vulns/GHSA-test')
+        self.assertEqual(entry['summary'], 'OSV text')
+        self.assertEqual((stats['added'], stats['changed_ranges'], stats['removed']), ([], [], []))
+    def test_changed_range_reported_in_diff(self):
         self.record['affected'][0]['ranges'][0]['events'][1]['fixed'] = '2.9.2'
         result, stats = mod.refresh(self.catalog, self.fetch, '2026-10-04')
-        self.assertEqual(stats['needs_review'], 1)
-        self.assertEqual(stats['previously_reviewed_not_retained'], ['CVE-2026-88031'])
-        self.assertFalse(result['entries'][0]['reviewed'])
+        self.assertEqual(stats['changed_ranges'], ['mongo-go-driver:CVE-2026-88031'])
+        self.assertEqual(result['entries'][0]['affected'][0]['fixed'], '2.9.2')
     def test_wrong_package_and_open_range_ignored(self):
         self.record['affected'][0]['package']['name'] = 'unrelated'
         with self.assertRaisesRegex(ValueError, 'No representable'):

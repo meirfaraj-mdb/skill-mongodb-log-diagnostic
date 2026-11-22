@@ -167,6 +167,7 @@ class Tests(unittest.TestCase):
             module=types.ModuleType('agent.'+name)
             sys.modules['agent.'+name]=module
         sys.modules['agent.offline_cve'].check=lambda payload:{'matches':[]}
+        sys.modules['agent.offline_cve'].check_server=lambda p, **k: {"matches": [], "match_count": 0, "status": "no_match_in_snapshot"}
         skills.diagnostic_skill_dir=lambda: ROOT/'skills/mongodb-log-diagnostic'
         from agent import report_stage
         layout=Layout('p'); store=Store({

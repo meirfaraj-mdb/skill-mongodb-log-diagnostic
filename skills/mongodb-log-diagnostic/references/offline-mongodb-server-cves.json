@@ -43,7 +43,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-11-10",
       "last_modified": "2026-11-13",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
       "cvss_score": 10.0
     },
@@ -77,7 +76,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-11",
       "last_modified": "2026-09-29",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 7.5
     },
@@ -114,7 +112,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-14",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -143,7 +140,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -168,7 +164,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 6.5
     },
@@ -189,7 +184,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 6.5
     },
@@ -210,7 +204,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H",
       "cvss_score": 8.1
     },
@@ -248,7 +241,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 6.5
     },
@@ -269,7 +261,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 6.5
     },
@@ -298,7 +289,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -327,7 +317,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 8.1
     },
@@ -356,7 +345,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:H",
       "cvss_score": 8.1
     },
@@ -385,7 +373,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -414,7 +401,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -443,7 +429,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 5.3
     },
@@ -464,7 +449,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:H/A:L",
       "cvss_score": 5.5
     },
@@ -485,7 +469,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H",
       "cvss_score": 8.1
     },
@@ -514,7 +497,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:L",
       "cvss_score": 5.4
     },
@@ -543,7 +525,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -572,7 +553,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -593,7 +573,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -622,7 +601,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 5.3
     },
@@ -643,7 +621,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -681,7 +658,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -718,7 +694,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
       "cvss_score": 8.1
     },
@@ -747,7 +722,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-08",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -768,7 +742,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-09-03",
       "last_modified": "2026-09-09",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",
       "cvss_score": 4.3
     },
@@ -806,7 +779,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-09-25",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H",
       "cvss_score": 8.1
     },
@@ -844,7 +816,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-09-25",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:H",
       "cvss_score": 7.1
     },
@@ -882,7 +853,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:U/C:N/I:H/A:H",
       "cvss_score": 6.4
     },
@@ -920,7 +890,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:L",
       "cvss_score": 6.4
     },
@@ -958,7 +927,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-09-16",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:L",
       "cvss_score": 4.3
     },
@@ -983,7 +951,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 6.6
     },
@@ -1021,7 +988,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 6.5
     },
@@ -1042,7 +1008,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
       "cvss_score": 6.5
     },
@@ -1072,7 +1037,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:L/I:L/A:N",
       "cvss_score": 4.2
     },
@@ -1110,7 +1074,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:L",
       "cvss_score": 6.4
     },
@@ -1148,7 +1111,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -1186,7 +1148,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -1224,7 +1185,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -1262,7 +1222,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N",
       "cvss_score": 5.4
     },
@@ -1300,7 +1259,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -1338,7 +1296,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:H/A:H",
       "cvss_score": 6.5
     },
@@ -1376,7 +1333,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -1414,7 +1370,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:H",
       "cvss_score": 7.1
     },
@@ -1452,7 +1407,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:H",
       "cvss_score": 7.6
     },
@@ -1486,7 +1440,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 8.8
     },
@@ -1524,7 +1477,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 8.8
     },
@@ -1562,7 +1514,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H",
       "cvss_score": 8.1
     },
@@ -1600,7 +1551,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:H",
       "cvss_score": 7.1
     },
@@ -1634,7 +1584,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-08-11",
       "last_modified": "2026-10-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:H",
       "cvss_score": 7.1
     },
@@ -1672,7 +1621,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -1705,7 +1653,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
       "cvss_score": 7.7
     },
@@ -1738,7 +1685,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:H",
       "cvss_score": 7.1
     },
@@ -1759,7 +1705,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -1784,7 +1729,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -1817,7 +1761,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
       "cvss_score": 5.3
     },
@@ -1838,7 +1781,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:L",
       "cvss_score": 4.3
     },
@@ -1871,7 +1813,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 8.1
     },
@@ -1904,7 +1845,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -1937,7 +1877,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 5.3
     },
@@ -1970,7 +1909,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2003,7 +1941,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:L",
       "cvss_score": 4.3
     },
@@ -2028,7 +1965,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:N",
       "cvss_score": 6.3
     },
@@ -2061,7 +1997,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 6.5
     },
@@ -2094,7 +2029,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2123,7 +2057,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2148,7 +2081,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2181,7 +2113,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
       "cvss_score": 6.5
     },
@@ -2210,7 +2141,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
       "cvss_score": 4.3
     },
@@ -2243,7 +2173,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 6.5
     },
@@ -2276,7 +2205,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
       "cvss_score": 8.1
     },
@@ -2305,7 +2233,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2334,7 +2261,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 6.5
     },
@@ -2359,7 +2285,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2392,7 +2317,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-07-22",
       "last_modified": "2026-10-24",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2437,7 +2361,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-12",
       "last_modified": "2026-06-22",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 8.8
     },
@@ -2462,7 +2385,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-09",
       "last_modified": "2026-07-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 6.5
     },
@@ -2495,7 +2417,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-09",
       "last_modified": "2026-07-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:H",
       "cvss_score": 8.1
     },
@@ -2528,7 +2449,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-09",
       "last_modified": "2026-07-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2561,7 +2481,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-09",
       "last_modified": "2026-07-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 5.5
     },
@@ -2594,7 +2513,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-09",
       "last_modified": "2026-07-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2627,7 +2545,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-09",
       "last_modified": "2026-07-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2660,7 +2577,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-09",
       "last_modified": "2026-07-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2693,7 +2609,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-09",
       "last_modified": "2026-07-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2726,7 +2641,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-09",
       "last_modified": "2026-07-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2747,7 +2661,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-09",
       "last_modified": "2026-07-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2772,7 +2685,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-09",
       "last_modified": "2026-07-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 5.9
     },
@@ -2805,7 +2717,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-09",
       "last_modified": "2026-07-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 6.5
     },
@@ -2838,7 +2749,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-09",
       "last_modified": "2026-07-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -2859,7 +2769,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-06-09",
       "last_modified": "2026-07-23",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 5.5
     },
@@ -2888,7 +2797,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-05-18",
       "last_modified": "2026-10-26",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2913,7 +2821,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-05-13",
       "last_modified": "2026-10-26",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2946,7 +2853,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-05-13",
       "last_modified": "2026-10-26",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -2979,7 +2885,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-05-13",
       "last_modified": "2026-10-26",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 8.8
     },
@@ -3012,7 +2917,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-05-13",
       "last_modified": "2026-10-26",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
       "cvss_score": 5.3
     },
@@ -3045,7 +2949,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-05-13",
       "last_modified": "2026-10-26",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -3086,7 +2989,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-05-13",
       "last_modified": "2026-10-26",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 8.8
     },
@@ -3107,7 +3009,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-05-07",
       "last_modified": "2026-10-26",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -3136,7 +3037,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-04-29",
       "last_modified": "2026-10-26",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N",
       "cvss_score": 4.3
     },
@@ -3165,7 +3065,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-04-29",
       "last_modified": "2026-10-26",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -3194,7 +3093,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-03-30",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 5.3
     },
@@ -3223,7 +3121,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-03-17",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 7.5
     },
@@ -3259,7 +3156,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-03-17",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 8.8
     },
@@ -3295,7 +3191,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-03-17",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
       "cvss_score": 4.3
     },
@@ -3324,7 +3219,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-02-10",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -3349,7 +3243,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-02-10",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -3378,7 +3271,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-02-10",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
       "cvss_score": 4.3
     },
@@ -3403,7 +3295,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-02-10",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -3432,7 +3323,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-02-10",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -3461,7 +3351,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-02-10",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -3490,7 +3379,6 @@
       "nvd_status": "Analyzed",
       "published": "2026-02-10",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -3531,7 +3419,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-12-19",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 7.5
     },
@@ -3563,7 +3450,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-12-09",
       "last_modified": "2026-10-07",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:L",
       "cvss_score": 5.4
     },
@@ -3598,7 +3484,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-11-25",
       "last_modified": "2026-10-18",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -3629,7 +3514,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-11-25",
       "last_modified": "2026-10-18",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -3658,7 +3542,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-11-25",
       "last_modified": "2026-10-18",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -3687,7 +3570,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-11-25",
       "last_modified": "2026-10-18",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N",
       "cvss_score": 5.4
     },
@@ -3712,7 +3594,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-11-03",
       "last_modified": "2026-10-18",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:H",
       "cvss_score": 5.5
     },
@@ -3737,7 +3618,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-10-20",
       "last_modified": "2026-10-08",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -3770,7 +3650,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-09-05",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -3799,7 +3678,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-09-05",
       "last_modified": "2026-09-30",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -3828,7 +3706,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-09-05",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -3847,7 +3724,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-07-07",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -3876,7 +3752,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-07-07",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -3905,7 +3780,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-07-07",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 6.5
     },
@@ -3926,7 +3800,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-07-07",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -3955,7 +3828,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-07-07",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 4.9
     },
@@ -3984,7 +3856,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-06-26",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -4013,7 +3884,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-06-26",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -4046,7 +3916,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-06-26",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N",
       "cvss_score": 5.4
     },
@@ -4075,7 +3944,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-06-26",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 8.8
     },
@@ -4108,7 +3976,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-04-01",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 9.8
     },
@@ -4141,7 +4008,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-04-01",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -4170,7 +4036,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-04-01",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -4203,7 +4068,6 @@
       "nvd_status": "Analyzed",
       "published": "2025-04-01",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N",
       "cvss_score": 5.4
     },
@@ -4227,7 +4091,6 @@
       "nvd_status": "Modified",
       "published": "2025-03-18",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -4260,7 +4123,6 @@
       "nvd_status": "Analyzed",
       "published": "2024-11-14",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:H",
       "cvss_score": 8.1
     },
@@ -4289,7 +4151,6 @@
       "nvd_status": "Analyzed",
       "published": "2024-10-21",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -4310,7 +4171,6 @@
       "nvd_status": "Analyzed",
       "published": "2024-09-10",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 9.8
     },
@@ -4339,7 +4199,6 @@
       "nvd_status": "Modified",
       "published": "2024-08-27",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 6.7,
       "platform_note": "Only when running on: linux:linux_kernel"
@@ -4369,7 +4228,6 @@
       "nvd_status": "Modified",
       "published": "2024-08-13",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 5.3
     },
@@ -4402,7 +4260,6 @@
       "nvd_status": "Analyzed",
       "published": "2024-08-07",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 7.8,
       "platform_note": "Only when running on: microsoft:windows_10_1507, microsoft:windows_10_1511, microsoft:windows_10_1607, microsoft:windows_10_1703, microsoft:windows_10_1709, microsoft:windows_10_1803, microsoft:windows_10_1809, microsoft:windows_10_1903, microsoft:windows_10_1909, microsoft:windows_10_2004, microsoft:windows_10_20h2, microsoft:windows_10_21h1, microsoft:windows_10_21h2, microsoft:windows_10_22h2, microsoft:windows_server_2016, microsoft:windows_server_2019; Only when running on: microsoft:windows_11, microsoft:windows_11_21h2, microsoft:windows_11_22h2, microsoft:windows_11_23h2, microsoft:windows_server_2019, microsoft:windows_server_2022"
@@ -4432,7 +4289,6 @@
       "nvd_status": "Modified",
       "published": "2024-07-01",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:L",
       "cvss_score": 6.5
     },
@@ -4457,7 +4313,6 @@
       "nvd_status": "Analyzed",
       "published": "2024-05-14",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
       "cvss_score": 5.3
     },
@@ -4486,7 +4341,6 @@
       "nvd_status": "Analyzed",
       "published": "2024-05-14",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -4519,7 +4373,6 @@
       "nvd_status": "Analyzed",
       "published": "2024-03-07",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 9.8
     },
@@ -4552,7 +4405,6 @@
       "nvd_status": "Modified",
       "published": "2023-08-23",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
       "cvss_score": 7.5,
       "platform_note": "Only when running on: apple:macos, microsoft:windows"
@@ -4574,7 +4426,6 @@
       "nvd_status": "Modified",
       "published": "2022-04-21",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -4603,7 +4454,6 @@
       "nvd_status": "Modified",
       "published": "2022-04-12",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -4632,7 +4482,6 @@
       "nvd_status": "Modified",
       "published": "2022-02-04",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:H",
       "cvss_score": 7.1
     },
@@ -4653,7 +4502,6 @@
       "nvd_status": "Modified",
       "published": "2022-01-20",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 5.5
     },
@@ -4682,7 +4530,6 @@
       "nvd_status": "Modified",
       "published": "2021-12-15",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -4703,7 +4550,6 @@
       "nvd_status": "Modified",
       "published": "2021-11-24",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -4732,7 +4578,6 @@
       "nvd_status": "Modified",
       "published": "2021-07-23",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
       "cvss_score": 5.3
     },
@@ -4753,7 +4598,6 @@
       "nvd_status": "Modified",
       "published": "2021-04-30",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -4778,7 +4622,6 @@
       "nvd_status": "Modified",
       "published": "2021-03-01",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -4803,7 +4646,6 @@
       "nvd_status": "Modified",
       "published": "2021-03-01",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 4.9
     },
@@ -4836,7 +4678,6 @@
       "nvd_status": "Modified",
       "published": "2020-11-24",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -4873,7 +4714,6 @@
       "nvd_status": "Modified",
       "published": "2020-11-23",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 6.5
     },
@@ -4894,7 +4734,6 @@
       "nvd_status": "Modified",
       "published": "2020-11-23",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -4928,7 +4767,6 @@
       "nvd_status": "Modified",
       "published": "2020-11-23",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -4957,7 +4795,6 @@
       "nvd_status": "Modified",
       "published": "2020-11-23",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -4990,7 +4827,6 @@
       "nvd_status": "Modified",
       "published": "2020-11-23",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -5011,7 +4847,6 @@
       "nvd_status": "Modified",
       "published": "2020-11-23",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -5032,7 +4867,6 @@
       "nvd_status": "Modified",
       "published": "2020-11-23",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -5057,7 +4891,6 @@
       "nvd_status": "Modified",
       "published": "2020-11-23",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -5082,7 +4915,6 @@
       "nvd_status": "Modified",
       "published": "2020-11-23",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -5111,7 +4943,6 @@
       "nvd_status": "Modified",
       "published": "2020-11-23",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -5136,7 +4967,6 @@
       "nvd_status": "Modified",
       "published": "2020-11-23",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5
     },
@@ -5161,7 +4991,6 @@
       "nvd_status": "Modified",
       "published": "2020-08-21",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 6.5,
       "range_notes": [
@@ -5197,7 +5026,6 @@
       "nvd_status": "Modified",
       "published": "2020-05-06",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:H/A:N",
       "cvss_score": 5.3
     },
@@ -5226,7 +5054,6 @@
       "nvd_status": "Modified",
       "published": "2019-08-30",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
       "cvss_score": 7.8,
       "platform_note": "Only when running on: microsoft:windows"
@@ -5256,7 +5083,6 @@
       "nvd_status": "Modified",
       "published": "2019-08-30",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:U/C:N/I:N/A:H",
       "cvss_score": 4.2
     },
@@ -5285,7 +5111,6 @@
       "nvd_status": "Modified",
       "published": "2019-08-06",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:H/I:H/A:H",
       "cvss_score": 7.1
     },
@@ -5306,7 +5131,6 @@
       "nvd_status": "Modified",
       "published": "2019-07-19",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.0/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
       "cvss_score": 8.1
     },
@@ -5327,7 +5151,6 @@
       "nvd_status": "Modified",
       "published": "2017-11-01",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:H",
       "cvss_score": 9.1
     },
@@ -5346,7 +5169,6 @@
       "nvd_status": "Modified",
       "published": "2017-09-09",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -5366,7 +5188,6 @@
       "nvd_status": "Modified",
       "published": "2017-04-14",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
       "cvss_score": 7.5
     },
@@ -5395,7 +5216,6 @@
       "nvd_status": "Modified",
       "published": "2016-10-03",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "CVSS:3.0/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
       "cvss_score": 5.5
     },
@@ -5426,7 +5246,6 @@
       "nvd_status": "Modified",
       "published": "2015-03-30",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "AV:N/AC:L/Au:N/C:N/I:N/A:P",
       "cvss_score": 5.0
     },
@@ -5446,7 +5265,6 @@
       "nvd_status": "Modified",
       "published": "2014-12-25",
       "last_modified": "2026-06-17",
-      "reviewed": false,
       "cvss": "AV:N/AC:L/Au:N/C:N/I:N/A:P",
       "cvss_score": 5.0
     },
@@ -5491,7 +5309,6 @@
       "nvd_status": "Modified",
       "published": "2014-03-06",
       "last_modified": "2026-06-16",
-      "reviewed": false,
       "cvss": "AV:N/AC:L/Au:N/C:P/I:N/A:P",
       "cvss_score": 6.4
     },
@@ -5514,7 +5331,6 @@
       "nvd_status": "Modified",
       "published": "2013-10-01",
       "last_modified": "2026-06-16",
-      "reviewed": false,
       "cvss": "AV:N/AC:L/Au:S/C:P/I:P/A:P",
       "cvss_score": 6.5
     },
@@ -5553,7 +5369,6 @@
       "nvd_status": "Modified",
       "published": "2013-10-01",
       "last_modified": "2026-06-16",
-      "reviewed": false,
       "cvss": "AV:N/AC:M/Au:S/C:P/I:P/A:P",
       "cvss_score": 6.0
     },
@@ -5589,7 +5404,6 @@
       "nvd_status": "Modified",
       "published": "2013-08-15",
       "last_modified": "2026-06-16",
-      "reviewed": false,
       "cvss": "AV:N/AC:M/Au:N/C:N/I:N/A:P",
       "cvss_score": 4.3
     },
@@ -5613,15 +5427,14 @@
       "nvd_status": "Modified",
       "published": "2013-07-04",
       "last_modified": "2026-06-16",
-      "reviewed": false,
       "cvss": "AV:N/AC:L/Au:S/C:P/I:P/A:P",
       "cvss_score": 6.5
     }
   ],
-  "catalog_version": "2026-11-22-nvd-candidates",
+  "catalog_version": "2026-11-22-nvd",
   "refreshed_at": "2026-11-22",
-  "refresh_owner": "NVD automated import; human review required for new/changed ranges",
-  "coverage_note": "Offline NVD snapshot for the MongoDB Server CPE (cpe:2.3:a:mongodb:mongodb). New or changed entries are unreviewed and excluded from reports unless MONGODB_LOG_DIAG_OFFLINE_CVE_INCLUDE_UNREVIEWED=true (then labelled unreviewed_candidate). Absence of a match is not evidence of safety; a match does not establish exploitability. Atlas applies server patch releases on its maintenance schedule: verify the node version.",
+  "refresh_owner": "NVD automated import (scripts/update_offline_mongodb_server_cves.py)",
+  "coverage_note": "Offline NVD snapshot for the MongoDB Server CPE (cpe:2.3:a:mongodb:mongodb). Version-range matches are reported. Absence of a match is not evidence of safety; a match does not establish exploitability. Atlas applies server patch releases on its maintenance schedule: verify the node version.",
   "sources": [
     "https://services.nvd.nist.gov/rest/json/cves/2.0?virtualMatchString=cpe:2.3:a:mongodb:mongodb (saved responses)"
   ]

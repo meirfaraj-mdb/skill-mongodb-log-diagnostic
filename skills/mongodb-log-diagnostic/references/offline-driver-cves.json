@@ -1,10 +1,10 @@
 {
   "$schema": "mongodb-log-diagnostic.offline-driver-cves/v1",
   "catalog_name": "MongoDB driver offline CVE catalog",
-  "catalog_version": "2026-11-22-osv-candidates",
+  "catalog_version": "2026-11-22-osv",
   "refreshed_at": "2026-11-22",
-  "refresh_owner": "OSV automated import; human review required for new/changed ranges",
-  "coverage_note": "Incomplete OSV snapshot for exact allowlisted packages; C/C++ and the PHP native extension are not covered. New or changed matches are unreviewed and excluded from reports unless MONGODB_LOG_DIAG_OFFLINE_CVE_INCLUDE_UNREVIEWED=true (then labelled unreviewed_candidate). Absence of a match is not evidence of safety; a match does not establish application exposure.",
+  "refresh_owner": "OSV automated import (scripts/update_offline_driver_cves.py)",
+  "coverage_note": "Incomplete OSV snapshot for exact allowlisted packages; C/C++ and the PHP native extension are not covered. Version-range matches are reported. Absence of a match is not evidence of safety; a match does not establish application exposure.",
   "sources": [
     "https://api.osv.dev/v1"
   ],
@@ -27,7 +27,6 @@
       "summary": "MongoDB .NET/C# Driver vulnerable to Deserialization of Untrusted Data",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-7j9m-j397-g4wx",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "NuGet",
@@ -55,7 +54,6 @@
       "summary": "go.mongodb.org/mongo-driver improperly validates cstrings when marshalling Go objects into BSON",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-f6mq-5m25-4r72",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "Go",
@@ -92,7 +90,6 @@
       "summary": "mongo-go-driver has Heap Out-of-Bounds Read in GSSAPI Error Handling",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-cp6g-7hqx-qxhp",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "Go",
@@ -150,7 +147,6 @@
       "summary": "Improper Certificate Validation in MongoDB",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-rghw-6px2-fgwc",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "Maven",
@@ -200,7 +196,6 @@
       "summary": "MongoDB Driver may publish events containing authentication-related data",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-vxvm-qww3-2fh7",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "npm",
@@ -225,7 +220,6 @@
       "summary": "Denial of Service in mongodb",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-mh5c-679w-hh4r",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "npm",
@@ -252,7 +246,6 @@
       "summary": "MongoDB Driver may publish events containing authentication-related data",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-vxvm-qww3-2fh7",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "Packagist",
@@ -283,7 +276,6 @@
       "summary": "mongodb: Reject \".\" and NUL bytes in database and collection names",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-65fr-j4p9-vc33",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "Packagist",
@@ -314,7 +306,6 @@
       "summary": "MongoDB: GridFS data disclosure and deletion via query-operator injection in file IDs",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-8fxw-fmj8-xp7j",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "Packagist",
@@ -342,7 +333,6 @@
       "summary": "Exposure of Sensitive Information to an Unauthorized Actor in MongoDB Rust Driver",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-4rjr-3gj2-5crq",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "crates.io",
@@ -369,7 +359,6 @@
       "summary": "MongoDB Rust driver may issue unintended commands",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-32jf-h775-g29h",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "crates.io",
@@ -396,7 +385,6 @@
       "summary": "MongoDB Rust Driver has certificate validation disabled when `tlsInsecure=False` appears in connection string",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-3p6w-gv5g-xjw9",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "crates.io",
@@ -423,7 +411,6 @@
       "summary": "MongoDB Driver may publish events containing authentication-related data",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-vxvm-qww3-2fh7",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "SwiftURL",
@@ -451,7 +438,6 @@
       "summary": "Use of NullPointerException Catch to Detect NULL Pointer Dereference in Pymongo",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-x33v-f3gp-gw2c",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "PyPI",
@@ -484,7 +470,6 @@
       "summary": "PyMongo Out-of-bounds Read in the bson module",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-m87m-mmvp-v9qm",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "PyPI",
@@ -516,7 +501,6 @@
       "summary": "MongoDB Python Driver: Out-of-bounds read in BSON decoding via a malformed Regex element",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-98qm-wvgf-w4cf",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "PyPI",
@@ -544,7 +528,6 @@
       "summary": "pymongo: PYTHON-5994 Use exact match for file ID in GridFS delete methods",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-8fvv-fgr5-f8ch",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "PyPI",
@@ -577,7 +560,6 @@
       "summary": "PyMongo: PYTHON-5990 Forced Unix domain socket connection via a .sock KMS endpoint in client-side field level encryption",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-qx36-8mw2-4r3x",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "PyPI",
@@ -610,7 +592,6 @@
       "summary": "PyMongo: PYTHON-5986 Host injection in PyMongo connection string parsing via percent-encoded delimiters",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-vp6j-j7w5-5xjj",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "PyPI",
@@ -643,7 +624,6 @@
       "summary": "PyMongo: PYTHON-5996 Heap out-of-bounds write via signed size overflow in BSON document encoding",
       "scope_note": "Version-range candidate only. Verify advisory, feature use, and application ownership.",
       "source": "https://api.osv.dev/v1/vulns/GHSA-v4x9-3549-crwv",
-      "reviewed": false,
       "packages": [
         {
           "ecosystem": "PyPI",

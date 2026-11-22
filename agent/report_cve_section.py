@@ -103,3 +103,99 @@ def relocate_standalone_cve_status(markdown: str) -> tuple[str, int]:
 
 def _moved_block(blocks: list[str]) -> list[str]:
     return ["", "**CVE review (moved from report header)**", "", *"\n\n".join(blocks).split("\n"), ""]
+
+
+# --- Deterministic CVE status guard ------------------------------------------------------------------
+# The model sometimes writes "No match ..." although the offline check found matching entries. This pass makes the report agree with offline_mongodb_server_cves / offline_driver_cves.
+_SERVER_SECTION = re.compile(r"(?im)^#{1,3}\s*(?:\d+(?:\.\d+)*[.)]?\s*)?MongoDB server version\b[^\n]*$")
+_DRIVER_SECTION = re.compile(r"(?im)^#{1,3}\s*(?:\d+(?:\.\d+)*[.)]?\s*)?Driver compatibility\b[^\n]*$")
+_NO_MATCH_LINE = re.compile(r"(?im)^[^\n]*\bno match(?:es)?\b[^\n]*(?:offline|snapshot)[^\n]*$")
+_ANY_HEADING = re.compile(r"(?m)^#{1,3}\s+\S")
+
+
+def _section_span(markdown: str, heading: re.Pattern) -> tuple[int, int] | None:
+    m = heading.search(markdown)
+    if not m:
+        return None
+    level = len(m.group(0)) - len(m.group(0).lstrip("#"))
+    nxt = re.compile(r"(?m)^#{1,%d}\s+\S" % level).search(markdown, m.end())
+    return m.start(), (nxt.start() if nxt else len(markdown))
+
+
+def _server_table(result: dict) -> list[str]:
+    observed = result.get("observed_server") or {}
+    refreshed = (result.get("catalog") or {}).get("refreshed_at") or "unknown date"
+    lines = [f"Observed MongoDB server version **{observed.get('version')}** ({observed.get('source')}). "
+             f"Offline NVD snapshot refreshed {refreshed}: **{result['match_count']} version-range match(es)**.", "",
+             "| CVE | Severity | CVSS | Fixed in (same line) | Summary |",
+             "|---|---|---|---|---|"]
+    for m in result.get("matches") or []:
+        summary = str(m.get("summary") or "").replace("|", "/")[:160]
+        note = f" ({m['platform_note']})" if m.get("platform_note") else ""
+        lines.append(f"| [{m['cve']}]({m.get('source')}) | {m.get('severity')} | {m.get('cvss_score') or ''} | "
+                     f"{m.get('fixed_in') or 'see advisory'} | {summary}{note} |")
+    if result.get("highest_fixed_in"):
+        lines += ["", f"Patch target to confirm: **{result['highest_fixed_in']}** or later on this release line "
+                      "(highest fix release among the matches; check the advisories). On Atlas, confirm the running "
+                      "version and schedule the maintenance window rather than a manual binary upgrade."]
+    lines += ["", "A version-range match is not proof that the vulnerable feature, edition or platform is in use."]
+    return lines
+
+
+def _driver_lines(result: dict) -> list[str]:
+    refreshed = (result.get("catalog") or {}).get("refreshed_at") or "unknown date"
+    out = []
+    if result.get("matches"):
+        out += [f"Offline driver CVE snapshot refreshed {refreshed}: **{result['match_count']} version-range match(es)** "
+                "(application exposure unverified):", "",
+                "| Driver / version | CVE | Severity | Affected range |", "|---|---|---|---|"]
+        for m in result["matches"]:
+            rng = "; ".join(f"{r.get('introduced')} – {r.get('fixed') or r.get('last_affected') or 'unfixed'}"
+                            for r in m.get("affected") or [])
+            out.append(f"| {m.get('matched_component')} {m.get('matched_version')} | [{m.get('cve')}]({m.get('source')}) | "
+                       f"{m.get('severity')} | {rng} |")
+    if result.get("drivers_not_covered_by_snapshot"):
+        out.append("Not covered by the offline driver CVE snapshot (no verdict): "
+                   + ", ".join(result["drivers_not_covered_by_snapshot"]) + ".")
+    return out
+
+
+def enforce_cve_status(markdown: str, server: dict | None, drivers: dict | None) -> tuple[str, list[str]]:
+    """Replace a false "No match" statement (or add missing CVE evidence). Returns (markdown, fixes)."""
+    fixes: list[str] = []
+    server_wrong = bool(server) and server.get("status") != "no_match_in_snapshot"
+    if server and server.get("status") == "matches_found":
+        span = _section_span(markdown, _SERVER_SECTION)
+        body = markdown[span[0]:span[1]] if span else ""
+        missing = [m["cve"] for m in server.get("matches") or [] if m["cve"].upper() not in body.upper()]
+        false_no_match = bool(_NO_MATCH_LINE.search(body)) and server_wrong
+        if span is None or missing or false_no_match:
+            block = _server_table(server)
+            if span is None:
+                heading = "## MongoDB server version and CVE review"
+                driver = _section_span(markdown, _DRIVER_SECTION)
+                insert = driver[0] if driver else len(markdown)
+                markdown = markdown[:insert].rstrip() + "\n\n" + heading + "\n\n" + "\n".join(block) + "\n\n" + markdown[insert:].lstrip()
+                fixes.append("added missing MongoDB server CVE section")
+            else:
+                head_end = markdown.index("\n", span[0]) + 1 if "\n" in markdown[span[0]:span[1]] else span[1]
+                markdown = markdown[:head_end] + "\n" + "\n".join(block) + "\n\n" + markdown[span[1]:].lstrip("\n")
+                fixes.append("replaced MongoDB server CVE section (" + ("false 'no match'" if false_no_match else
+                             "missing " + ", ".join(missing)) + ")")
+    if drivers and drivers.get("status") in ("matches_found", "not_covered_by_snapshot"):
+        span = _section_span(markdown, _DRIVER_SECTION)
+        if span:
+            body = markdown[span[0]:span[1]]
+            missing = [m["cve"] for m in drivers.get("matches") or [] if str(m.get("cve") or "").upper() not in body.upper()]
+            no_match = _NO_MATCH_LINE.search(body)
+            lines = _driver_lines(drivers)
+            if lines and (no_match or missing):
+                replacement = "\n".join(lines)
+                if no_match:
+                    new_body = body[:no_match.start()] + replacement + body[no_match.end():]
+                else:
+                    new_body = body.rstrip() + "\n\n" + replacement + "\n\n"
+                markdown = markdown[:span[0]] + new_body + markdown[span[1]:]
+                fixes.append("corrected driver CVE status (" + ("false 'no match'" if no_match else
+                             "missing " + ", ".join(missing)) + ")")
+    return re.sub(r"\n{3,}", "\n\n", markdown), fixes

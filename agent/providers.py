@@ -79,7 +79,7 @@ _ENV_FIELDS.update({
     "trend_ratio_threshold": "TREND_RATIO_THRESHOLD",
     "query_stats_skip_existing": "QUERY_STATS_SKIP_EXISTING",
     "metrics_skip_existing": "METRICS_SKIP_EXISTING",
-    "offline_cve_include_unreviewed": "OFFLINE_CVE_INCLUDE_UNREVIEWED",
+    "mongodb_server_version": "MONGODB_SERVER_VERSION",
     "query_shape_split_to_nodes": "QUERY_SHAPE_SPLIT_TO_NODES",
     "cluster_summary_source": "CLUSTER_SUMMARY_SOURCE",
 })
@@ -100,7 +100,7 @@ _ENV_FIELDS.update({
     "slack_mentions": "SLACK_MENTIONS", "slack_repeat_after_days": "SLACK_REPEAT_AFTER_DAYS",
     "slack_max_findings": "SLACK_MAX_FINDINGS",
 })
-_BOOL_FIELDS = {"cluster_summary", "offline_cve_include_unreviewed", "observability_enabled", "index_stats_enabled", "profiler_enabled",
+_BOOL_FIELDS = {"cluster_summary", "observability_enabled", "index_stats_enabled", "profiler_enabled",
                 "metrics_graphs_enabled", "resource_investigation_enabled", "advisor_appendix_enabled",
                 "concurrency_findings_enabled", "concurrency_graphs_enabled",
                 "query_stats_skip_existing", "metrics_skip_existing", "query_shape_split_to_nodes", "notify_after_report",

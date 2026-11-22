@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresh the offline MongoDB *server* CVE catalog from NVD; never auto-approve a finding.
+"""Refresh the offline MongoDB *server* CVE catalog from NVD.
 
 Usage (from any directory):
     python scripts/update_offline_mongodb_server_cves.py [--dry-run]
@@ -20,7 +20,7 @@ update field (rc1, alpha) is kept as "4.0.0-rc1" and only matches that exact bui
 with no bound (all versions) is not representable and is reported, never matched. A CPE ANDed with
 an OS platform (e.g. Windows only) keeps a ``platform_note``. When NVD has not analysed a CVE yet
 (no CPE configuration), the CNA ``affected`` block for "MongoDB Server" is used and the entry
-records ``range_source: "cna"``. Every new or changed entry is ``reviewed: false``.
+records ``range_source: "cna"``. The catalog is rebuilt from the source on every run.
 """
 from __future__ import annotations
 
@@ -50,9 +50,8 @@ CNA_PRODUCT = re.compile(r'^\s*mongodb[ _]server\s*$', re.I)
 SEVERITY_ORDER = ('cvssMetricV31', 'cvssMetricV40', 'cvssMetricV30', 'cvssMetricV2')
 SCOPE_NOTE = ('Version-range candidate only. Verify the advisory, the affected component/feature and the '
               'deployment (edition, platform, configuration) before calling the node vulnerable.')
-COVERAGE_NOTE = ('Offline NVD snapshot for the MongoDB Server CPE (cpe:2.3:a:mongodb:mongodb). New or changed '
-                 'entries are unreviewed and excluded from reports unless '
-                 'MONGODB_LOG_DIAG_OFFLINE_CVE_INCLUDE_UNREVIEWED=true (then labelled unreviewed_candidate). '
+COVERAGE_NOTE = ('Offline NVD snapshot for the MongoDB Server CPE (cpe:2.3:a:mongodb:mongodb). '
+                 'Version-range matches are reported. '
                  'Absence of a match is not evidence of safety; a match does not establish exploitability. '
                  'Atlas applies server patch releases on its maintenance schedule: verify the node version.')
 
@@ -256,7 +255,7 @@ def refresh(catalog: dict, records: list[dict], today: str | None = None, source
         item.update({'severity': severity, 'summary': _summary(cve), 'scope_note': SCOPE_NOTE,
                      'source': 'https://nvd.nist.gov/vuln/detail/' + cve_id, 'range_source': range_source,
                      'nvd_status': cve.get('vulnStatus'), 'published': str(cve.get('published') or '')[:10] or None,
-                     'last_modified': str(cve.get('lastModified') or '')[:10] or None, 'reviewed': False})
+                     'last_modified': str(cve.get('lastModified') or '')[:10] or None})
         if vector:
             item['cvss'] = vector
         if score is not None:
@@ -265,33 +264,31 @@ def refresh(catalog: dict, records: list[dict], today: str | None = None, source
             item['platform_note'] = '; '.join(platforms)
         if notes:
             item['range_notes'] = sorted(set(notes))
-        old = previous.get(cve_id, {})
-        # Preserve human review ONLY when every normalized interval and exact version is identical.
-        if old.get('reviewed') is True and old.get('affected') == item['affected'] and old.get('versions') == item.get('versions'):
-            item['reviewed'] = True
-            for key in ('summary', 'scope_note', 'platform_note'):
-                if old.get(key):
-                    item[key] = old[key]
         entries.append(item)
     entries.sort(key=lambda e: (e.get('published') or '', e['cve']), reverse=True)
     if not entries:
         raise ValueError('No representable MongoDB Server CVE ranges: refusing to replace catalog')
     day = today or dt.datetime.now(dt.timezone.utc).date().isoformat()
     updated = {**catalog, 'catalog_name': catalog.get('catalog_name') or 'MongoDB Server offline CVE catalog',
-               'catalog_version': day + '-nvd-candidates', 'refreshed_at': day,
-               'refresh_owner': 'NVD automated import; human review required for new/changed ranges',
+               'catalog_version': day + '-nvd', 'refreshed_at': day,
+               'refresh_owner': 'NVD automated import (scripts/update_offline_mongodb_server_cves.py)',
                'coverage_note': COVERAGE_NOTE, 'sources': [source], 'entries': entries}
     stats = {'nvd_records': len(records), 'entries': len(entries), 'range_sources': sources,
-             'reviewed_unchanged': sum(e['reviewed'] for e in entries),
-             'needs_review': sum(not e['reviewed'] for e in entries),
              'platform_specific': sorted(e['cve'] for e in entries if e.get('platform_note')),
              'unfixed_entries': sorted(e['cve'] for e in entries if any(r.get('unfixed') for r in e['affected'])),
              'rejected_skipped': sorted(rejected), 'unrepresentable': unrepresentable,
-             'previously_reviewed_not_retained': sorted(k for k, e in previous.items()
-                                                       if e.get('reviewed') and not any(n['cve'] == k and n['reviewed'] for n in entries)),
+             **_diff(previous, {e['cve']: e for e in entries}),
              'previous_entries': len(previous)}
     return updated, stats
 
+
+def _diff(previous: dict, current: dict) -> dict:
+    """What this refresh changed versus the previous catalog (ranges or exact versions)."""
+    changed = sorted(k for k in current.keys() & previous.keys()
+                     if (previous[k].get('affected'), previous[k].get('versions'))
+                     != (current[k].get('affected'), current[k].get('versions')))
+    return {'added': sorted(current.keys() - previous.keys()), 'changed_ranges': changed,
+            'removed': sorted(previous.keys() - current.keys())}
 
 def _write_atomic(path: Path, data: dict) -> Path | None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -345,8 +342,7 @@ def main() -> None:
         print('Dry run: catalog unchanged')
         return
     backup = _write_atomic(path, updated)
-    print(f"Updated {path} ({'backup: ' + str(backup) if backup else 'new catalog'}). "
-          'Review unapproved entries before using them in reports.')
+    print(f"Updated {path} ({'backup: ' + str(backup) if backup else 'new catalog'}).")
 
 
 if __name__ == '__main__':

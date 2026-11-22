@@ -10,9 +10,9 @@ python3 -m unittest discover -s tests -p 'test_update_offline_driver_cves.py'
 
 Requires outbound access to `https://api.osv.dev`. The script queries **16 exact OSV packages**: NuGet (.NET); Go modules v1/v2; Maven Java sync/core/reactive, Kotlin sync/coroutine and Scala 2.12/2.13/3; npm Node.js/JS/TS; Packagist PHP library; PyPI PyMongo; RubyGems Ruby; crates.io Rust. It prints package query counts and a coverage ledger. C/libmongoc and C++/mongocxx are **explicit gaps**, not implicitly covered through unrelated OS packages; PHP coverage excludes the native PECL extension. Driver names in the catalog must match driver names extracted from logs for any candidate to be matched. Package query counts, including zero, are not evidence a driver is safe or fully covered.
 
-Only OSV records with exact package identities, CVE aliases and representable closed version intervals are imported. New/changed candidates remain `reviewed: false` and are excluded by the offline report matcher. Previously reviewed entries retain approval only with identical affected intervals; review package applicability as well. The script makes a `.bak` backup then atomically replaces the JSON; failures or no representable entries leave the catalog untouched. Review the `previously_reviewed_not_retained` list and backup after each run. Neither a candidate version match nor an observed app name proves exploitability.
+Only OSV records with exact package identities, CVE aliases and representable closed version intervals are imported, and the catalog is rebuilt from OSV on every run; every version-range match is reported. The script makes a `.bak` backup then atomically replaces the JSON; failures or no representable entries leave the catalog untouched. Its output lists `added`, `changed_ranges` and `removed` entries versus the previous catalog. Neither a candidate version match nor an observed app name proves exploitability.
 
-This is an **incomplete OSV snapshot**, not a complete live driver security feed. For C/C++ and PHP extension, integrate a verified vendor-advisory source and an independently reviewed version matcher before claiming coverage; do not map OS-distribution package CVEs to driver versions. The refresh doesn't update prompts, extraction driver-name normalization, or GitHub automatically.
+This is an **incomplete OSV snapshot**, not a complete live driver security feed. For C/C++ and PHP extension, integrate a verified vendor-advisory source and a verified version matcher before claiming coverage; do not map OS-distribution package CVEs to driver versions. The refresh doesn't update prompts, extraction driver-name normalization, or GitHub automatically.
 
 # Offline MongoDB server CVE refresh
 
@@ -27,7 +27,7 @@ python3 scripts/update_offline_mongodb_server_cves.py --dry-run
 python3 scripts/update_offline_mongodb_server_cves.py
 # air-gapped: build from saved NVD API 2.0 responses
 python3 scripts/update_offline_mongodb_server_cves.py --input-json nvd-page-0.json
-python3 -m unittest discover -s tests -p 'test_update_offline_mongodb_server_cves.py'
+python3 -m unittest discover -s tests -p 'test_offline_mongodb_server_cves.py'
 ```
 
 Requires outbound access to `https://services.nvd.nist.gov` (set `NVD_API_KEY` for a higher rate limit). The
@@ -37,9 +37,14 @@ interval semantics as the driver catalog (`introduced` inclusive, `fixed` exclus
 inclusive); exact pre-release CPEs (`4.0.0:rc1`) only match that build; CPEs ANDed with an OS keep a
 `platform_note`; a wildcard CPE without bounds is listed under `unrepresentable` and never matched. CVEs
 that NVD has not analysed yet fall back to the CNA `affected` data for "MongoDB Server"
-(`range_source: "cna"`). New/changed entries are `reviewed: false` (reported only with
-`MONGODB_LOG_DIAG_OFFLINE_CVE_INCLUDE_UNREVIEWED=true` / `offline_cve_include_unreviewed`, labelled
-`unreviewed_candidate`); review is preserved only when the intervals are identical. The script writes a
+(`range_source: "cna"`). The catalog is rebuilt from NVD on every run and every version-range match is
+reported; the output lists `added`, `changed_ranges` and `removed` CVEs versus the previous catalog.
+
+Status values (server and drivers): a "No match" line is written only for `no_match_in_snapshot`; drivers
+that the snapshot does not cover (C/C++, PHP extension, unknown
+names) are listed in `drivers_not_covered_by_snapshot` (`not_covered_by_snapshot` when none is covered).
+`agent/report_cve_section.enforce_cve_status` rewrites any model-written "No match" sentence that
+contradicts these documents and adds missing matched CVEs to the right section. The script writes a
 `.bak` backup and replaces the JSON atomically, and refuses an empty result or a result with fewer than half
 of the previous entries (override with `--allow-shrink`).
 

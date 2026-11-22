@@ -135,6 +135,7 @@ class ReportWiringTests(unittest.TestCase):
     def setUp(self):
         sys.modules.setdefault("agent.offline_cve", types.ModuleType("agent.offline_cve"))
         sys.modules["agent.offline_cve"].check = lambda payload: {"matches": []}
+        sys.modules["agent.offline_cve"].check_server=lambda p, **k: {"matches": [], "match_count": 0, "status": "no_match_in_snapshot"}
         from agent import report_stage
         self.rs = report_stage
         self.layout = Layout("p")
