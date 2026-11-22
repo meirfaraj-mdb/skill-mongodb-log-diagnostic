@@ -126,7 +126,10 @@ def run_pipeline(event: dict, config: dict | None = None) -> dict:
         if config.get("input_mode") == "existing_bucket":
             out["observability"] = {"status": "skipped_existing_bucket", "log_date": log_date}
         else:
-            out["observability"] = observability_stage.run(config, log_date)
+            # --refresh-observability ignores stored metrics/query-stats files and calls the APIs again.
+            refresh = {"metrics_skip_existing": False, "query_stats_skip_existing": False}
+            out["observability"] = observability_stage.run(
+                {**config, **refresh} if event.get("refresh_observability") else config, log_date)
     if stage in ("all", "report", "cluster-summary", "cluster-summary-md"):
         if stage == "cluster-summary-md":
             # Only the alternative summary built from the stored node report.md files.
@@ -157,10 +160,13 @@ def main(argv=None) -> None:
                         help="re-download logs even if already stored")
     parser.add_argument("--force-reextract", action="store_true",
                         help="re-run a node extraction even when it already exists in storage")
+    parser.add_argument("--refresh-observability", action="store_true",
+                        help="call the Atlas/Ops Manager APIs again even when metrics or query stats are stored")
     args = parser.parse_args(argv)
     result = run_pipeline({"stage": args.stage, "log_date": args.log_date,
                            "skip_existing": not args.no_skip_existing,
-                           "force_reextract": args.force_reextract})
+                           "force_reextract": args.force_reextract,
+                           "refresh_observability": args.refresh_observability})
     print(json.dumps(result, indent=2, default=str))
 
 

@@ -22,7 +22,8 @@ def _run(stage: str, log_date: str | None = None, skip_existing: bool = True) ->
     configure_gcp_runtime()
     from agent.handler import run_pipeline
     return run_pipeline({"stage": stage, "log_date": log_date, "skip_existing": skip_existing,
-                         "force_reextract": not skip_existing})
+                         "force_reextract": not skip_existing,
+                         "refresh_observability": not skip_existing})
 
 
 def run_daily_diagnostics(log_date: str | None = None) -> dict:

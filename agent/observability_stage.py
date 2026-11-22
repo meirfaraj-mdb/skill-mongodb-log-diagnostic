@@ -109,6 +109,77 @@ def _query_stats_rows(text) -> int:
     return walk(data)
 
 
+_TRANSIENT_STATUSES = {408, 425, 429}
+
+
+def _transient(error) -> bool:
+    """Retryable failure (throttling, 5xx, network) as opposed to a metric this process never has."""
+    if not isinstance(error, dict):
+        return True
+    status = error.get("status")
+    if status is None:
+        # NotReturned: Atlas answered but has no such series for this partition (permanent).
+        return error.get("error_type") != "NotReturned"
+    try:
+        status = int(status)
+    except (TypeError, ValueError):
+        return True
+    return status in _TRANSIENT_STATUSES or status >= 500
+
+
+def _wanted_measurements(config, source) -> tuple[list, list]:
+    """Process and disk measurement names the collector would request with this config."""
+    if source != "atlas_api":
+        return [], []
+    from .metrics_catalog import plan_measurement_requests
+    from .resource_investigation import DISK_METRICS, INVESTIGATION_METRICS
+    value = config.get("resource_investigation_enabled", True)
+    investigate = value if isinstance(value, bool) else str(value).strip().lower() not in {"0", "false", "no", "off"}
+    plan = plan_measurement_requests(config, extra=INVESTIGATION_METRICS if investigate else [])
+    disk = list(dict.fromkeys(plan.get("disk", []) + (DISK_METRICS if investigate else [])))
+    return plan["requested"], disk
+
+
+def _reusable_metrics(text, config, log_date, source) -> tuple[bool, str]:
+    """Whether a stored metrics.json can replace a new Atlas/Ops Manager call.
+
+    Reused only when it covers the whole log day (a file written while the day was still in
+    progress is refreshed), in the same timezone and requested granularity, holds every
+    measurement this config needs, and has no retryable (429/5xx/network) failure.
+    """
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return False, "unreadable"
+    if not isinstance(data, dict) or data.get("schema_version") != 2:
+        return False, "old_or_unknown_format"
+    if data.get("source") != f"{source}_metrics":
+        return False, "different_source"
+    if not data.get("data"):
+        return False, "no_data"
+    window = data.get("window") if isinstance(data.get("window"), dict) else {}
+    if window.get("log_date") != log_date or window.get("complete_day") is not True:
+        return False, "incomplete_day"
+    if (window.get("timezone") or "UTC") != (config.get("timezone") or "UTC"):
+        return False, "different_timezone"
+    wanted_granularity = str(config.get("metrics_granularity") or "PT5M").upper()
+    if str(window.get("requested_granularity") or window.get("granularity") or "").upper() != wanted_granularity:
+        return False, "different_granularity"
+    plan = data.get("measurement_plan") if isinstance(data.get("measurement_plan"), dict) else {}
+    process_names, disk_names = _wanted_measurements(config, source)
+    if set(process_names) - set(plan.get("requested") or []):
+        return False, "missing_measurements"
+    if disk_names:
+        stored_disk = plan.get("disk")
+        if stored_disk is not None and set(disk_names) - set(stored_disk):
+            return False, "missing_disk_measurements"
+        if stored_disk is None and not data.get("disk_measurements") and not data.get("disk_errors"):
+            return False, "missing_disk_measurements"
+    if any(_transient(e) for e in (data.get("errors") or []) + (data.get("disk_errors") or [])):
+        return False, "transient_errors"
+    return True, "complete"
+
+
 def collect_nodes(config, log_date, store, nodes):
     """One snapshot per kind/node; existing_bucket is strictly read-only.
 
@@ -129,6 +200,16 @@ def collect_nodes(config, log_date, store, nodes):
             try:
                 source = resolve_source(config, kind)
                 key = artifact_key(layout, log_date, host_dir, kind)
+                reused, refetch = None, None
+                if (kind == "metrics" and source in {"atlas_api", "ops_manager"}
+                        and config.get("metrics_skip_existing", True) and store.exists(key)):
+                    text = store.get_text(key)
+                    ok, why = _reusable_metrics(text, config, log_date, source)
+                    if ok:
+                        reused = json.loads(text)
+                    else:
+                        refetch = why
+                        logger.info("Metrics present but refreshed node=%s reason=%s", host_dir, why)
                 if source == "bucket":
                     receipt["artifacts"][kind] = {"status": "available" if store.exists(key) else "not_present",
                                                   "source": "bucket", "uri": store.uri(key)}
@@ -141,6 +222,11 @@ def collect_nodes(config, log_date, store, nodes):
                     receipt["artifacts"][kind] = {"status": "skipped_existing", "source": source,
                                                   "uri": store.uri(key), "shapes": rows}
                     logger.info("Query stats already present node=%s shapes=%d: skipped", host_dir, rows)
+                elif reused is not None:
+                    # Complete log day already stored: keep it, no Atlas/Ops Manager call.
+                    receipt["artifacts"][kind] = {"status": "skipped_existing", "source": source,
+                                                  "uri": store.uri(key), "window": reused.get("window")}
+                    logger.info("Metrics already present node=%s: skipped", host_dir)
                 else:
                     collector = collector or skills.observability()
                     data = _call_collector(collector, config, info, kind, source, log_date)
@@ -163,6 +249,8 @@ def collect_nodes(config, log_date, store, nodes):
                     window = data.get("window") if isinstance(data, dict) else None
                     if isinstance(window, dict):
                         receipt["artifacts"][kind]["window"] = window
+                    if refetch:
+                        receipt["artifacts"][kind]["refetch_reason"] = refetch
             except QueryShapeWindowUnavailable as exc:
                 # Expected for backfills older than API retention: never store data from
                 # another day under this log day's key.

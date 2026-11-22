@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 
-from .metrics_catalog import MEASUREMENT_ALIASES, selected_groups
+from .metrics_catalog import MEASUREMENT_ALIASES, RESPONSE_ALIASES, selected_groups
 
 A4_PORTRAIT_INCHES = (8.27, 11.69)
 COLUMNS = 3
@@ -82,7 +82,8 @@ def load_series(metrics_payload) -> dict:
 
 
 def _lookup(series, template_name):
-    for candidate in (template_name, MEASUREMENT_ALIASES.get(template_name), _REVERSE_ALIASES.get(template_name)):
+    for candidate in (template_name, MEASUREMENT_ALIASES.get(template_name), _REVERSE_ALIASES.get(template_name),
+                      RESPONSE_ALIASES.get(template_name)):
         if candidate and candidate in series:
             return series[candidate]
     return None

@@ -119,8 +119,8 @@ class MatcherWithExtractorOutput(unittest.TestCase):
     def setUp(self):
         self.catalog, _ = updater.refresh({"$schema": updater.SCHEMA, "entries": []}, osv_fetch, "2026-11-01")
 
-    def matches(self, ext, include_unreviewed=True):
-        return matcher.check(ext, self.catalog, include_unreviewed=include_unreviewed)
+    def matches(self, ext):
+        return matcher.check(ext, self.catalog)
 
     def test_drivers_found_even_when_server_not_in_compat_matrix(self):
         # 8.2 is not in DRIVER_MATRIX: the compatibility buckets are empty, observed_drivers is not.
@@ -149,17 +149,18 @@ class MatcherWithExtractorOutput(unittest.TestCase):
         self.assertEqual([m["cve"] for m in self.matches(ext)["matches"]], ["CVE-2021-20328"])
         drv = {"driver": "mongo-java-driver", "version": "5.1.0", "raw_names": ["mongo-java-driver|kotlin"]}
         self.assertIn(("mongo-kotlin-driver", "5.1.0", "kotlin"), matcher.catalog_targets(drv))
-        legacy = {"$schema": "x", "entries": [{"driver": "mongo-php-driver", "cve": "CVE-2021-32050", "reviewed": True,
+        legacy = {"$schema": "x", "entries": [{"driver": "mongo-php-driver", "cve": "CVE-2021-32050",
                                                "source": "s", "affected": [{"introduced": "1.0.0", "fixed": "1.9.2"}]}]}
         ext = extract("8.0.4", handshake("mongoc / ext-mongodb:PHP / PHPLIB", "1.25.2 / 1.17.2 / 1.9.1", "web"))
         self.assertEqual(len(matcher.check(ext, legacy)["matches"]), 1)
 
-    def test_unreviewed_hidden_by_default_and_labelled_when_enabled(self):
+    def test_every_range_match_is_reported(self):
         ext = extract("8.2.1", handshake("PyMongo", "4.6.2", "etl"))
-        hidden = self.matches(ext, include_unreviewed=False)
-        self.assertEqual((hidden["matches"], hidden["unreviewed_candidates_not_reported"]), ([], 1))
-        shown = self.matches(ext)["matches"][0]
-        self.assertEqual((shown["review_status"], shown["severity"]), ("unreviewed_candidate", "MODERATE"))
+        result = self.matches(ext)
+        self.assertEqual((result["status"], result["match_count"]), ("matches_found", 1))
+        shown = result["matches"][0]
+        self.assertEqual((shown["cve"], shown["severity"]), ("CVE-2024-5629", "MODERATE"))
+        self.assertNotIn("review_status", shown)
 
     def test_range_semantics(self):
         a = matcher._affected

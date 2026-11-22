@@ -1,6 +1,7 @@
 """LLM backends for report generation.
 
-Bedrock and direct Anthropic use their respective SDKs.
+Bedrock and direct Anthropic use their respective SDKs; a direct Anthropic endpoint override
+(MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL) uses the standard library and streams by default.
 Vertex uses plain REST over google-auth + requests for every model:
 Claude -> rawPredict, Gemini -> generateContent (Vertex AI API v1).
 No google-genai SDK is required.
@@ -8,10 +9,15 @@ Report generation may continue when a model reaches its output token limit.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
 import time
+from types import SimpleNamespace
+from urllib.parse import urlsplit
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 from .common import logger
 
@@ -224,19 +230,294 @@ class VertexLLM:
         return "".join(parts)
 
 
-class AnthropicLLM:
-    """Direct Claude Messages API; API key supplied through environment."""
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+ANTHROPIC_VERSION = "2023-06-01"
+_RETRY_STATUSES = {408, 409, 429, 500, 502, 503, 504, 529}
 
-    def __init__(self, config: dict, client=None):
+
+def resolve_anthropic_base_url(config: dict) -> str | None:
+    """Optional complete Anthropic Messages endpoint (gateway, proxy or compatible endpoint).
+
+    MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL (config["anthropic_base_url"]) is the COMPLETE URL that
+    receives the POST, e.g. https://gateway.example.com/anthropic/v1/messages. Nothing is
+    appended to it. None means the SDK default (https://api.anthropic.com/v1/messages).
+    The standard ANTHROPIC_BASE_URL is NOT read here: the SDK treats that one as a base and
+    appends /v1/messages itself.
+    The value is a non-secret locator: it must not carry credentials, a query or a fragment.
+    """
+    value = str(config.get("anthropic_base_url") or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname
+    except ValueError as exc:
+        raise ValueError("Anthropic base URL is not a valid URL") from exc
+    if parsed.scheme not in ("https", "http") or not host:
+        raise ValueError("Anthropic base URL must be an absolute http(s) URL, "
+                         "e.g. https://gateway.example.com/v1/messages")
+    if parsed.scheme == "http" and host not in _LOCAL_HOSTS:
+        raise ValueError("Anthropic base URL must use https (http is allowed only for localhost)")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Anthropic base URL must not contain credentials, a query string or a fragment")
+    value = value.rstrip("/")
+    if not urlsplit(value).path:
+        raise ValueError(f"Anthropic base URL {value} has no path; it must be the complete Messages URL, "
+                         f"e.g. {value}/v1/messages (LiteLLM: {value}/v1/messages or {value}/anthropic/v1/messages)")
+    if not urlsplit(value).path.endswith("/messages"):
+        logger.warning("Anthropic base URL %s is used as the complete Messages endpoint and does not end "
+                       "with /messages; nothing is appended (expected e.g. .../v1/messages)", value)
+    return value
+
+
+_dumps = json.dumps
+
+
+class _HttpResponse:
+    def __init__(self, status_code: int, body: bytes, headers):
+        self.status_code = status_code
+        self.content = body
+        self.headers = {k.lower(): v for k, v in (headers or {}).items()}
+
+    def json(self):
+        return json.loads(self.content.decode("utf-8") or "null")
+
+
+class _UrllibHttp:
+    """Minimal POST client on the standard library: the endpoint override needs no extra package."""
+
+    def __init__(self, timeout: float = 900.0):
+        self.timeout = timeout
+
+    def stream_lines(self, url: str, json=None, headers=None):  # noqa: A002
+        """POST and return (status, headers, line iterator or error body bytes)."""
+        data = _dumps(json).encode("utf-8")
+        req = urlrequest.Request(url, data=data, method="POST", headers=headers or {})
+        try:
+            resp = urlrequest.urlopen(req, timeout=self.timeout)  # noqa: S310 - https/localhost enforced
+        except urlerror.HTTPError as exc:
+            try:
+                body = exc.read()
+            finally:
+                exc.close()
+            return _HttpResponse(exc.code, body, dict(exc.headers or {})), None
+
+        def lines():
+            with resp:
+                for raw in resp:  # http.client yields one line at a time as bytes arrive
+                    yield raw.decode("utf-8", errors="replace").rstrip("\r\n")
+        return _HttpResponse(resp.status, b"", dict(resp.headers)), lines()
+
+    def post(self, url: str, json=None, headers=None):  # noqa: A002 - same signature as httpx/requests
+        data = _dumps(json).encode("utf-8")
+        req = urlrequest.Request(url, data=data, method="POST", headers=headers or {})
+        try:
+            with urlrequest.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310 - https/localhost enforced
+                return _HttpResponse(resp.status, resp.read(), dict(resp.headers))
+        except urlerror.HTTPError as exc:  # 4xx/5xx still carry a body worth reporting
+            try:
+                body = exc.read()
+            finally:
+                exc.close()
+            return _HttpResponse(exc.code, body, dict(exc.headers or {}))
+
+
+class _EndpointMessages:
+    """messages.create() posting to one exact URL; same result shape as the SDK object."""
+
+    def __init__(self, url: str, api_key: str, http_client, max_retries: int = 3, sleep=time.sleep,
+                 stream: bool = True):
+        self.url = url
+        self._api_key = api_key
+        self._http = http_client
+        self.max_retries = max_retries
+        self._sleep = sleep
+        # Streaming keeps bytes flowing, so gateway/load-balancer idle timeouts (HTTP 504) do not
+        # cut long report generations. Falls back to one JSON response when stream=False.
+        self.stream = stream and hasattr(http_client, "stream_lines")
+
+    def _headers(self) -> dict:
+        return {"x-api-key": self._api_key, "anthropic-version": ANTHROPIC_VERSION,
+                "content-type": "application/json",
+                "accept": "text/event-stream" if self.stream else "application/json"}
+
+    @staticmethod
+    def _assemble_stream(lines):
+        """Rebuild a Messages response from Anthropic SSE events (message_start, content_block_*,
+        message_delta, message_stop, ping, error)."""
+        blocks, stop_reason, usage, event, data_parts = {}, None, {}, None, []
+
+        def handle(name, payload):
+            nonlocal stop_reason
+            kind = payload.get("type") or name
+            if kind == "error":
+                err = payload.get("error") or {}
+                raise RuntimeError(f"Anthropic stream error error_type={str(err.get('type', ''))[:80]} "
+                                   f"error_message={str(err.get('message', ''))[:500]}")
+            if kind == "message_start":
+                usage.update((payload.get("message") or {}).get("usage") or {})
+            elif kind == "content_block_start":
+                block = payload.get("content_block") or {}
+                blocks[payload.get("index", len(blocks))] = {"type": block.get("type"),
+                                                             "text": block.get("text", "") or ""}
+            elif kind == "content_block_delta":
+                delta = payload.get("delta") or {}
+                block = blocks.setdefault(payload.get("index", 0), {"type": "text", "text": ""})
+                if delta.get("type") == "text_delta":
+                    block["text"] += delta.get("text", "")
+            elif kind == "message_delta":
+                stop_reason = (payload.get("delta") or {}).get("stop_reason") or stop_reason
+                usage.update(payload.get("usage") or {})
+            return kind == "message_stop"
+
+        finished = False
+        for line in lines:
+            if line.startswith(":"):
+                continue  # SSE comment / keepalive
+            if line.startswith("event:"):
+                event = line[6:].strip()
+            elif line.startswith("data:"):
+                data_parts.append(line[5:].lstrip())
+            elif line == "" and data_parts:
+                raw = "\n".join(data_parts)
+                data_parts = []
+                if raw.strip() == "[DONE]":
+                    finished = True
+                    break
+                if handle(event, json.loads(raw)):
+                    finished = True
+                    break
+                event = None
+        if data_parts and not finished:
+            raw = "\n".join(data_parts)
+            if raw.strip() != "[DONE]":
+                finished = handle(event, json.loads(raw)) or stop_reason is not None
+        if not finished and stop_reason is None:
+            raise ConnectionError("Anthropic stream ended before message_stop")
+        return SimpleNamespace(
+            content=[SimpleNamespace(type=b["type"], text=b["text"]) for _, b in sorted(blocks.items())],
+            stop_reason=stop_reason, usage=usage or None)
+
+    @staticmethod
+    def _retry_delay(resp, attempt: int) -> float:
+        value = (getattr(resp, "headers", None) or {}).get("retry-after") if resp is not None else None
+        try:
+            return min(max(float(value), 0.0), 60.0)
+        except (TypeError, ValueError):
+            return min(2.0 ** attempt, 30.0)
+
+    def create(self, **body):
+        for attempt in range(self.max_retries + 1):
+            resp = lines = None
+            try:
+                if self.stream:
+                    resp, lines = self._http.stream_lines(self.url, json={**body, "stream": True},
+                                                          headers=self._headers())
+                    if lines is not None and resp.status_code < 400:
+                        if "text/event-stream" not in resp.headers.get("content-type", "text/event-stream"):
+                            # Gateway ignored stream=true and answered with one JSON document.
+                            return self._from_json(json.loads("\n".join(lines) or "null"))
+                        return self._assemble_stream(lines)
+                else:
+                    resp = self._http.post(self.url, json=body, headers=self._headers())
+            except RuntimeError:
+                raise  # explicit error event from the API: not retryable here
+            except Exception as exc:  # transport errors: timeouts, resets, DNS, truncated streams
+                if attempt >= self.max_retries:
+                    logger.error("Anthropic endpoint request failed endpoint=%s error_type=%s",
+                                 self.url, type(exc).__name__)
+                    raise
+                logger.warning("Anthropic endpoint transport error endpoint=%s error_type=%s retry=%d",
+                               self.url, type(exc).__name__, attempt + 1)
+                self._sleep(self._retry_delay(None, attempt))
+                continue
+            if resp.status_code in _RETRY_STATUSES and attempt < self.max_retries:
+                logger.warning("Anthropic endpoint HTTP %s endpoint=%s retry=%d",
+                               resp.status_code, self.url, attempt + 1)
+                self._sleep(self._retry_delay(resp, attempt))
+                continue
+            if resp.status_code >= 400:
+                error_type = error_message = None
+                try:
+                    error = resp.json().get("error") or {}
+                    error_type = str(error.get("type", ""))[:80]
+                    error_message = str(error.get("message", ""))[:500]
+                except (ValueError, TypeError, AttributeError):
+                    pass
+                hint = ""
+                if resp.status_code in (502, 504) and not self.stream:
+                    hint = (" hint=the gateway timed out waiting for the full answer; enable streaming "
+                            "(unset MONGODB_LOG_DIAG_ANTHROPIC_STREAM) or lower MONGODB_LOG_DIAG_REPORT_MAX_TOKENS")
+                elif resp.status_code in (502, 504):
+                    hint = (" hint=the gateway timed out before the first streamed byte; ask the gateway owner "
+                            "to raise its request/idle timeout or lower MONGODB_LOG_DIAG_REPORT_MAX_INPUT_CHARS")
+                raise RuntimeError(f"Anthropic endpoint HTTP {resp.status_code} endpoint={self.url} "
+                                   f"error_type={error_type} error_message={error_message}{hint}")
+            return self._from_json(resp.json())
+        raise RuntimeError("unreachable")  # pragma: no cover
+
+    @staticmethod
+    def _from_json(data):
+        if not isinstance(data, dict):
+            raise ValueError("Anthropic endpoint returned a non-object JSON response")
+        return SimpleNamespace(
+            content=[SimpleNamespace(type=block.get("type"), text=block.get("text", ""))
+                     for block in data.get("content") or []],
+            stop_reason=data.get("stop_reason"),
+            usage=data.get("usage"),
+        )
+
+
+def _anthropic_stream_enabled(config: dict) -> bool:
+    """MONGODB_LOG_DIAG_ANTHROPIC_STREAM (default true) for the endpoint override."""
+    value = config.get("anthropic_stream")
+    if value is None:
+        raw = os.environ.get("MONGODB_LOG_DIAG_ANTHROPIC_STREAM", "").strip().lower()
+        if not raw:
+            return True
+        if raw in ("true", "1", "yes", "on"):
+            return True
+        if raw in ("false", "0", "no", "off"):
+            return False
+        raise ValueError("MONGODB_LOG_DIAG_ANTHROPIC_STREAM must be true/false, 1/0, yes/no, or on/off")
+    return bool(value)
+
+
+class _EndpointClient:
+    def __init__(self, messages: _EndpointMessages):
+        self.messages = messages
+
+
+class AnthropicLLM:
+    """Direct Claude Messages API; API key supplied through environment.
+
+    Default: the Anthropic SDK and https://api.anthropic.com/v1/messages.
+    With MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL set, every request is POSTed to exactly that
+    complete URL (for example https://gateway.example.com/anthropic/v1/messages).
+    """
+
+    def __init__(self, config: dict, client=None, http_client=None):
         self.model = config.get("anthropic_model") or os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-5"
         self.max_tokens = int(config.get("report_max_tokens", 16000))
         self.max_continuations = int(config.get("report_max_continuations", 3))
+        self.base_url = resolve_anthropic_base_url(config)
         if client is None:
-            if not os.environ.get("ANTHROPIC_API_KEY"):
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
+            if not api_key:
                 raise ValueError("Set ANTHROPIC_API_KEY to use direct Claude reports (do not store it in the local config)")
-            import anthropic
-            client = anthropic.Anthropic(timeout=900.0, max_retries=3)
+            if self.base_url:
+                if http_client is None:
+                    http_client = _UrllibHttp(timeout=900.0)  # max silence between bytes, not total
+                self.stream = _anthropic_stream_enabled(config)
+                client = _EndpointClient(_EndpointMessages(self.base_url, api_key, http_client,
+                                                           stream=self.stream))
+                logger.info("Anthropic endpoint streaming=%s", client.messages.stream)
+            else:
+                import anthropic
+                client = anthropic.Anthropic(timeout=900.0, max_retries=3)
         self.client = client
+        logger.info("Anthropic client model=%s endpoint=%s", self.model,
+                    self.base_url or "default (https://api.anthropic.com/v1/messages)")
 
     def generate(self, system_prompt: str, user_content: str) -> str:
         messages = [{"role": "user", "content": user_content}]

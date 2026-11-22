@@ -7,7 +7,7 @@ Set the **non-secret** `MONGODB_LOG_DIAG_GATEWAY_CA_SHA256` in your deployment e
 Run the normal redeploy command; `redeploy_agent.sh` is provided as a source-only optional helper. From repository root, for the already-bound existing engine:
 
 ```sh
-PROJECT=meir-faraj REGION=europe-west1 ENGINE_ID=800270742183739392 \
+PROJECT=YOUR_GCP_PROJECT REGION=europe-west1 ENGINE_ID=YOUR_ENGINE_ID \
 DISPLAY_NAME='MongoDB Atlas daily diagnostics' \
 ENV_FILE="$(pwd)/mongodb_log_diagnostic_deploy.env" sh ./redeploy_agent.sh
 ```

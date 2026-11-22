@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresh the offline driver-CVE catalog from OSV; never auto-approve a finding.
+"""Refresh the offline driver-CVE catalog from OSV.
 
 Usage (from any directory): python scripts/update_offline_driver_cves.py [--dry-run]
 Requires outbound access to api.osv.dev at runtime; no third-party Python modules.
@@ -225,7 +225,7 @@ def refresh(catalog: dict, fetch=_json_request, today: str | None = None) -> tup
             item = grouped.setdefault(key, {'cve': cve, 'driver': driver, 'affected': [], 'versions': [],
                 'advisory_ids': [], 'severity': severity, 'cvss': cvss, 'summary': '',
                 'scope_note': 'Version-range candidate only. Verify advisory, feature use, and application ownership.',
-                'source': API + '/vulns/' + urllib.parse.quote(osv_id, safe=''), 'reviewed': False,
+                'source': API + '/vulns/' + urllib.parse.quote(osv_id, safe=''),
                 'packages': []})
             item['advisory_ids'] = sorted(set(item['advisory_ids']) | set(ids))
             if item['severity'] == 'review advisory' and severity != 'review advisory':
@@ -253,33 +253,32 @@ def refresh(catalog: dict, fetch=_json_request, today: str | None = None) -> tup
             del item['cvss']
         if not item['affected'] and not item.get('versions'):
             continue  # cannot represent; reported in stats['unrepresentable']
-        old = previous.get(key, {})
-        # Preserve human review ONLY if every normalized interval remains identical.
-        if old.get('reviewed') is True and old.get('affected') == item['affected'] and old.get('versions') == item.get('versions'):
-            item['reviewed'] = True
-            item['source'] = old['source']
-            item['summary'] = old.get('summary', item['summary'])
-            item['scope_note'] = old.get('scope_note', item['scope_note'])
         entries.append(item)
     day = today or dt.datetime.now(dt.timezone.utc).date().isoformat()
-    updated = {**catalog, 'catalog_version': day + '-osv-candidates', 'refreshed_at': day,
-               'refresh_owner': 'OSV automated import; human review required for new/changed ranges',
+    updated = {**catalog, 'catalog_version': day + '-osv', 'refreshed_at': day,
+               'refresh_owner': 'OSV automated import (scripts/update_offline_driver_cves.py)',
                'coverage_note': ('Incomplete OSV snapshot for exact allowlisted packages; C/C++ and the PHP native extension '
-                                 'are not covered. New or changed matches are unreviewed and excluded from reports unless '
-                                 'MONGODB_LOG_DIAG_OFFLINE_CVE_INCLUDE_UNREVIEWED=true (then labelled unreviewed_candidate). '
+                                 'are not covered. Version-range matches are reported. '
                                  'Absence of a match is not evidence of safety; a match does not establish application exposure.'),
                'sources': [API], 'entries': entries}
     stats = {'coverage': {language: {'status': status, 'note': note} for language, (status, note) in COVERAGE.items()},
-             'packages_queried': len(PACKAGES), 'package_result_counts': per_package, 'entries': len(entries), 'reviewed_unchanged': sum(e['reviewed'] for e in entries),
-             'needs_review': sum(not e['reviewed'] for e in entries),
+             'packages_queried': len(PACKAGES), 'package_result_counts': per_package, 'entries': len(entries),
              'unfixed_entries': sorted(_entry_id(e['cve'], e['advisory_ids']) for e in entries if any(r.get('unfixed') for r in e['affected'])),
              'withdrawn_skipped': sorted(withdrawn), 'unrepresentable': unrepresentable,
-             'previously_reviewed_not_retained': sorted(k[1] for k, e in previous.items()
-                                                       if e.get('reviewed') and not any((n['driver'], _entry_id(n['cve'], n['advisory_ids'])) == k and n['reviewed'] for n in entries))}
+             **_diff(previous, {(e['driver'], _entry_id(e['cve'], e['advisory_ids'])): e for e in entries})}
     if not entries:
         raise ValueError('No representable CVE ranges returned: refusing to replace catalog')
     return updated, stats
 
+
+def _diff(previous: dict, current: dict) -> dict:
+    """What this refresh changed versus the previous catalog, as "driver:CVE" labels."""
+    label = lambda k: f'{k[0]}:{k[1]}'
+    changed = sorted(label(k) for k in current.keys() & previous.keys()
+                     if (previous[k].get('affected'), previous[k].get('versions'))
+                     != (current[k].get('affected'), current[k].get('versions')))
+    return {'added': sorted(label(k) for k in current.keys() - previous.keys()), 'changed_ranges': changed,
+            'removed': sorted(label(k) for k in previous.keys() - current.keys())}
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -312,7 +311,7 @@ def main() -> None:
     finally:
         if os.path.exists(name):
             os.unlink(name)
-    print(f'Updated {path} (backup: {backup}). Review unapproved entries before using them in reports.')
+    print(f'Updated {path} (backup: {backup}).')
 
 
 if __name__ == '__main__':

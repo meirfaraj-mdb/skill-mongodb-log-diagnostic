@@ -12,6 +12,7 @@ for _name in ("offline_cve",):
 _oc = sys.modules["agent.offline_cve"]
 _oc.check = lambda payload: {"matches": []}
 _oc.load_catalog = lambda: {}
+_oc.check_server = lambda p, **k: {"matches": [], "match_count": 0, "status": "no_match_in_snapshot"}
 
 from agent.common import Layout  # noqa: E402
 from agent import report_stage  # noqa: E402

@@ -474,8 +474,8 @@ def _collect_measurements(config, host, base, source, start, end, basis="request
 
     Atlas accepts at most 10 repeated ``m`` values per request and rejects the whole request
     when any value is invalid, so names are validated against the documented list and sent in
-    batches.  A rejected batch (HTTP 400) is retried one metric at a time so one metric that is
-    unavailable on this process/tier does not discard the others.
+    batches.  A rejected batch (HTTP 400, or 404 INVALID_METRIC_NAME) is retried one metric at a
+    time so one metric that is unavailable on this process/tier does not discard the others.
     """
     from urllib.error import HTTPError
     from agent.metrics_catalog import plan_measurement_requests
@@ -509,7 +509,7 @@ def _collect_measurements(config, host, base, source, start, end, basis="request
             pages.extend(got)
             truncated = truncated or cut
         except HTTPError as exc:
-            if exc.code != 400 or len(batch) <= 1:
+            if exc.code not in (400, 404) or len(batch) <= 1:
                 errors.append({"metrics": batch, "status": exc.code, "error_type": type(exc).__name__})
                 continue
             for name in batch:
@@ -527,7 +527,7 @@ def _collect_measurements(config, host, base, source, start, end, basis="request
     if granularity_note:
         window_meta["requested_granularity"] = requested_granularity
         window_meta["granularity_note"] = granularity_note
-    disks, disk_errors = ([], [])
+    disks, disk_errors, disk_names = [], [], []
     if source == "atlas_api":
         from agent.resource_investigation import DISK_METRICS
         disk_names = list(dict.fromkeys(plan.get("disk", []) + (DISK_METRICS if investigate else [])))
@@ -535,7 +535,9 @@ def _collect_measurements(config, host, base, source, start, end, basis="request
             disks, disk_errors = _collect_disk_measurements(config, base, window, source, disk_names)
     return _envelope(source + "_metrics", host, basis, pages, truncated=truncated,
                      window=window_meta, disk_measurements=disks, disk_errors=disk_errors,
-                     measurement_plan={k: plan[k] for k in ("requested", "unsupported", "aliases")},
+                     # ``disk`` lets a rerun check the stored file covers the same disk measurements.
+                     measurement_plan={**{k: plan[k] for k in ("requested", "unsupported", "aliases")},
+                                       "disk": disk_names},
                      errors=errors,
                      limitations=["API support, permissions and retention depend on deployment version/tier; unsupported responses are reported, not replaced with fabricated data."])
 
@@ -551,11 +553,11 @@ def _collect_disk_measurements(config, base, window, source, names_wanted):
     ``GET .../processes/{processId}/disks`` lists the partitions, then
     ``GET .../disks/{partitionName}/measurements`` is called with the same window/granularity.
     Documented ``m`` values go in batches of at most 10. ``MAX_DISK_QUEUE_DEPTH`` (Atlas UI
-    "Max Disk Queue Depth", not in the documented ``m`` list) is requested on its own; if Atlas
-    rejects it, the partition is requested once without ``m`` (all measurements) and only the
-    MAX_* queue series is kept.  Failures are recorded, never raised: disk data is optional.
+    "Max Disk Queue Depth") has no documented ``m`` value and Atlas answers 404 for it, so it is
+    never sent as ``m``: the partition is requested once without ``m`` (all measurements) and the
+    series is kept by name.  If Atlas does not return it, the error lists the names it returned.
+    Failures are recorded, never raised: disk data is optional.
     """
-    from urllib.error import HTTPError
     from agent.metrics_catalog import ATLAS_DISK_MEASUREMENTS, MAX_M_PER_REQUEST
     out, errors = [], []
     try:
@@ -585,32 +587,24 @@ def _collect_disk_measurements(config, base, window, source, names_wanted):
             except Exception as exc:
                 failed.append({"step": "disk_measurements", "partitionName": name, "metrics": batch,
                                "error_type": type(exc).__name__, "status": getattr(exc, "code", None)})
-        for metric in extra:
+        if extra:  # undocumented names: no m -> every measurement of the partition, keep these by name
             try:
-                got.extend(fetch(prefix, [("m", metric)]))
-                continue
-            except HTTPError as exc:
-                if exc.code != 400:
-                    failed.append({"step": "disk_measurements", "partitionName": name, "metrics": [metric],
-                                   "error_type": type(exc).__name__, "status": exc.code})
-                    continue
+                pages = [pg for pg in fetch(prefix, []) if isinstance(pg, dict)]
             except Exception as exc:
-                failed.append({"step": "disk_measurements", "partitionName": name, "metrics": [metric],
+                pages = None
+                failed.append({"step": "disk_measurements", "partitionName": name, "metrics": extra,
                                "error_type": type(exc).__name__, "status": getattr(exc, "code", None)})
-                continue
-            try:  # fallback: no m -> every measurement of the partition, keep only this one
-                pages = fetch(prefix, [])
+            returned = sorted({m.get("name") for pg in pages or [] for m in pg.get("measurements", [])
+                               if isinstance(m, dict) and m.get("name")})
+            for metric in extra if pages is not None else []:
                 kept = [{**pg, "measurements": [m for m in pg.get("measurements", [])
                                                 if isinstance(m, dict) and m.get("name") == metric]}
-                        for pg in pages if isinstance(pg, dict)]
+                        for pg in pages]
                 if any(pg["measurements"] for pg in kept):
                     got.extend(kept)
                 else:
                     failed.append({"step": "disk_measurements", "partitionName": name, "metrics": [metric],
-                                   "error_type": "NotReturned", "status": None})
-            except Exception as exc:
-                failed.append({"step": "disk_measurements", "partitionName": name, "metrics": [metric],
-                               "error_type": type(exc).__name__, "status": getattr(exc, "code", None)})
+                                   "error_type": "NotReturned", "status": None, "returned": returned})
         if got:
             out.append({"partitionName": name, "data": got})
         errors.extend(failed)

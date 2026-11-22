@@ -52,6 +52,8 @@ _ENV_FIELDS = {
     "vertex_model": "VERTEX_MODEL", "vertex_location": "VERTEX_LOCATION",
     "vertex_project": "VERTEX_PROJECT", "storage_provider": "STORAGE_PROVIDER",
     "aws_region": "AWS_REGION", "gcp_project": "GCP_PROJECT",
+    "anthropic_base_url": "ANTHROPIC_BASE_URL",
+    "anthropic_stream": "ANTHROPIC_STREAM",
 }
 _ENV_FIELDS.update({
     "observability_enabled": "OBSERVABILITY_ENABLED", "deployment_type": "DEPLOYMENT_TYPE",
@@ -76,7 +78,8 @@ _ENV_FIELDS.update({
     "trend_increase_pct": "TREND_INCREASE_PCT", "trend_min_abs_increase": "TREND_MIN_ABS_INCREASE",
     "trend_ratio_threshold": "TREND_RATIO_THRESHOLD",
     "query_stats_skip_existing": "QUERY_STATS_SKIP_EXISTING",
-    "offline_cve_include_unreviewed": "OFFLINE_CVE_INCLUDE_UNREVIEWED",
+    "metrics_skip_existing": "METRICS_SKIP_EXISTING",
+    "mongodb_server_version": "MONGODB_SERVER_VERSION",
     "query_shape_split_to_nodes": "QUERY_SHAPE_SPLIT_TO_NODES",
     "cluster_summary_source": "CLUSTER_SUMMARY_SOURCE",
 })
@@ -97,11 +100,11 @@ _ENV_FIELDS.update({
     "slack_mentions": "SLACK_MENTIONS", "slack_repeat_after_days": "SLACK_REPEAT_AFTER_DAYS",
     "slack_max_findings": "SLACK_MAX_FINDINGS",
 })
-_BOOL_FIELDS = {"cluster_summary", "offline_cve_include_unreviewed", "observability_enabled", "index_stats_enabled", "profiler_enabled",
+_BOOL_FIELDS = {"cluster_summary", "observability_enabled", "index_stats_enabled", "profiler_enabled",
                 "metrics_graphs_enabled", "resource_investigation_enabled", "advisor_appendix_enabled",
                 "concurrency_findings_enabled", "concurrency_graphs_enabled",
-                "query_stats_skip_existing", "query_shape_split_to_nodes", "notify_after_report",
-                "jira_comment_on_existing"}
+                "query_stats_skip_existing", "metrics_skip_existing", "query_shape_split_to_nodes", "notify_after_report",
+                "jira_comment_on_existing", "anthropic_stream"}
 _JSON_FIELDS = {"observability_sources": dict, "atlas_process_ids": dict, "ops_manager_host_ids": dict,
                 "query_plan_requests": list, "metrics_graph_groups": list, "metrics_graph_config": dict,
                 "resource_thresholds": dict, "concurrency_thresholds": dict, "notify_env_overrides": dict, "jira_priority_map": dict,

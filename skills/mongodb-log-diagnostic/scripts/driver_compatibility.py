@@ -45,6 +45,15 @@ def _version_key(value: Any) -> tuple[int, int] | None:
     return int(major), int(minor)
 
 
+FULL_VERSION_RE = re.compile(r"(?<![\d.])(\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.]+)?)(?![\d.])")
+
+
+def _full_version(value: Any) -> str | None:
+    """Server build version as logged ("8.0.4", "7.0.12-rc1"); None when absent or malformed."""
+    match = FULL_VERSION_RE.search(_text(value) or "")
+    return match.group(1) if match else None
+
+
 def _canonical_driver(value: Any) -> str | None:
     name = _text(value)
     if not name:
@@ -183,6 +192,10 @@ class DriverCompatibilityAccumulator:
 
     def __init__(self) -> None:
         self.mongodb_version: str | None = None
+        # Full server build version ("8.0.4", "7.0.12-ent") for the offline MongoDB server CVE check;
+        # mongodb_version stays major.minor for the driver compatibility matrix.
+        self.mongodb_full_version: str | None = None
+        self.mongodb_version_source: str | None = None
         self.observations: dict[tuple[str, str | None], dict[str, Any]] = {}
         self.excluded_internal = 0
         self.observed_application = 0
@@ -205,6 +218,8 @@ class DriverCompatibilityAccumulator:
                 if isinstance(build, dict):
                     self.mongodb_version = _major_minor(build.get("version"))
                     if self.mongodb_version:
+                        self.mongodb_full_version = _full_version(build.get("version"))
+                        self.mongodb_version_source = "log buildInfo"
                         break
         raw_records = _driver_records_raw(obj, mappings)
         if not raw_records:
@@ -288,6 +303,7 @@ class DriverCompatibilityAccumulator:
         return {
             "status": "found" if grouped else ("unknown_server_version" if not self.mongodb_version else "none_detected"),
             "mongodb_version": self.mongodb_version,
+            "mongodb_full_version": self.mongodb_full_version,
             "incompatible_drivers": list(grouped.values()),
             "count": self.driver_log_count,
             "driver_log_count": self.driver_log_count,
@@ -311,6 +327,16 @@ class DriverCompatibilityAccumulator:
             "excluded_internal_connections": self.excluded_internal,
             "compatibility_manifest_versions": sorted(DRIVER_MATRIX),
         }
+
+
+def server_info(accumulator: "DriverCompatibilityAccumulator") -> dict[str, Any]:
+    """Top-level ``mongodbServer`` block: the server version seen in the log (offline server CVE check)."""
+    full = accumulator.mongodb_full_version
+    return {"status": "found" if full else ("major_minor_only" if accumulator.mongodb_version else "unknown"),
+            "version": full, "major_minor": accumulator.mongodb_version,
+            "source": accumulator.mongodb_version_source,
+            "note": None if full else "No buildInfo record with a server version in this log (it is logged at "
+                                      "process start-up); the report stage can fall back to Atlas process metadata."}
 
 
 def extract_driver_compatibility(events: Iterable[dict[str, Any]]) -> dict[str, Any]:

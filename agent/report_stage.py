@@ -37,7 +37,7 @@ def _read_skill_text(rel: str) -> str:
 def build_system_prompt() -> str:
     return "\n\n".join([
         "CVE and application-attribution safety rules OVERRIDE conflicting text in the base skill: "
-        "The offline_driver_cves document is a limited reviewed snapshot, not a web lookup. A matching "
+        "The offline_driver_cves and offline_mongodb_server_cves documents are limited offline snapshots, not a web lookup. A matching "
         "customer-driver/version is a review candidate, never proof of exploitation or vulnerable use. "
         "Only name an application when the supplied evidence explicitly establishes customer ownership; "
         "an observed appName alone is not proof of ownership. Omit unverified app names, Atlas-managed "
@@ -45,7 +45,7 @@ def build_system_prompt() -> str:
         "TLS errors without verified customer attribution, state that the source is not identified; do not "
         "speculate about internal or customer ownership. "
         "Never fabricate CVEs, upgrades, application impact, or universal server-driver compatibility. "
-        "The reviewed offline overlay has precedence over base analysis-prompt.md.",
+        "The offline overlay has precedence over base analysis-prompt.md.",
         "Customer-facing exclusion rule: do not include any discussion of internal Atlas components, "
         "services, agents, maintenance/platform operations, internal driver/CVE findings, or internal "
         "system namespaces. Do not name them, describe their behavior, say they are affected, or mention "
@@ -66,13 +66,22 @@ def build_system_prompt() -> str:
         "Adapter note: the analysis prompt refers to `/home/user/extraction.json`; extraction files are "
         "supplied inline in labelled <document> tags. `current` is extractionOccurence.json; `n-1` and "
         "`n-8` are extractionshort.json baselines. Use exact numbers from `precomputed_diff`. "
-        "You have no web access. Use only reviewed offline_driver_cves matches as version-range review "
-        "candidates with unverified application exposure; include catalog refreshed_at. All CVE "
-        "information goes only inside the driver compatibility section (section 10); never add a separate "
-        "top-level 'Driver CVE Status' section. If status is no_match_in_snapshot say so in one line inside "
-        "that section without claiming safety. A match with review_status "
-        "unreviewed_candidate comes from an automated OSV import nobody has vetted: label it "
-        "'unreviewed candidate' and never present it as confirmed. Never invent CVEs. Output only Markdown.",
+        "You have no web access. MongoDB server CVEs: use only offline_mongodb_server_cves matches, in the "
+        "section titled 'MongoDB server version and CVE review' placed immediately before the driver "
+        "compatibility section; give the observed server version and its source, the catalog refreshed_at, "
+        "each match (CVE, severity, summary, fixed_in, platform_note) and the highest fix release among the "
+        "matches as a patch target to confirm. Report every match. If status is "
+        "server_version_unknown/incomplete, say the server version was not available and do not list CVEs. "
+        "Write the 'No match in the offline MongoDB server CVE snapshot' line ONLY when status is exactly "
+        "no_match_in_snapshot and matches is empty. On Atlas, server patching follows the maintenance window: recommend "
+        "confirming the version and scheduling maintenance, not a manual binary upgrade. "
+        "Driver CVEs: report every offline_driver_cves match as a "
+        "version-range review candidate with unverified application exposure; include catalog refreshed_at. "
+        "All driver CVE information goes only inside the driver compatibility section; never add a separate "
+        "top-level 'Driver CVE Status' section. Use the status exactly: no_match_in_snapshot -> one 'No match "
+        "in the offline CVE snapshot refreshed <date>' line without claiming safety; not_covered_by_snapshot -> say the observed drivers are not covered by "
+        "the snapshot (list drivers_not_covered_by_snapshot), never 'no match'. Also list "
+        "drivers_not_covered_by_snapshot as a coverage gap whenever it is non-empty. Never invent CVEs. Output only Markdown.",
         "=== references/analysis-prompt.md ===\n" + _read_skill_text("references/analysis-prompt.md"),
         "=== references/extracted-signal-reference.md ===\n" + _read_skill_text("references/extracted-signal-reference.md"),
         "=== references/analysis-prompt.offline-cve-overlay.md ===\n" + _read_skill_text("references/analysis-prompt.offline-cve-overlay.md"),
@@ -141,11 +150,11 @@ def _validate_offline_cves(markdown: str, allowed: set[str]) -> None:
     mentioned = {c.upper() for c in re.findall(r"\bCVE-\d{4}-\d{4,}\b", markdown, re.I)}
     extra = mentioned - {c.upper() for c in allowed}
     if extra:
-        raise ValueError("Report contains CVE IDs not in reviewed offline matches: " + ", ".join(sorted(extra)))
+        raise ValueError("Report contains CVE IDs not in the offline matches: " + ", ".join(sorted(extra)))
 
 
 def _redact_unvetted_cves(markdown: str, allowed: set[str]) -> tuple[str, list[str]]:
-    """Replace CVE IDs that are not in the reviewed offline matches instead of discarding the report."""
+    """Replace CVE IDs that are not in the offline matches instead of discarding the report."""
     allowed_up = {c.upper() for c in allowed}
     removed: list[str] = []
 
@@ -287,7 +296,11 @@ CONCURRENCY_INSTRUCTIONS = (
     "window and say that a larger tier or an index will not remove it. Never try to reveal hashed target "
     "values. List `coverage.heavy_groups_without_samples_in_windows` as a data limitation. When status is "
     "not_extracted, say in one line that write conflicts were not extracted (older parser), never that "
-    "there were none."
+    "there were none. When `conflict_documents` / `conflict_queries` are present (only when writeConflicts > 0 "
+    "were logged), add a 'Conflicting documents' table: namespace, filter fields, hashed target id, query hash "
+    "and operation, write conflicts, records with conflicts, max conflicts per record, and for each query the "
+    "number of distinct conflicting documents. When they are absent, write no such table: a high write count "
+    "or parallel writers without conflicts is not contention."
 )
 CONTENTION_SECTION_RE = re.compile(r"(?im)^#{1,3}\s*Write contention\b")
 
@@ -377,9 +390,15 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     logger.info("Report input limit node=%s max_chars=%d (%s)", host_dir, max_chars,
                 "configured" if max_chars == configured_max else
                 "default with resource investigation" if analysis is not None else "default")
-    # Opt-in only; when unset, offline_cve falls back to MONGODB_LOG_DIAG_OFFLINE_CVE_INCLUDE_UNREVIEWED.
-    cve_options = {"include_unreviewed": True} if config.get("offline_cve_include_unreviewed") else {}
-    offline_cves = offline_cve.check(current, **cve_options)
+    offline_cves = offline_cve.check(current)
+    # Server-version CVEs (offline NVD snapshot); version from the log buildInfo, else config fallback.
+    offline_server_cves = offline_cve.check_server(current, fallback_version=config.get("mongodb_server_version"))
+    logger.info("Offline MongoDB server CVE check node=%s version=%s status=%s matches=%d", host_dir,
+                (offline_server_cves.get("observed_server") or {}).get("version"), offline_server_cves.get("status"),
+                offline_server_cves.get("match_count", 0))
+    logger.info("Offline driver CVE check node=%s status=%s matches=%d not_covered=%d", host_dir,
+                offline_cves.get("status"), offline_cves.get("match_count", 0),
+                len(offline_cves.get("drivers_not_covered_by_snapshot") or []))
     baselines, diffs = [], []
     for label, offset, desc in BASELINES:
         bdate = shift(log_date, offset)
@@ -405,6 +424,7 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
                              json.dumps(payload, separators=(",", ":"))))
         if diffs:
             docs.append(_doc("precomputed_diff", {}, json.dumps(diff_doc, separators=(",", ":"))))
+        docs.append(_doc("offline_mongodb_server_cves", {}, json.dumps(offline_server_cves, separators=(",", ":"))))
         docs.append(_doc("offline_driver_cves", {}, json.dumps(offline_cves, separators=(",", ":"))))
         if analysis is not None:
             docs.append(_doc("resource_investigation", {"node": host_dir},
@@ -526,7 +546,10 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     report_md, removed_internal = _strip_internal_content(report_md)
     if removed_internal:
         logger.info("Removed %d internal-only content block(s) from node report", removed_internal)
-    from .report_cve_section import relocate_standalone_cve_status
+    from .report_cve_section import enforce_cve_status, relocate_standalone_cve_status
+    report_md, cve_fixes = enforce_cve_status(report_md, offline_server_cves, offline_cves)
+    if cve_fixes:
+        logger.warning("Corrected CVE status in the report node=%s: %s", host_dir, "; ".join(cve_fixes))
     report_md, relocated_cve = relocate_standalone_cve_status(report_md)
     if relocated_cve:
         logger.info("Removed %d standalone driver-CVE status block(s); CVE details stay in the driver "
@@ -537,9 +560,10 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     report_md = _add_appendices(report_md, store, layout, log_date, host_dir, metrics_payload, config)
     # Optional write-contention graph (base64 PNG) inside its section, also after the internal filter.
     report_md = _add_contention_graph(report_md, current, findings, host_dir, config)
-    report_md, removed_cves = _redact_unvetted_cves(report_md, {m["cve"] for m in offline_cves["matches"]})
+    report_md, removed_cves = _redact_unvetted_cves(report_md, {m["cve"] for m in offline_cves["matches"]}
+                                                    | {m["cve"] for m in offline_server_cves.get("matches") or []})
     if removed_cves:
-        logger.warning("Removed %d CVE ID(s) not in the reviewed offline matches node=%s: %s",
+        logger.warning("Removed %d CVE ID(s) not in the offline matches node=%s: %s",
                        len(removed_cves), host_dir, ", ".join(removed_cves))
     uploads = {"report": store.put_text(layout.report(log_date, host_dir, log_name, "report.md"),
                                         report_md, "text/markdown; charset=utf-8")}
@@ -556,6 +580,7 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
                                          json.dumps(diff_doc, indent=2), "application/json")
     return {"node": host_dir, "log_name": log_name, "current_file": current_file, "max_input_chars": max_chars,
             "baselines": [b[0] for b in baselines], "offline_driver_cves": offline_cves,
+            "offline_mongodb_server_cves": offline_server_cves,
             "resource_investigation": analysis["triggered"] if analysis is not None else None,
             "contention_detected": bool(findings and findings.get("contention_detected")),
             "uploads": uploads, "report_md": report_md}
@@ -811,9 +836,25 @@ def _without_embedded_images(markdown: str) -> str:
     return _DATA_URI_IMAGE_RE.sub(lambda m: f"[embedded image omitted: {m.group(1)[:120]}]", markdown)
 
 
-def _validate_customer_summary(text: str) -> None:
-    if re.search(r"\bCVE-\d{4}-\d{4,}\b", text, re.I):
-        raise ValueError("Cluster summary contains a CVE without customer-use verification")
+_CVE_ID_RE = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.I)
+
+
+def _report_cves(reports) -> set[str]:
+    """CVE IDs present in the node reports. Those reports were already restricted to the offline
+    server/driver matches (_redact_unvetted_cves), so they are the only CVEs a cluster summary may cite."""
+    return {c.upper() for r in reports for c in _CVE_ID_RE.findall(r.get("report_md") or "")}
+
+
+def _validate_customer_summary(text: str, allowed: set[str] | None = None) -> str:
+    """Keep CVE IDs that come from the node reports; replace any other CVE ID instead of failing.
+
+    A CVE that no node report contains was invented or taken from outside the offline matches.
+    """
+    summary, removed = _redact_unvetted_cves(text, allowed or set())
+    if removed:
+        logger.warning("Removed %d CVE ID(s) from the cluster summary that no node report contains: %s",
+                       len(removed), ", ".join(removed))
+    return summary
 
 
 CLUSTER_PROMPT = (
@@ -835,7 +876,12 @@ CLUSTER_PROMPT = (
     "index is missing or naming a key order. Change streams, $natural, oplog, admin, and "
     "__mdb_internal_search are not evidence of a missing customer index. If shapes/indexStats are "
     "inconclusive, say 'No index gap verified from available evidence' and say what to collect. "
-    "Use only supplied node reports and bounded query evidence; do not invent metrics or CVEs. "
+"Use only supplied node reports and bounded query evidence; do not invent metrics or CVEs. "
+    "CVEs: cite only CVE IDs that appear in the node reports, with the node report's wording. MongoDB "
+    "server CVE matches go in one consolidated item: CVE, severity, the server version(s) and nodes "
+    "matched, and the patch target to confirm (on Atlas: confirm the version and schedule the maintenance "
+    "window); call them version-range matches, never proof of exploitation. Driver CVE matches: only as "
+    "the node report states them, with application attribution only when the node report verifies it. "
     "Do not instruct customers to change vendor-managed platform components. State n-1/n-8 trends only if "
     "present. Do not fill a quota of actions. Never expose credentials, IPs or query literals. "
     "Query-shape evidence with status 'empty' is not proof of a healthy workload: state its reason/explanation "
@@ -896,7 +942,8 @@ def _cluster_summary_source(config: dict) -> str:
     return value
 
 
-def _finish_cluster_summary(llm, system: str, user: str, trend_md: str | None = None) -> str:
+def _finish_cluster_summary(llm, system: str, user: str, trend_md: str | None = None,
+                            allowed_cves: set[str] | None = None) -> str:
     """Shared generation, executive-summary retry and customer-safety validation."""
     from . import trend_alerts
     summary = llm.generate(system, user)
@@ -911,8 +958,7 @@ def _finish_cluster_summary(llm, system: str, user: str, trend_md: str | None = 
     summary, removed_internal = _strip_internal_content(summary)
     if removed_internal:
         logger.info("Removed %d internal-only content block(s) from cluster summary", removed_internal)
-    _validate_customer_summary(summary)
-    return summary
+    return _validate_customer_summary(summary, allowed_cves)
 
 
 def cluster_summary_from_node_reports(store, layout, llm, config: dict, log_date: str, results) -> str:
@@ -926,7 +972,8 @@ def cluster_summary_from_node_reports(store, layout, llm, config: dict, log_date
     user = (f"Cluster `{config['cluster_name']}`, day {log_date}. Inputs: {len(results)} node reports "
             "(no extracts).\n\n" + body)
     summary = _finish_cluster_summary(llm, CLUSTER_PROMPT + " " + NODE_REPORTS_ONLY_INSTRUCTIONS
-                                      + _notification_instructions(config), user)
+                                      + _notification_instructions(config), user,
+                                      allowed_cves=_report_cves(results))
     header = (f"<!-- cluster summary variant: node_reports (built only from {len(results)} node report.md "
               "files; compare with cluster-summary.md, which also uses extract-based trend alerts and "
               "query-shape evidence) -->\n")
@@ -1064,7 +1111,7 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
             user += "\n\n" + _doc("trend_alerts", {"date": log_date, "baselines": "n-1,n-8"},
                                   json.dumps(trend_alerts.model_view(alerts), default=str))
         user += "\n\n" + body
-        summary = _finish_cluster_summary(llm, system, user, trend_md)
+        summary = _finish_cluster_summary(llm, system, user, trend_md, allowed_cves=_report_cves(results))
         cluster_uri = store.put_text(layout.cluster_report(log_date, "cluster-summary.md"),
                                      summary, "text/markdown; charset=utf-8")
     if want_summary and source in ("node_reports", "both"):

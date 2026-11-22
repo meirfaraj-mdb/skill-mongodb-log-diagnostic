@@ -173,6 +173,13 @@ MEASUREMENT_ALIASES: dict[str, str] = {
     "FTS_DISK_USAGE": "FTS_DISK_UTILIZATION",
 }
 
+# Template name -> name returned by Ops Manager / Cloud Manager when no ``m`` is sent (lookup only,
+# never requested): their measurement types spell the system network series SYSTEM_NETWORK_BYTES_*.
+RESPONSE_ALIASES: dict[str, str] = {
+    "SYSTEM_NETWORK_IN": "SYSTEM_NETWORK_BYTES_IN",
+    "SYSTEM_NETWORK_OUT": "SYSTEM_NETWORK_BYTES_OUT",
+}
+
 ATLAS_PROCESS_MEASUREMENTS: frozenset[str] = frozenset({
     'ASSERT_MSG', 'ASSERT_REGULAR', 'ASSERT_USER', 'ASSERT_WARNING',
     'AVG_MAJORITY_WRITE_CONCERN_WRITE_TIME', 'BACKGROUND_FLUSH_AVG', 'CACHE_BYTES_READ_INTO',
@@ -250,7 +257,8 @@ ATLAS_DISK_MEASUREMENTS: frozenset[str] = frozenset({
     'DISK_PARTITION_THROUGHPUT_WRITE', 'DISK_QUEUE_DEPTH',
 })
 # Disk measurements shown by the Atlas UI ("Max Disk Queue Depth") but absent from the documented
-# ``m`` list: requested on their own, with a no-``m`` fallback, so they can never invalidate a batch.
+# ``m`` list. Atlas answers any undocumented ``m`` with 404 INVALID_METRIC_NAME, so these are never
+# sent as ``m``: they are picked by name from the partition response requested without ``m``.
 ATLAS_DISK_UNDOCUMENTED: frozenset[str] = frozenset({'MAX_DISK_QUEUE_DEPTH'})
 
 
