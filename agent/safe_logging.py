@@ -51,6 +51,7 @@ def log_config(config):
         from .observability_contract import ARTIFACTS
         summary['observability_sources'] = {k: v for k, v in sources.items() if k in ARTIFACTS and isinstance(v, str) and v in _SOURCES}
     summary['input_bucket'] = safe_locator(config.get('input_bucket') or config.get('bucket', ''))
+    summary['results_prefix'] = safe_locator(config.get('results_prefix') or config.get('prefix', ''))
     summary['adk_model'] = safe_locator(__import__('os').environ.get('MONGODB_LOG_DIAG_ADK_MODEL', ''))
     logger.info('Configuration (allowlisted; credentials omitted): %s', json.dumps(summary, sort_keys=True))
 

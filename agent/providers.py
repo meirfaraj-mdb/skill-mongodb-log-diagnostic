@@ -45,6 +45,7 @@ _ENV_FIELDS = {
     "timezone": "TIMEZONE", "api_version": "API_VERSION", "log_names": "LOG_NAMES",
     "host_selector": "HOST_SELECTOR", "http_timeout_seconds": "HTTP_TIMEOUT_SECONDS",
     "max_retries": "MAX_RETRIES", "bucket": "BUCKET", "input_bucket": "INPUT_BUCKET", "prefix": "PREFIX",
+    "results_prefix": "RESULTS_PREFIX",
     "slow_ms": "SLOW_MS", "expected_node_count": "EXPECTED_NODE_COUNT",
     "report_max_tokens": "REPORT_MAX_TOKENS", "report_max_input_chars": "REPORT_MAX_INPUT_CHARS",
     "cluster_summary": "CLUSTER_SUMMARY", "llm_provider": "LLM_PROVIDER",
@@ -214,6 +215,12 @@ def normalize_config(raw: dict, cloud: str) -> dict:
         raise ValueError("input_bucket must be a bucket name; use prefix for object paths")
     cfg["input_bucket"] = input_bucket
     cfg["prefix"] = (cfg.get("prefix") or "mongodb-atlas-logs").strip("/")
+    # Extracts/reports location in the results bucket; defaults to the input prefix (unchanged layout).
+    results_prefix = str(cfg.get("results_prefix") or "").strip().strip("/")
+    if results_prefix and (".." in results_prefix.split("/") or "//" in results_prefix
+                           or "://" in results_prefix or any(c.isspace() for c in results_prefix)):
+        raise ValueError("results_prefix must be a relative object prefix (no scheme, '..', '//' or spaces)")
+    cfg["results_prefix"] = results_prefix or cfg["prefix"]
     cfg["llm_provider"] = cfg.get("llm_provider") or defaults["llm_provider"]
     cfg["input_mode"] = str(cfg.get("input_mode", "atlas_api")).strip().lower()
     if cfg["input_mode"] not in {"atlas_api", "existing_bucket"}:
@@ -324,10 +331,13 @@ def get_store(config: dict):
     from .safe_logging import with_write_logging
     output = _get_single_store(config)
     input_bucket = config.get("input_bucket") or config["bucket"]
-    if input_bucket == config["bucket"]:
+    prefix = config["prefix"].strip("/")
+    results_prefix = (config.get("results_prefix") or prefix).strip("/")
+    if input_bucket == config["bucket"] and results_prefix == prefix:
         return with_write_logging(output)  # Preserve routing and return values.
-    inputs = _get_single_store({**config, "bucket": input_bucket})
-    return with_write_logging(SplitBucketStore(inputs, output, config["prefix"]))
+    inputs = output if input_bucket == config["bucket"] else _get_single_store({**config, "bucket": input_bucket})
+    logger.info("Storage routing: inputs=%s/%s results=%s/%s", input_bucket, prefix, config["bucket"], results_prefix)
+    return with_write_logging(SplitBucketStore(inputs, output, prefix, results_prefix))
 
 
 def get_llm(config: dict):
