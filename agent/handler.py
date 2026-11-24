@@ -27,8 +27,10 @@ def _all_clusters_mode(config: dict) -> bool:
 def cluster_config(config: dict, cluster_name: str) -> dict:
     """Config for one cluster of an all-clusters run: <prefix>/<cluster>/<day>/..."""
     folder = skills.atlas_logs().safe_filename(cluster_name)
-    return {**config, "cluster_name": cluster_name,
-            "prefix": f"{config['prefix'].strip('/')}/{folder}"}
+    prefix = config["prefix"].strip("/")
+    results_prefix = (config.get("results_prefix") or prefix).strip("/")
+    return {**config, "cluster_name": cluster_name, "prefix": f"{prefix}/{folder}",
+            "results_prefix": f"{results_prefix}/{folder}"}
 
 
 def run_all_clusters(event: dict, config: dict) -> dict:

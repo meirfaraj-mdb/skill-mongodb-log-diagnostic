@@ -30,6 +30,8 @@ _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 _HEADING = re.compile(r"^\s*#{1,6}\s+(.*)$")
 _ACTION_HEADING = re.compile(r"finding|issue|action|execution|next|priorit|executive|summary|watch|risk", re.I)
 _MAX_SLOW_DECISIONS = 60
+_PRIORITY_CELL = re.compile(r"^\s*\**\s*P([0-3])\s*\**\s*$")
+_RANK = {p: i for i, p in enumerate(PRIORITIES)}  # P0 = most severe
 
 
 # --------------------------------------------------------------------------- loading
@@ -357,20 +359,31 @@ def render_prompt(rules: dict) -> str:
 
 # --------------------------------------------------------------------------- enforcement / audit
 def merge_decisions(decision_docs: list[dict]) -> dict:
-    """Cluster view: an auth type is suppressed only when it is suppressed on every node that saw it."""
-    merged = {"rules_version": None, "slow_operations": [], "auth_failures": []}
+    """Cluster view: an auth type is suppressed only when it is suppressed on every node that saw it.
+
+    Rules are evaluated per node and per log day, so the cluster priority of an auth type is the most
+    severe node-level priority; the summed count is informative only and is never re-banded.
+    """
+    merged = {"rules_version": None, "slow_operations": [], "auth_failures": [], "hot_document_contention": []}
     by_type: dict[str, list[dict]] = {}
     for doc in decision_docs:
         if not doc:
             continue
         merged["rules_version"] = merged["rules_version"] or doc.get("rules_version")
         merged["slow_operations"] += doc.get("slow_operations", [])
+        merged["hot_document_contention"] += doc.get("hot_document_contention", [])
         for d in doc.get("auth_failures", []):
             by_type.setdefault(d["type"], []).append(d)
     for kind, items in by_type.items():
-        suppressed = all(d["placement"] == APPENDIX_ONLY for d in items)
-        merged["auth_failures"].append({**items[0], "placement": APPENDIX_ONLY if suppressed else ISSUES,
-                                        "count": sum(d["count"] for d in items)})
+        total = sum(d["count"] for d in items)
+        listed = [d for d in items if d["placement"] != APPENDIX_ONLY and d.get("priority") in _RANK]
+        if not listed:
+            merged["auth_failures"].append({**items[0], "placement": APPENDIX_ONLY, "priority": None,
+                                            "count": total})
+            continue
+        top = min(listed, key=lambda d: _RANK[d["priority"]])
+        merged["auth_failures"].append({**top, "placement": ISSUES, "count": total,
+                                        "node_counts": [d["count"] for d in items]})
     return merged
 
 
@@ -454,3 +467,70 @@ def audit(report_md: str, decisions: dict, rules: dict) -> list[str]:
             if d["priority"] not in found:
                 warnings.append(f"auth_failures: {d['label']} row has {sorted(found)}, expected {d['priority']}")
     return warnings
+
+
+# --------------------------------------------------------------------------- correction
+def _expected_priority(text: str, decisions: dict, rules: dict) -> str | None:
+    """Fixed priority for one report line, or None when no single decision applies to it."""
+    expected = set()
+    types = rules["rules"].get("auth_failures", {}).get("types", {})
+    for d in decisions.get("auth_failures", []):
+        if d["placement"] != ISSUES or d.get("priority") not in _RANK or d["type"] not in types:
+            continue
+        if re.search(types[d["type"]]["report_keywords"], text, re.I):
+            expected.add(d["priority"])
+    for d in decisions.get("slow_operations", []):
+        if (d["placement"] == ISSUES and d.get("priority") in _RANK and d.get("query_hash")
+                and str(d["query_hash"]) in text):
+            expected.add(d["priority"])
+    for d in decisions.get("hot_document_contention", []):
+        if d.get("priority") in _RANK and d.get("target_id") and str(d["target_id"]) in text:
+            expected.add(d["priority"])
+    # A line matched by decisions with different priorities is left as is; audit() reports it.
+    return expected.pop() if len(expected) == 1 else None
+
+
+def correct(report_md: str, decisions: dict, rules: dict) -> tuple[str, list[str]]:
+    """Rewrite the priority of findings whose priority a rule fixes.
+
+    The model does not always follow the rules in the prompt (e.g. 1,316 authentication failures
+    reported as P0 while the band says P2), and P0/P1 rows drive Jira/Slack notifications. Only
+    prioritized lines are touched: table rows (the Priority cell), headings and list items carrying a
+    P0-P3 token. Returns the corrected Markdown and one entry per change.
+    """
+    out, fixes = [], []
+    for line in report_md.splitlines():
+        stripped = line.lstrip()
+        is_row = stripped.startswith("|")
+        if not _P_TOKEN.search(line) or not (is_row or _HEADING.match(line) or _LIST_ITEM.match(line)):
+            out.append(line)
+            continue
+        want = _expected_priority(line, decisions, rules)
+        if not want:
+            out.append(line)
+            continue
+        if is_row:
+            cells = line.split("|")
+            for i, cell in enumerate(cells):
+                m = _PRIORITY_CELL.match(cell)
+                if m:
+                    if f"P{m.group(1)}" != want:
+                        fixes.append(f"P{m.group(1)} -> {want}: {stripped[:160]}")
+                        cells[i] = cell.replace(f"P{m.group(1)}", want, 1)
+                    break
+            out.append("|".join(cells))
+            continue
+        m = _P_TOKEN.search(line)
+        if f"P{m.group(1)}" != want:
+            fixes.append(f"P{m.group(1)} -> {want}: {stripped[:160]}")
+            line = line[:m.start()] + want + line[m.end():]
+        out.append(line)
+    text = "\n".join(out)
+    return (text + "\n" if report_md.endswith("\n") else text), fixes
+
+
+def apply(report_md: str, decisions: dict, rules: dict) -> tuple[str, dict]:
+    """Single post-processing entry point: enforce() -> correct() -> audit()."""
+    report_md, removed = enforce(report_md, decisions, rules)
+    report_md, fixes = correct(report_md, decisions, rules)
+    return report_md, {"removed": removed, "corrected": fixes, "warnings": audit(report_md, decisions, rules)}

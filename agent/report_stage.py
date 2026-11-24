@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime, timezone
 
-from . import diffing, offline_cve
+from . import diffing, offline_cve, priority_rules
 from .common import Layout, logger, shift
 from .skills import diagnostic_skill_dir
 
@@ -34,7 +34,8 @@ def _read_skill_text(rel: str) -> str:
     return (diagnostic_skill_dir() / rel).read_text(encoding="utf-8")
 
 
-def build_system_prompt() -> str:
+def build_system_prompt(rules: dict | None = None) -> str:
+    rules = rules or priority_rules.load_rules()
     return "\n\n".join([
         "CVE and application-attribution safety rules OVERRIDE conflicting text in the base skill: "
         "The offline_driver_cves and offline_mongodb_server_cves documents are limited offline snapshots, not a web lookup. A matching "
@@ -86,6 +87,8 @@ def build_system_prompt() -> str:
         "=== references/extracted-signal-reference.md ===\n" + _read_skill_text("references/extracted-signal-reference.md"),
         "=== references/analysis-prompt.offline-cve-overlay.md ===\n" + _read_skill_text("references/analysis-prompt.offline-cve-overlay.md"),
         *_optional_skill_texts("references/resource-investigation-rules.md"),
+        # Last block: overrides the generic "Prioritize P0, P1, and P2 findings" of analysis-prompt.md.
+        priority_rules.render_prompt(rules),
     ])
 
 
@@ -364,12 +367,13 @@ def _keep_windows(analysis, findings):
 
 
 def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name, max_chars,
-                config: dict | None = None) -> dict:
+                config: dict | None = None, rules: dict | None = None) -> dict:
     current, cur_key = _load_extract(store, layout, log_date, host_dir, log_name, "extractionOccurence.json")
     if current is None:
         raise FileNotFoundError(cur_key)
     current_file = "extractionOccurence.json"
     config = config or {}
+    rules = rules or priority_rules.load_rules(config)
     from . import resource_investigation as ri
     metrics_payload = _load_metrics(store, layout, log_date, host_dir)
     analysis = None
@@ -412,6 +416,12 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
                 "baselines_available": [d["label"] for d in diffs],
                 "baselines_missing": [l for l, _, _ in BASELINES if l not in {d["label"] for d in diffs}],
                 "comparisons": diffs}
+    # Deterministic priorities, evaluated on the FULL extract before any size reduction.
+    decisions = priority_rules.evaluate(current, rules, diffs, findings)
+    logger.info("Priority rules node=%s version=%s slow=%d auth=%s contention=%d", host_dir,
+                decisions.get("rules_version"), len(decisions["slow_operations"]),
+                [(a["type"], a["count"], a["priority"] or a["placement"]) for a in decisions["auth_failures"]],
+                len(decisions["hot_document_contention"]))
 
     raw_docs = {"enabled": True}
 
@@ -426,6 +436,8 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
             docs.append(_doc("precomputed_diff", {}, json.dumps(diff_doc, separators=(",", ":"))))
         docs.append(_doc("offline_mongodb_server_cves", {}, json.dumps(offline_server_cves, separators=(",", ":"))))
         docs.append(_doc("offline_driver_cves", {}, json.dumps(offline_cves, separators=(",", ":"))))
+        docs.append(_doc("priority_decisions", {"rules_version": decisions.get("rules_version")},
+                         json.dumps(decisions, separators=(",", ":"), default=str)))
         if analysis is not None:
             docs.append(_doc("resource_investigation", {"node": host_dir},
                              json.dumps(analysis, separators=(",", ":"), default=str)))
@@ -531,6 +543,13 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     logger.info("Report input node=%s chars=%d current_file=%s baselines=%s",
                 host_dir, len(user), current_file, [b[0] for b in baselines])
     report_md = llm.generate(system_prompt, user)
+    report_md, rule_result = priority_rules.apply(report_md, decisions, rules)
+    if rule_result["removed"]:
+        logger.info("Priority rules removed %d finding/action line(s) node=%s", rule_result["removed"], host_dir)
+    for fix in rule_result["corrected"]:
+        logger.warning("Priority rule corrected node=%s: %s", host_dir, fix)
+    for warning in rule_result["warnings"]:
+        logger.warning("Priority rule mismatch node=%s: %s", host_dir, warning)
     if analysis is not None and not ri.SECTION_RE.search(report_md):
         logger.warning("Model omitted the resource investigation section node=%s; adding deterministic fallback",
                        host_dir)
@@ -578,12 +597,18 @@ def report_node(store, layout, llm, system_prompt, log_date, host_dir, log_name,
     if diffs:
         uploads["diff"] = store.put_text(layout.report(log_date, host_dir, log_name, "diff.json"),
                                          json.dumps(diff_doc, indent=2), "application/json")
+    uploads["priority_decisions"] = store.put_text(
+        layout.report(log_date, host_dir, log_name, "priority-decisions.json"),
+        json.dumps({**decisions, "enforcement": rule_result}, indent=2, default=str), "application/json")
     return {"node": host_dir, "log_name": log_name, "current_file": current_file, "max_input_chars": max_chars,
             "baselines": [b[0] for b in baselines], "offline_driver_cves": offline_cves,
             "offline_mongodb_server_cves": offline_server_cves,
             "resource_investigation": analysis["triggered"] if analysis is not None else None,
             "contention_detected": bool(findings and findings.get("contention_detected")),
-            "uploads": uploads, "report_md": report_md}
+            "priority_rules_version": decisions.get("rules_version"),
+            "priority_rule_corrections": rule_result["corrected"],
+            "priority_rule_warnings": rule_result["warnings"],
+            "uploads": uploads, "report_md": report_md, "priority_decisions": decisions}
 
 
 # Only include aggregated shape metrics; never pass query filters or literal values to the model.
@@ -942,8 +967,21 @@ def _cluster_summary_source(config: dict) -> str:
     return value
 
 
+def _priority_context(results, rules: dict | None) -> tuple[dict | None, str, str]:
+    """Merged node decisions + the rules text and document for a cluster-summary prompt."""
+    if not rules:
+        return None, "", ""
+    merged = priority_rules.merge_decisions([r.get("priority_decisions") for r in results])
+    if not (merged["slow_operations"] or merged["auth_failures"] or merged["hot_document_contention"]):
+        return None, "", ""
+    return (merged, "\n\n" + priority_rules.render_prompt(rules),
+            "\n\n" + _doc("priority_decisions", {"scope": "cluster"},
+                          json.dumps(merged, separators=(",", ":"), default=str)))
+
+
 def _finish_cluster_summary(llm, system: str, user: str, trend_md: str | None = None,
-                            allowed_cves: set[str] | None = None) -> str:
+                            allowed_cves: set[str] | None = None, decisions: dict | None = None,
+                            rules: dict | None = None) -> str:
     """Shared generation, executive-summary retry and customer-safety validation."""
     from . import trend_alerts
     summary = llm.generate(system, user)
@@ -955,13 +993,21 @@ def _finish_cluster_summary(llm, system: str, user: str, trend_md: str | None = 
         raise ValueError("Cluster summary omitted its required executive summary")
     if trend_md:
         summary = trend_alerts.place_section(summary, trend_md)
+    if decisions and rules:
+        # The cluster summary feeds P0 -> Jira / P1 -> Slack: never trust the model's priority here.
+        summary, res = priority_rules.apply(summary, decisions, rules)
+        for fix in res["corrected"]:
+            logger.warning("Priority rule corrected cluster summary: %s", fix)
+        for warning in res["warnings"]:
+            logger.warning("Priority rule mismatch in cluster summary: %s", warning)
     summary, removed_internal = _strip_internal_content(summary)
     if removed_internal:
         logger.info("Removed %d internal-only content block(s) from cluster summary", removed_internal)
     return _validate_customer_summary(summary, allowed_cves)
 
 
-def cluster_summary_from_node_reports(store, layout, llm, config: dict, log_date: str, results) -> str:
+def cluster_summary_from_node_reports(store, layout, llm, config: dict, log_date: str, results,
+                                      rules: dict | None = None) -> str:
     """Alternative cluster summary whose only input is the stored node report.md files.
 
     Written next to cluster-summary.md so both versions can be compared; no extract, trend or
@@ -971,9 +1017,10 @@ def cluster_summary_from_node_reports(store, layout, llm, config: dict, log_date
                             _without_embedded_images(r["report_md"])) for r in results)
     user = (f"Cluster `{config['cluster_name']}`, day {log_date}. Inputs: {len(results)} node reports "
             "(no extracts).\n\n" + body)
+    merged, rules_text, decisions_doc = _priority_context(results, rules)
     summary = _finish_cluster_summary(llm, CLUSTER_PROMPT + " " + NODE_REPORTS_ONLY_INSTRUCTIONS
-                                      + _notification_instructions(config), user,
-                                      allowed_cves=_report_cves(results))
+                                      + _notification_instructions(config) + rules_text, user + decisions_doc,
+                                      allowed_cves=_report_cves(results), decisions=merged, rules=rules)
     header = (f"<!-- cluster summary variant: node_reports (built only from {len(results)} node report.md "
               "files; compare with cluster-summary.md, which also uses extract-based trend alerts and "
               "query-shape evidence) -->\n")
@@ -1054,6 +1101,7 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
                        "extractionOccurence.json: %s", len(nodes), log_date, expected,
                        hosts_without_extract(store, layout, log_date, nodes) or "none")
     results, failed = [], []
+    rules = priority_rules.load_rules(config)
     if summary_only:
         if len(nodes) < 2:
             raise RuntimeError("Cluster summary requires at least two node extracts")
@@ -1064,16 +1112,23 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
                                "; run --stage report first")
         for host, name in nodes:
             key = layout.report(log_date, host, name, "report.md")
+            decisions_key = layout.report(log_date, host, name, "priority-decisions.json")
+            decisions = None
+            if store.exists(decisions_key):
+                try:
+                    decisions = json.loads(store.get_text(decisions_key))
+                except (TypeError, ValueError):
+                    logger.warning("Unparsable %s; cluster priorities not enforced for this node", decisions_key)
             results.append({"node": host, "log_name": name, "report_md": store.get_text(key),
-                            "uploads": {"report": store.uri(key)}})
+                            "uploads": {"report": store.uri(key)}, "priority_decisions": decisions})
     else:
         # None -> per-node default: 60k chars, 90k when resource investigation runs for the node.
         max_chars = config.get("report_max_input_chars")
-        system_prompt = build_system_prompt()
+        system_prompt = build_system_prompt(rules)
         for host, name in nodes:
             try:
                 results.append(report_node(store, layout, llm, system_prompt, log_date,
-                                           host, name, max_chars, config=config))
+                                           host, name, max_chars, config=config, rules=rules))
             except Exception as error:
                 logger.exception("Report failed for %s/%s", host, name)
                 failed.append({"node": host, "log_name": name, "error": str(error)[:1000]})
@@ -1103,20 +1158,23 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
                                        json.dumps(alerts, indent=2, default=str), "application/json")
             logger.info("Trend alerts status=%s nodes_compared=%s items=%d uri=%s", alerts["status"],
                         alerts["nodes_compared"], sum(len(n.get("items", [])) for n in alerts["nodes"]), trend_uri)
-        system = CLUSTER_PROMPT + _notification_instructions(config)
+        merged, rules_text, decisions_doc = _priority_context(results, rules)
+        system = CLUSTER_PROMPT + _notification_instructions(config) + rules_text
         user = (f"Cluster `{config['cluster_name']}`, day {log_date}.\n\n"
-                + _doc("query_shape_insights", {"date": log_date}, json.dumps(evidence)))
+                + _doc("query_shape_insights", {"date": log_date}, json.dumps(evidence)) + decisions_doc)
         if trend_md:
             system += " " + TREND_INSTRUCTIONS.format(pct=alerts["thresholds"]["increase_pct"])
             user += "\n\n" + _doc("trend_alerts", {"date": log_date, "baselines": "n-1,n-8"},
                                   json.dumps(trend_alerts.model_view(alerts), default=str))
         user += "\n\n" + body
-        summary = _finish_cluster_summary(llm, system, user, trend_md, allowed_cves=_report_cves(results))
+        summary = _finish_cluster_summary(llm, system, user, trend_md, allowed_cves=_report_cves(results),
+                                          decisions=merged, rules=rules)
         cluster_uri = store.put_text(layout.cluster_report(log_date, "cluster-summary.md"),
                                      summary, "text/markdown; charset=utf-8")
     if want_summary and source in ("node_reports", "both"):
         try:
-            node_reports_uri = cluster_summary_from_node_reports(store, layout, llm, config, log_date, results)
+            node_reports_uri = cluster_summary_from_node_reports(store, layout, llm, config, log_date, results,
+                                                                 rules=rules)
         except Exception as exc:
             if source == "node_reports":
                 raise
@@ -1131,7 +1189,8 @@ def run(config: dict, log_date: str, store=None, llm=None, summary_only: bool = 
                                        ("catalog_name", "catalog_version", "refreshed_at", "coverage_note")},
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "node_count": len(nodes), "expected_node_count": expected,
-        "reports": [{k: v for k, v in r.items() if k != "report_md"} for r in results],
+        "priority_rules_version": rules.get("version"),
+        "reports": [{k: v for k, v in r.items() if k not in {"report_md", "priority_decisions"}} for r in results],
         "cluster_summary": cluster_uri, "cluster_summary_source": source,
         "cluster_summary_from_node_reports": node_reports_uri, "failed": failed,
         "trend_alerts": trend_uri,

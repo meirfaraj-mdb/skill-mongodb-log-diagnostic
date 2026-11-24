@@ -29,7 +29,7 @@ SHRINK_ORDER = ("query_stats", "index_stats", "n-8", "n-1", "precomputed_diff", 
                 "offline_mongodb_server_cves", "resource_investigation", "current")
 # Small documents computed from the FULL extract (the only place the minute timeline and hot-document
 # evidence survive). Reduced only after every other document reached the last level.
-PROTECTED = ("concurrency_findings",)
+PROTECTED = ("concurrency_findings", "priority_decisions")
 # Removed entirely only after every level failed, in this order. ``current`` and ``concurrency_findings``
 # are never dropped.
 DROP_ORDER = ("index_stats", "query_stats", "n-8", "n-1", "precomputed_diff")
