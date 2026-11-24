@@ -2,13 +2,14 @@
 
 Bedrock and direct Anthropic use their respective SDKs; a direct Anthropic endpoint override
 (MONGODB_LOG_DIAG_ANTHROPIC_BASE_URL) uses the standard library and streams by default.
-Vertex uses plain REST over google-auth + requests for every model:
-Claude -> rawPredict, Gemini -> generateContent (Vertex AI API v1).
-No google-genai SDK is required.
+Vertex uses plain REST over google-auth + requests for every model and streams by default:
+Claude -> streamRawPredict, Gemini -> streamGenerateContent?alt=sse (rawPredict / generateContent
+when MONGODB_LOG_DIAG_VERTEX_STREAM=false). No google-genai SDK is required.
 Report generation may continue when a model reaches its output token limit.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import subprocess
@@ -132,27 +133,53 @@ class VertexLLM:
             from google.auth.transport.requests import AuthorizedSession
             creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
             self.session = AuthorizedSession(creds)
+        # Non-streamed calls send nothing until the whole report is generated, so an egress gateway or
+        # proxy idle timeout (Agent Engine gateway, corporate proxy, load balancer) cuts long reports.
+        # Streaming sends the answer as it is written. The timeout is the longest silence between bytes.
+        self.timeout = int(config.get("vertex_timeout_seconds") or 900)
+        if self.timeout <= 0:
+            raise ValueError("vertex_timeout_seconds must be positive")
+        self.stream = _vertex_stream_enabled(config) and _session_supports_stream(self.session)
+        logger.info("Vertex client publisher=%s model=%s streaming=%s timeout_seconds=%d",
+                    self.publisher, self.model, self.stream, self.timeout)
 
-    def _url(self) -> str:
-        """Claude -> rawPredict, Gemini -> generateContent (Vertex AI REST v1)."""
+    def _url(self, stream: bool | None = None) -> str:
+        """Claude -> (stream)RawPredict, Gemini -> (stream)GenerateContent (Vertex AI REST v1)."""
+        stream = self.stream if stream is None else stream
         host = "aiplatform.googleapis.com" if self.location == "global" else f"{self.location}-aiplatform.googleapis.com"
-        method = "rawPredict" if self.is_claude else "generateContent"
+        if self.is_claude:
+            method = "streamRawPredict" if stream else "rawPredict"
+        else:
+            method = "streamGenerateContent?alt=sse" if stream else "generateContent"
         return (f"https://{host}/v1/projects/{self.project}/locations/{self.location}"
                 f"/publishers/{self.publisher}/models/{self.model}:{method}")
 
     def _post(self, body: dict) -> dict:
         """Send a Vertex request without logging prompts or arbitrary headers."""
         url = self._url()
+        stream = self.stream
         started = time.monotonic()
-        logger.info("Vertex request starting project=%s location=%s publisher=%s model=%s endpoint=%s",
-                    self.project, self.location, self.publisher, self.model, url)
+        logger.info("Vertex request starting project=%s location=%s publisher=%s model=%s endpoint=%s stream=%s",
+                    self.project, self.location, self.publisher, self.model, url, stream)
         try:
-            resp = self.session.post(url, json=body, timeout=900)
+            if stream:
+                body = {**body, "stream": True} if self.is_claude else body
+                # (connect, read): read is the maximum silence between two streamed chunks, not a total.
+                resp = self.session.post(url, json=body, timeout=(30, self.timeout), stream=True)
+            else:
+                resp = self.session.post(url, json=body, timeout=self.timeout)
         except Exception as exc:
             logger.error("Vertex request transport failed project=%s location=%s model=%s endpoint=%s elapsed_seconds=%.1f error_type=%s",
                          self.project, self.location, self.model, url,
                          time.monotonic() - started, type(exc).__name__)
             raise
+        try:
+            return self._handle_response(resp, url, started, stream)
+        finally:
+            if stream and hasattr(resp, "close"):
+                resp.close()
+
+    def _handle_response(self, resp, url: str, started: float, stream: bool) -> dict:
         headers = getattr(resp, "headers", {}) or {}
         content_type = headers.get("Content-Type")
         content_length = headers.get("Content-Length")
@@ -170,19 +197,54 @@ class VertexLLM:
                     error_message = str(error.get("message", ""))[:500]
             except (ValueError, TypeError):
                 pass
-            logger.error("Vertex request failed project=%s location=%s publisher=%s model=%s endpoint=%s http_status=%s elapsed_seconds=%.1f content_type=%s content_length=%s response_bytes=%s request_id=%s error_code=%s error_status=%s error_message=%s",
+            hint = ""
+            if resp.status_code in (502, 504) and not stream:
+                hint = (" hint=a gateway/proxy timed out waiting for the full answer; enable streaming "
+                        "(unset MONGODB_LOG_DIAG_VERTEX_STREAM) or lower MONGODB_LOG_DIAG_REPORT_MAX_TOKENS")
+            elif resp.status_code in (502, 504):
+                hint = (" hint=a gateway/proxy timed out before the first streamed byte; raise its "
+                        "request/idle timeout or lower MONGODB_LOG_DIAG_REPORT_MAX_INPUT_CHARS")
+            logger.error("Vertex request failed project=%s location=%s publisher=%s model=%s endpoint=%s http_status=%s elapsed_seconds=%.1f content_type=%s content_length=%s response_bytes=%s request_id=%s error_code=%s error_status=%s error_message=%s%s",
                          self.project, self.location, self.publisher, self.model, url,
                          resp.status_code, elapsed, content_type, content_length,
-                         response_bytes, request_id, error_code, error_status, error_message)
+                         response_bytes, request_id, error_code, error_status, error_message, hint)
             raise RuntimeError(
                 f"Vertex AI HTTP {resp.status_code} project={self.project} location={self.location} "
                 f"model={self.model} endpoint={url} request_id={request_id} "
-                f"error_status={error_status} error_message={error_message}"
+                f"error_status={error_status} error_message={error_message}{hint}"
             )
+        if stream:
+            try:
+                data = self._read_stream(resp, content_type)
+            except Exception as exc:  # truncated stream, read timeout, reset, stream error event
+                logger.error("Vertex stream failed project=%s location=%s model=%s endpoint=%s elapsed_seconds=%.1f request_id=%s error_type=%s",
+                             self.project, self.location, self.model, url,
+                             time.monotonic() - started, request_id, type(exc).__name__)
+                raise
+        else:
+            data = resp.json()
         logger.info("Vertex request complete project=%s location=%s publisher=%s model=%s http_status=%s elapsed_seconds=%.1f request_id=%s",
                     self.project, self.location, self.publisher, self.model,
-                    resp.status_code, elapsed, request_id)
-        return resp.json()
+                    resp.status_code, time.monotonic() - started, request_id)
+        return data
+
+    def _read_stream(self, resp, content_type: str | None) -> dict:
+        """Rebuild the non-streamed response shape from the SSE stream (same dict as rawPredict /
+        generateContent), so generate() and its max-token continuation are unchanged."""
+        if "text/event-stream" not in (content_type or "text/event-stream").lower():
+            # A proxy buffered the stream and returned one JSON document (Gemini: a JSON array of chunks).
+            data = resp.json()
+            if self.is_claude:
+                return data
+            return _assemble_gemini_chunks(data if isinstance(data, list) else [data])
+        lines = (raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+                 for raw in resp.iter_lines())
+        lines = (line.rstrip("\r") for line in lines)
+        if self.is_claude:
+            message = _EndpointMessages._assemble_stream(lines)
+            return {"content": [{"type": b.type, "text": b.text} for b in message.content],
+                    "stop_reason": message.stop_reason, "usage": message.usage}
+        return _assemble_gemini_chunks(_sse_payloads(lines))
 
     def generate(self, system_prompt: str, user_content: str) -> str:
         parts = []
@@ -228,6 +290,79 @@ class VertexLLM:
                 {"role": "user", "parts": [{"text": CONTINUE}]},
             ])
         return "".join(parts)
+
+
+def _vertex_stream_enabled(config: dict) -> bool:
+    """MONGODB_LOG_DIAG_VERTEX_STREAM (default true)."""
+    value = config.get("vertex_stream")
+    if value is None:
+        from .env_bool import parse_bool_env
+        return parse_bool_env("MONGODB_LOG_DIAG_VERTEX_STREAM", default=True)
+    return bool(value)
+
+
+def _session_supports_stream(session) -> bool:
+    """requests/AuthorizedSession accept stream=True; minimal test stubs without it get one JSON reply."""
+    try:
+        params = inspect.signature(session.post).parameters
+    except (TypeError, ValueError):
+        return True
+    return "stream" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _sse_payloads(lines):
+    """JSON payloads of a server-sent-event stream (comments/keepalives skipped, [DONE] ends it)."""
+    data_parts = []
+    for line in lines:
+        if line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            data_parts.append(line[5:].lstrip())
+        elif line == "" and data_parts:
+            raw, data_parts = "\n".join(data_parts), []
+            if raw.strip() == "[DONE]":
+                return
+            yield json.loads(raw)
+    if data_parts:
+        raw = "\n".join(data_parts)
+        if raw.strip() != "[DONE]":
+            yield json.loads(raw)
+
+
+def _assemble_gemini_chunks(chunks) -> dict:
+    """Merge streamGenerateContent chunks into one generateContent response.
+
+    A stream that ends without a finishReason was cut (gateway, proxy, reset): it raises instead of
+    returning half a report.
+    """
+    texts, finish, usage, feedback, seen = [], None, None, None, False
+    for chunk in chunks:
+        seen = True
+        if not isinstance(chunk, dict):
+            raise ValueError("Gemini stream returned a non-object chunk")
+        if isinstance(chunk.get("error"), dict):
+            err = chunk["error"]
+            raise RuntimeError(f"Vertex Gemini stream error error_status={str(err.get('status', ''))[:80]} "
+                               f"error_message={str(err.get('message', ''))[:500]}")
+        candidate = (chunk.get("candidates") or [{}])[0]
+        for part in (candidate.get("content") or {}).get("parts", []) or []:
+            if "text" in part:
+                texts.append({"text": part["text"], **({"thought": True} if part.get("thought") else {})})
+        finish = candidate.get("finishReason") or finish
+        usage = chunk.get("usageMetadata") or usage
+        feedback = chunk.get("promptFeedback") or feedback
+    if not seen:
+        raise ConnectionError("Gemini stream ended without any chunk")
+    if finish is None and not (feedback or {}).get("blockReason"):
+        raise ConnectionError("Gemini stream ended before finishReason")
+    answer = "".join(p["text"] for p in texts if not p.get("thought"))
+    thought = "".join(p["text"] for p in texts if p.get("thought"))
+    parts = ([{"text": thought, "thought": True}] if thought else []) + ([{"text": answer}] if answer else [])
+    data = {"candidates": [{"content": {"role": "model", "parts": parts}, "finishReason": finish}],
+            "usageMetadata": usage}
+    if feedback:
+        data["promptFeedback"] = feedback
+    return data
 
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}

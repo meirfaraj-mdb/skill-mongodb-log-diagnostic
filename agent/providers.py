@@ -54,6 +54,7 @@ _ENV_FIELDS = {
     "aws_region": "AWS_REGION", "gcp_project": "GCP_PROJECT",
     "anthropic_base_url": "ANTHROPIC_BASE_URL",
     "anthropic_stream": "ANTHROPIC_STREAM",
+    "vertex_stream": "VERTEX_STREAM", "vertex_timeout_seconds": "VERTEX_TIMEOUT_SECONDS",
 }
 _ENV_FIELDS.update({
     "observability_enabled": "OBSERVABILITY_ENABLED", "deployment_type": "DEPLOYMENT_TYPE",
@@ -104,13 +105,13 @@ _BOOL_FIELDS = {"cluster_summary", "observability_enabled", "index_stats_enabled
                 "metrics_graphs_enabled", "resource_investigation_enabled", "advisor_appendix_enabled",
                 "concurrency_findings_enabled", "concurrency_graphs_enabled",
                 "query_stats_skip_existing", "metrics_skip_existing", "query_shape_split_to_nodes", "notify_after_report",
-                "jira_comment_on_existing", "anthropic_stream"}
+                "jira_comment_on_existing", "anthropic_stream", "vertex_stream"}
 _JSON_FIELDS = {"observability_sources": dict, "atlas_process_ids": dict, "ops_manager_host_ids": dict,
                 "query_plan_requests": list, "metrics_graph_groups": list, "metrics_graph_config": dict,
                 "resource_thresholds": dict, "concurrency_thresholds": dict, "notify_env_overrides": dict, "jira_priority_map": dict,
                 "jira_extra_fields": dict}
 _INT_FIELDS = {"http_timeout_seconds", "max_retries", "slow_ms", "expected_node_count",
-               "report_max_tokens", "report_max_input_chars"}
+               "report_max_tokens", "report_max_input_chars", "vertex_timeout_seconds"}
 _INT_FIELDS.update({"mongodb_timeout_ms", "mongodb_max_time_ms", "observability_max_rows",
                     "index_stats_max_collections", "query_shape_window_hours", "query_stats_max_summaries",
                     "observability_api_max_pages", "trend_increase_pct", "trend_min_abs_increase",
