@@ -158,5 +158,76 @@ class EnforcementTest(unittest.TestCase):
             pr.validate_rules(bad)
 
 
+class CorrectionTest(unittest.TestCase):
+    """The model's priority is overwritten when a rule fixes it (P0 for 1,316 auth failures)."""
+    def setUp(self):
+        self.rules = rules()
+
+    REPORT = "\n".join([
+        "## 1. Executive summary", "",
+        "- P0: Authentication failures (1,316 in the log day) block client logins.", "",
+        "## 3. Prioritized findings", "",
+        "| Priority | Finding | Evidence | Impact | Recommended resolution | Confidence |",
+        "|---|---|---|---|---|---|",
+        "| **P0** | Authentication failures | 1,316 AuthenticationFailed (code 18) | Logins fail | Check users | High |",
+        "| P1 | Slow find app.users ABCD1234 | 999 ops | Latency | Index candidate | Medium |",
+        "| P1 | CPU saturation | 95% normalized CPU | Latency | Investigate | Medium |", "",
+        "### P0 — Authentication failures", "", "Narrative about P0 authentication failures stays as is.", ""])
+
+    def decisions(self):
+        return pr.evaluate(extraction([slow("app.users", 999, 3000)],
+                                      [auth_group(1316, "Authentication failed")]), self.rules)
+
+    def test_1316_auth_failures_are_p2(self):
+        a = self.decisions()["auth_failures"][0]
+        self.assertEqual((a["count"], a["placement"], a["priority"]), (1316, pr.ISSUES, "P2"))
+
+    def test_apply_rewrites_model_priorities(self):
+        out, res = pr.apply(self.REPORT, self.decisions(), self.rules)
+        self.assertIn("| **P2** | Authentication failures", out)
+        self.assertIn("- P2: Authentication failures", out)
+        self.assertIn("### P2 — Authentication failures", out)
+        self.assertIn("| P3 | Slow find app.users ABCD1234", out)
+        self.assertIn("| P1 | CPU saturation", out)  # no rule -> untouched
+        self.assertIn("Narrative about P0 authentication failures stays as is.", out)
+        self.assertNotRegex(out, r"\bP0\b.*[Aa]uthentication failures \(|\| \*\*P0")
+        self.assertEqual(len(res["corrected"]), 4)
+        self.assertEqual(res["warnings"], [])
+
+    def test_ambiguous_line_is_left_for_audit(self):
+        d = pr.evaluate(extraction(groups=[auth_group(1316, "Authentication failed"),
+                                           auth_group(6000, "Checking authorization failed")]), self.rules)
+        line = "| P0 | Authentication and authorization failures | x | x | x | x |"
+        out, fixes = pr.correct(line, d, self.rules)
+        self.assertEqual((out, fixes), (line, []))
+
+    def test_merge_keeps_most_severe_node_priority(self):
+        a = pr.evaluate(extraction(groups=[auth_group(50, "Authentication failed")]), self.rules)
+        b = pr.evaluate(extraction(groups=[auth_group(1316, "Authentication failed")]), self.rules)
+        c = pr.evaluate(extraction(groups=[auth_group(6000, "Authentication failed")]), self.rules)
+        m = pr.merge_decisions([a, b])["auth_failures"][0]
+        self.assertEqual((m["placement"], m["priority"], m["count"]), (pr.ISSUES, "P2", 1366))
+        m = pr.merge_decisions([a, b, c])["auth_failures"][0]
+        self.assertEqual((m["priority"], m["node_counts"]), ("P1", [50, 1316, 6000]))
+        m = pr.merge_decisions([a, a])["auth_failures"][0]
+        self.assertEqual((m["placement"], m["priority"]), (pr.APPENDIX_ONLY, None))
+
+
+class ReportStageWiringTest(unittest.TestCase):
+    """Regression for 2bff181, which dropped the rules from the report stage."""
+    def test_report_stage_uses_priority_rules(self):
+        import inspect
+        from agent import report_stage
+        src = inspect.getsource(report_stage)
+        for needle in ("priority_rules.render_prompt(rules)", "priority_rules.evaluate(",
+                       "priority_rules.apply(", '_doc("priority_decisions"', "merge_decisions(",
+                       "priority-decisions.json"):
+            self.assertIn(needle, src)
+
+    def test_budget_never_shrinks_decisions_first(self):
+        from agent import report_budget
+        self.assertIn("priority_decisions", report_budget.PROTECTED)
+
+
 if __name__ == "__main__":
     unittest.main()

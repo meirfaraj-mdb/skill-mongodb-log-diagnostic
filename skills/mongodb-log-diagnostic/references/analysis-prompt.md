@@ -46,7 +46,7 @@ Use a table with these columns:
 | Priority | Finding | Evidence | Impact | Recommended resolution | Confidence |
 |---|---|---|---|---|---|
 
-Prioritize P0, P1, and P2 findings. Keep independent defects separate instead of combining unrelated causes.
+Prioritize findings by impact; when a priority_decisions document is supplied, its priority and placement are mandatory (see Report priority rules). Keep independent defects separate instead of combining unrelated causes.
 
 ## 4. Confirmed error findings
 For each repeated or material error, explain the MongoDB behavior, likely application or deployment implication, remediation, and validation steps. Include authentication failures, authorization failures, duplicate-key errors, index-build failures, WiredTiger/storage warnings, replication/availability signals, and connection/network errors when present.
